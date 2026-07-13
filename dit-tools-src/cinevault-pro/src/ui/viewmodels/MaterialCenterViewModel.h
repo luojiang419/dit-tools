@@ -23,6 +23,7 @@ class MaterialCenterViewModel : public QObject {
     Q_PROPERTY(QVariantList projectOptions READ projectOptions NOTIFY filtersChanged)
     Q_PROPERTY(QVariantList sourceOptions READ sourceOptions NOTIFY filtersChanged)
     Q_PROPERTY(QVariantList assetTypeOptions READ assetTypeOptions NOTIFY filtersChanged)
+    Q_PROPERTY(int assetTypeFilter READ assetTypeFilter NOTIFY filtersChanged)
     Q_PROPERTY(QVariantList analysisStatusOptions READ analysisStatusOptions CONSTANT)
     Q_PROPERTY(QVariantList confirmationStatusOptions READ confirmationStatusOptions CONSTANT)
     Q_PROPERTY(QString selectedVideoKey READ selectedVideoKey NOTIFY selectionChanged)
@@ -39,6 +40,7 @@ class MaterialCenterViewModel : public QObject {
     Q_PROPERTY(QString selectedSummary READ selectedSummary NOTIFY selectionChanged)
     Q_PROPERTY(QVariantList selectedKeywords READ selectedKeywords NOTIFY selectionChanged)
     Q_PROPERTY(QVariantList selectedScenes READ selectedScenes NOTIFY selectionChanged)
+    Q_PROPERTY(QVariantList selectedDimensionAnalyses READ selectedDimensionAnalyses NOTIFY selectionChanged)
     Q_PROPERTY(QVariantList selectedFrames READ selectedFrames NOTIFY selectionChanged)
     Q_PROPERTY(QString selectedFrameSearchStatus READ selectedFrameSearchStatus NOTIFY selectionChanged)
     Q_PROPERTY(int selectedFrameCount READ selectedFrameCount NOTIFY selectionChanged)
@@ -61,6 +63,11 @@ class MaterialCenterViewModel : public QObject {
     Q_PROPERTY(QString analyzeButtonText READ analyzeButtonText NOTIFY analysisProgressChanged)
     Q_PROPERTY(bool canAnalyzeSelected READ canAnalyzeSelected NOTIFY analysisProgressChanged)
     Q_PROPERTY(bool canConfirmSelected READ canConfirmSelected NOTIFY analysisProgressChanged)
+    Q_PROPERTY(bool selectedDimensionAnalysisBusy READ selectedDimensionAnalysisBusy NOTIFY dimensionAnalysisChanged)
+    Q_PROPERTY(QString selectedDimensionAnalysisText READ selectedDimensionAnalysisText NOTIFY dimensionAnalysisChanged)
+    Q_PROPERTY(QString selectedDimensionAnalysisError READ selectedDimensionAnalysisError NOTIFY dimensionAnalysisChanged)
+    Q_PROPERTY(bool canAnalyzeSelectedDimensions READ canAnalyzeSelectedDimensions NOTIFY dimensionAnalysisChanged)
+    Q_PROPERTY(bool canAnalyzeVisibleDimensions READ canAnalyzeVisibleDimensions NOTIFY dimensionAnalysisChanged)
     Q_PROPERTY(bool selectedIsVideo READ selectedIsVideo NOTIFY selectionChanged)
     Q_PROPERTY(int queuedAnalysisCount READ queuedAnalysisCount NOTIFY analysisProgressChanged)
     Q_PROPERTY(bool canConfirmVisible READ canConfirmVisible NOTIFY statusChanged)
@@ -80,6 +87,7 @@ public:
     QVariantList projectOptions() const;
     QVariantList sourceOptions() const;
     QVariantList assetTypeOptions() const;
+    int assetTypeFilter() const;
     QVariantList analysisStatusOptions() const;
     QVariantList confirmationStatusOptions() const;
     QString selectedVideoKey() const;
@@ -96,6 +104,7 @@ public:
     QString selectedSummary() const;
     QVariantList selectedKeywords() const;
     QVariantList selectedScenes() const;
+    QVariantList selectedDimensionAnalyses() const;
     QVariantList selectedFrames() const;
     QString selectedFrameSearchStatus() const;
     int selectedFrameCount() const;
@@ -118,6 +127,11 @@ public:
     QString analyzeButtonText() const;
     bool canAnalyzeSelected() const;
     bool canConfirmSelected() const;
+    bool selectedDimensionAnalysisBusy() const;
+    QString selectedDimensionAnalysisText() const;
+    QString selectedDimensionAnalysisError() const;
+    bool canAnalyzeSelectedDimensions() const;
+    bool canAnalyzeVisibleDimensions() const;
     bool selectedIsVideo() const;
     int queuedAnalysisCount() const;
     bool canConfirmVisible() const;
@@ -136,6 +150,8 @@ public:
     Q_INVOKABLE void syncCurrentProject();
     Q_INVOKABLE void rebuildGlobalIndex();
     Q_INVOKABLE void analyzeSelected();
+    Q_INVOKABLE void analyzeSelectedDimensions(const QVariantList &dimensions);
+    Q_INVOKABLE void analyzeVisibleDimensions(const QVariantList &dimensions);
     Q_INVOKABLE void analyzeVisiblePending();
     Q_INVOKABLE void analyzeVisibleAll();
     Q_INVOKABLE void confirmVideo(const QString &videoKey);
@@ -154,6 +170,7 @@ signals:
     void filtersChanged();
     void selectionChanged();
     void analysisProgressChanged();
+    void dimensionAnalysisChanged();
 
 private:
     struct AnalysisProgressState {
@@ -161,6 +178,12 @@ private:
         QString detail;
         QString errorMessage;
         JobState state = JobState::Completed;
+    };
+
+    struct DimensionProgressState {
+        bool running = false;
+        QString detail;
+        QString errorMessage;
     };
 
     GlobalVideoAsset assetByVideoKey(const QString &videoKey) const;
@@ -173,6 +196,7 @@ private:
     void refreshDetail();
     void setMessage(const QString &message);
     AnalysisProgressState selectedProgressState() const;
+    DimensionProgressState selectedDimensionProgressState() const;
 
     MaterialCenterQueryService *m_queryService = nullptr;
     MaterialCatalogSyncService *m_syncService = nullptr;
@@ -193,6 +217,7 @@ private:
     QVariantList m_assetTypeOptions;
     QString m_message;
     QHash<QString, AnalysisProgressState> m_analysisProgressByVideoKey;
+    QHash<QString, DimensionProgressState> m_dimensionProgressByVideoKey;
     QHash<QString, VideoAnalysisDetail> m_detailCache;
     QVariantList m_selectedAllFramesCache;
     QVariantList m_selectedFramesCache;

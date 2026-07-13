@@ -25,6 +25,29 @@ qint64 progressFor(int processed, int total)
     return qBound<qint64>(qint64{1}, (static_cast<qint64>(processed) * 100) / static_cast<qint64>(total), qint64{100});
 }
 
+JobSubject sourceRootSubject(qint64 sourceRootId, const QString &sourceName, const QString &sourcePath)
+{
+    JobSubject subject;
+    subject.kind = QStringLiteral("sourceRoot");
+    subject.key = QString::number(sourceRootId);
+    subject.name = sourceName;
+    subject.path = sourcePath;
+    subject.typeLabel = QStringLiteral("素材源");
+    return subject;
+}
+
+JobProgressContext itemProgressContext(const QString &stepLabel, qint64 current, qint64 total, const QString &unitLabel)
+{
+    JobProgressContext context;
+    context.currentStep = 1;
+    context.totalSteps = 1;
+    context.stepLabel = stepLabel;
+    context.currentItem = current;
+    context.totalItems = total;
+    context.unitLabel = unitLabel;
+    return context;
+}
+
 }
 
 MediaTaskService::MediaTaskService(DatabaseManager *databaseManager,
@@ -47,16 +70,17 @@ void MediaTaskService::startForSourceRoot(qint64 sourceRootId)
     }
 
     QSqlQuery query(m_databaseManager->database());
-    query.prepare(QStringLiteral("SELECT name, video_count, audio_count, image_count FROM source_root WHERE id = ?"));
+    query.prepare(QStringLiteral("SELECT name, path, video_count, audio_count, image_count FROM source_root WHERE id = ?"));
     query.addBindValue(sourceRootId);
     if (!query.exec() || !query.next()) {
         return;
     }
 
     const auto sourceName = query.value(0).toString();
-    const auto videoCount = query.value(1).toLongLong();
-    const auto audioCount = query.value(2).toLongLong();
-    const auto imageCount = query.value(3).toLongLong();
+    const auto sourcePath = query.value(1).toString();
+    const auto videoCount = query.value(2).toLongLong();
+    const auto audioCount = query.value(3).toLongLong();
+    const auto imageCount = query.value(4).toLongLong();
     const bool needsMetadata = (videoCount + audioCount + imageCount) > 0;
     const bool needsThumbnails = (videoCount + imageCount) > 0;
 
@@ -70,13 +94,17 @@ void MediaTaskService::startForSourceRoot(qint64 sourceRootId)
         metadataJobId = m_jobEngine->createJob(JobType::Metadata,
                                                QStringLiteral("读取元数据 %1").arg(sourceName),
                                                QStringLiteral("准备读取视频/音频/图片技术参数"),
-                                               sourceRootId);
+                                               sourceRootId,
+                                               sourceRootSubject(sourceRootId, sourceName, sourcePath),
+                                               itemProgressContext(QStringLiteral("读取元数据"), 0, videoCount + audioCount + imageCount, QStringLiteral("个文件")));
     }
     if (needsThumbnails) {
         thumbnailJobId = m_jobEngine->createJob(JobType::Thumbnail,
                                                 QStringLiteral("生成缩略图 %1").arg(sourceName),
                                                 QStringLiteral("准备生成视频/图片缩略图"),
-                                                sourceRootId);
+                                                sourceRootId,
+                                                sourceRootSubject(sourceRootId, sourceName, sourcePath),
+                                                itemProgressContext(QStringLiteral("生成缩略图"), 0, videoCount + imageCount, QStringLiteral("张")));
     }
 
     const auto projectDatabasePath = m_databaseManager->databaseFilePath();
@@ -84,6 +112,53 @@ void MediaTaskService::startForSourceRoot(qint64 sourceRootId)
         runMediaJobs(sourceRootId, sourceName, projectDatabasePath, metadataJobId, thumbnailJobId);
     });
     Q_UNUSED(future);
+}
+
+void MediaTaskService::recoverStaleThumbnails()
+{
+    if (!m_databaseManager || !m_databaseManager->hasOpenProject() || !m_jobEngine) {
+        return;
+    }
+
+    QSqlQuery query(m_databaseManager->database());
+    query.prepare(QStringLiteral(
+        "SELECT sr.id, sr.name, sr.path, COUNT(*) "
+        "FROM thumbnail th "
+        "JOIN asset_file af ON af.id = th.asset_id "
+        "JOIN source_root sr ON sr.id = af.source_root_id "
+        "WHERE th.status = ? "
+        "AND COALESCE(th.image_path, '') = '' "
+        "AND af.asset_type IN (?, ?) "
+        "GROUP BY sr.id, sr.name, sr.path "
+        "ORDER BY sr.id"));
+    query.addBindValue(static_cast<int>(ThumbnailStatus::Running));
+    query.addBindValue(static_cast<int>(AssetType::Video));
+    query.addBindValue(static_cast<int>(AssetType::Image));
+    if (!query.exec()) {
+        return;
+    }
+
+    const auto projectDatabasePath = m_databaseManager->databaseFilePath();
+    while (query.next()) {
+        const auto sourceRootId = query.value(0).toLongLong();
+        const auto sourceName = query.value(1).toString();
+        const auto sourcePath = query.value(2).toString();
+        const auto staleCount = query.value(3).toLongLong();
+        if (sourceRootId <= 0 || staleCount <= 0) {
+            continue;
+        }
+
+        const auto jobId = m_jobEngine->createJob(JobType::Thumbnail,
+                                                  QStringLiteral("恢复缩略图 %1").arg(sourceName),
+                                                  QStringLiteral("发现 %1 张中断的缩略图，准备重新生成").arg(staleCount),
+                                                  sourceRootId,
+                                                  sourceRootSubject(sourceRootId, sourceName, sourcePath),
+                                                  itemProgressContext(QStringLiteral("恢复缩略图"), 0, staleCount, QStringLiteral("张")));
+        auto future = QtConcurrent::run([this, sourceRootId, sourceName, projectDatabasePath, jobId]() {
+            runStaleThumbnailRecovery(sourceRootId, sourceName, projectDatabasePath, jobId);
+        });
+        Q_UNUSED(future);
+    }
 }
 
 QVector<AssetFile> MediaTaskService::fetchAssets(QSqlDatabase &db, qint64 sourceRootId, const QList<AssetType> &assetTypes, QString *errorMessage) const
@@ -205,7 +280,8 @@ bool MediaTaskService::runMetadataJob(QSqlDatabase &db, qint64 jobId, const QVec
         ++processed;
         updateJob(jobId,
                   progressFor(processed, assets.size()),
-                  QStringLiteral("已读取 %1/%2 个文件，失败 %3 个").arg(processed).arg(assets.size()).arg(failed));
+                  QStringLiteral("已读取 %1/%2 个文件，失败 %3 个").arg(processed).arg(assets.size()).arg(failed),
+                  itemProgressContext(QStringLiteral("读取元数据"), processed, assets.size(), QStringLiteral("个文件")));
     }
 
     if (failed == assets.size()) {
@@ -234,16 +310,18 @@ bool MediaTaskService::runThumbnailJob(QSqlDatabase &db,
         return true;
     }
 
-    QString stateError;
-    if (!markThumbnailsRunning(db, assets, &stateError)) {
-        failJob(jobId, QStringLiteral("缩略图状态初始化失败：%1").arg(stateError));
-        return false;
-    }
-    notifyCatalogChanged();
-
     int processed = 0;
     int failed = 0;
     for (const auto &asset : assets) {
+        QString stateError;
+        if (!markThumbnailRunning(db, asset.id, &stateError)) {
+            failJob(jobId, QStringLiteral("缩略图状态写入失败：%1").arg(stateError));
+            return false;
+        }
+        if (processed == 0) {
+            notifyCatalogChanged();
+        }
+
         ThumbnailRequest request;
         request.assetId = asset.id;
         request.sourcePath = asset.absolutePath;
@@ -263,7 +341,8 @@ bool MediaTaskService::runThumbnailJob(QSqlDatabase &db,
         ++processed;
         updateJob(jobId,
                   progressFor(processed, assets.size()),
-                  QStringLiteral("已生成 %1/%2 张缩略图，失败 %3 张").arg(processed).arg(assets.size()).arg(failed));
+                  QStringLiteral("已生成 %1/%2 张缩略图，失败 %3 张").arg(processed).arg(assets.size()).arg(failed),
+                  itemProgressContext(QStringLiteral("生成缩略图"), processed, assets.size(), QStringLiteral("张")));
         if ((processed % 6) == 0 || processed == assets.size()) {
             notifyCatalogChanged();
         }
@@ -280,15 +359,83 @@ bool MediaTaskService::runThumbnailJob(QSqlDatabase &db,
     return true;
 }
 
-bool MediaTaskService::markThumbnailsRunning(QSqlDatabase &db, const QVector<AssetFile> &assets, QString *errorMessage) const
+QVector<AssetFile> MediaTaskService::fetchStaleThumbnailAssets(QSqlDatabase &db, qint64 sourceRootId, QString *errorMessage) const
 {
-    if (assets.isEmpty()) {
-        return true;
+    QVector<AssetFile> assets;
+    QSqlQuery query(db);
+    query.prepare(QStringLiteral(
+        "SELECT af.id, af.source_root_id, af.name, af.extension, af.absolute_path, af.relative_path, af.parent_path, "
+        "af.asset_type, af.size_bytes, af.modified_at, af.is_readable "
+        "FROM asset_file af "
+        "JOIN thumbnail th ON th.asset_id = af.id "
+        "WHERE af.source_root_id = ? "
+        "AND af.asset_type IN (?, ?) "
+        "AND th.status = ? "
+        "AND COALESCE(th.image_path, '') = '' "
+        "ORDER BY af.id"));
+    query.addBindValue(sourceRootId);
+    query.addBindValue(static_cast<int>(AssetType::Video));
+    query.addBindValue(static_cast<int>(AssetType::Image));
+    query.addBindValue(static_cast<int>(ThumbnailStatus::Running));
+
+    if (!query.exec()) {
+        if (errorMessage) {
+            *errorMessage = query.lastError().text();
+        }
+        return assets;
     }
 
-    if (!db.transaction()) {
+    while (query.next()) {
+        AssetFile asset;
+        asset.id = query.value(0).toLongLong();
+        asset.sourceRootId = query.value(1).toLongLong();
+        asset.name = query.value(2).toString();
+        asset.extension = query.value(3).toString();
+        asset.absolutePath = query.value(4).toString();
+        asset.relativePath = query.value(5).toString();
+        asset.parentPath = query.value(6).toString();
+        asset.assetType = static_cast<AssetType>(query.value(7).toInt());
+        asset.sizeBytes = query.value(8).toLongLong();
+        asset.modifiedAt = query.value(9).toString();
+        asset.readable = query.value(10).toInt() == 1;
+        asset.thumbnailStatus = ThumbnailStatus::Running;
+        assets.append(asset);
+    }
+    return assets;
+}
+
+void MediaTaskService::runStaleThumbnailRecovery(qint64 sourceRootId,
+                                                 const QString &sourceName,
+                                                 const QString &projectDatabasePath,
+                                                 qint64 thumbnailJobId)
+{
+    Q_UNUSED(sourceName);
+
+    const auto connectionName = QStringLiteral("thumbnail_recovery_%1_%2")
+                                    .arg(sourceRootId)
+                                    .arg(reinterpret_cast<quintptr>(QThread::currentThreadId()));
+    QString errorMessage;
+    auto db = m_databaseManager->openThreadConnection(connectionName, &errorMessage);
+    if (!db.isOpen()) {
+        failJob(thumbnailJobId, errorMessage);
+        return;
+    }
+
+    const auto assets = fetchStaleThumbnailAssets(db, sourceRootId, &errorMessage);
+    if (!errorMessage.isEmpty()) {
+        failJob(thumbnailJobId, errorMessage);
+    } else {
+        runThumbnailJob(db, projectDatabasePath, sourceRootId, thumbnailJobId, assets);
+    }
+    notifyCatalogChanged();
+    m_databaseManager->closeThreadConnection(connectionName);
+}
+
+bool MediaTaskService::markThumbnailRunning(QSqlDatabase &db, qint64 assetId, QString *errorMessage) const
+{
+    if (assetId <= 0) {
         if (errorMessage) {
-            *errorMessage = db.lastError().text();
+            *errorMessage = QStringLiteral("素材 ID 无效");
         }
         return false;
     }
@@ -297,26 +444,12 @@ bool MediaTaskService::markThumbnailsRunning(QSqlDatabase &db, const QVector<Ass
     query.prepare(QStringLiteral(
         "INSERT OR REPLACE INTO thumbnail (asset_id, status, image_path, updated_at, error_message) "
         "VALUES (?, ?, '', ?, '')"));
-    const auto now = QDateTime::currentDateTime().toString(Qt::ISODate);
-
-    for (const auto &asset : assets) {
-        query.addBindValue(asset.id);
-        query.addBindValue(static_cast<int>(ThumbnailStatus::Running));
-        query.addBindValue(now);
-        if (!query.exec()) {
-            db.rollback();
-            if (errorMessage) {
-                *errorMessage = query.lastError().text();
-            }
-            return false;
-        }
-        query.finish();
-    }
-
-    if (!db.commit()) {
-        db.rollback();
+    query.addBindValue(assetId);
+    query.addBindValue(static_cast<int>(ThumbnailStatus::Running));
+    query.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODate));
+    if (!query.exec()) {
         if (errorMessage) {
-            *errorMessage = db.lastError().text();
+            *errorMessage = query.lastError().text();
         }
         return false;
     }
@@ -421,13 +554,13 @@ bool MediaTaskService::persistThumbnail(QSqlDatabase &db, const ThumbnailResult 
     return true;
 }
 
-void MediaTaskService::updateJob(qint64 jobId, qint64 progress, const QString &detail)
+void MediaTaskService::updateJob(qint64 jobId, qint64 progress, const QString &detail, const JobProgressContext &progressContext)
 {
     if (!m_jobEngine || jobId <= 0) {
         return;
     }
-    QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, jobId, progress, detail]() {
-        engine->updateJob(jobId, progress, detail);
+    QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, jobId, progress, detail, progressContext]() {
+        engine->updateJob(jobId, progress, detail, progressContext);
     }, Qt::QueuedConnection);
 }
 

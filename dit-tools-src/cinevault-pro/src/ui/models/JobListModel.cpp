@@ -2,6 +2,22 @@
 
 #include "shared/Formatters.h"
 
+#include <algorithm>
+
+namespace {
+int jobStateDisplayRank(JobState state)
+{
+    switch (state) {
+    case JobState::Running: return 0;
+    case JobState::Pending: return 1;
+    case JobState::Failed: return 2;
+    case JobState::Completed: return 3;
+    case JobState::Cancelled: return 4;
+    }
+    return 5;
+}
+}
+
 JobListModel::JobListModel(QObject *parent)
     : QAbstractListModel(parent)
 {
@@ -28,6 +44,16 @@ QVariant JobListModel::data(const QModelIndex &index, int role) const
     case StateLabelRole: return Formatters::jobStateLabel(item.state);
     case SourceRootIdRole: return item.sourceRootId;
     case ErrorRole: return item.errorMessage;
+    case JobTypeLabelRole: return Formatters::jobTypeLabel(item.type);
+    case SubjectKindRole: return item.subject.kind;
+    case SubjectKeyRole: return item.subject.key;
+    case SubjectNameRole: return item.subject.name;
+    case SubjectPathRole: return item.subject.path;
+    case SubjectThumbnailPathRole: return item.subject.thumbnailPath;
+    case SubjectTypeLabelRole: return item.subject.typeLabel;
+    case ProgressLabelRole: return Formatters::jobProgressLabel(item.progressContext);
+    case ProgressShortLabelRole: return Formatters::jobProgressShortLabel(item.progressContext);
+    case StepLabelRole: return item.progressContext.stepLabel;
     default: return {};
     }
 }
@@ -42,7 +68,17 @@ QHash<int, QByteArray> JobListModel::roleNames() const
         {StateRole, "state"},
         {StateLabelRole, "stateLabel"},
         {SourceRootIdRole, "sourceRootId"},
-        {ErrorRole, "errorMessage"}
+        {ErrorRole, "errorMessage"},
+        {JobTypeLabelRole, "jobTypeLabel"},
+        {SubjectKindRole, "subjectKind"},
+        {SubjectKeyRole, "subjectKey"},
+        {SubjectNameRole, "subjectName"},
+        {SubjectPathRole, "subjectPath"},
+        {SubjectThumbnailPathRole, "subjectThumbnailPath"},
+        {SubjectTypeLabelRole, "subjectTypeLabel"},
+        {ProgressLabelRole, "progressLabel"},
+        {ProgressShortLabelRole, "progressShortLabel"},
+        {StepLabelRole, "stepLabel"}
     };
 }
 
@@ -50,5 +86,21 @@ void JobListModel::setItems(const QVector<Job> &items)
 {
     beginResetModel();
     m_items = items;
+    sortForDisplay(m_items);
     endResetModel();
+}
+
+void JobListModel::sortForDisplay(QVector<Job> &items)
+{
+    std::stable_sort(items.begin(), items.end(), [](const Job &left, const Job &right) {
+        const auto leftRank = jobStateDisplayRank(left.state);
+        const auto rightRank = jobStateDisplayRank(right.state);
+        if (leftRank != rightRank) {
+            return leftRank < rightRank;
+        }
+        if (left.updatedAt.isValid() && right.updatedAt.isValid() && left.updatedAt != right.updatedAt) {
+            return left.updatedAt > right.updatedAt;
+        }
+        return left.id > right.id;
+    });
 }

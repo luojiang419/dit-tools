@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <QBuffer>
 #include <QEventLoop>
+#include <QFile>
+#include <QFileInfo>
 #include <QImage>
 #include <QImageReader>
 #include <QJsonArray>
@@ -17,6 +19,10 @@
 #include <QTimer>
 #include <QUrl>
 #include <QtMath>
+
+#if defined(CINEVAULT_HAS_BUNDLED_WEBP) && CINEVAULT_HAS_BUNDLED_WEBP
+#include <webp/decode.h>
+#endif
 
 namespace {
 struct HttpResult {
@@ -214,16 +220,127 @@ HttpResult postJson(const QString &endpoint,
     return result;
 }
 
-std::optional<QString> imageAsJpegDataUrl(const QString &imagePath, QString *errorMessage)
+bool isWebpFile(const QString &imagePath)
+{
+    return QFileInfo(imagePath).suffix().compare(QStringLiteral("webp"), Qt::CaseInsensitive) == 0;
+}
+
+QImage loadImageWithQt(const QString &imagePath, QString *errorMessage)
 {
     QImageReader reader(imagePath);
     reader.setAutoTransform(true);
-    const auto image = reader.read();
+    auto image = reader.read();
+    if (image.isNull() && errorMessage) {
+        const auto readerError = reader.errorString().trimmed();
+        *errorMessage = readerError.isEmpty() ? QStringLiteral("图片解码失败") : readerError;
+    }
+    return image;
+}
+
+#if defined(CINEVAULT_HAS_BUNDLED_WEBP) && CINEVAULT_HAS_BUNDLED_WEBP
+QImage loadImageWithBundledWebpDecoder(const QString &imagePath, QString *errorMessage)
+{
+    if (!isWebpFile(imagePath)) {
+        return {};
+    }
+
+    QFile file(imagePath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        if (errorMessage) {
+            *errorMessage = file.errorString();
+        }
+        return {};
+    }
+
+    const auto encodedBytes = file.readAll();
+    if (encodedBytes.isEmpty()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("文件内容为空");
+        }
+        return {};
+    }
+
+    int width = 0;
+    int height = 0;
+    if (WebPGetInfo(reinterpret_cast<const uint8_t *>(encodedBytes.constData()),
+                    static_cast<size_t>(encodedBytes.size()),
+                    &width,
+                    &height) == 0
+        || width <= 0
+        || height <= 0) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("WebP 文件头无效");
+        }
+        return {};
+    }
+
+    QImage image(width, height, QImage::Format_RGBA8888);
     if (image.isNull()) {
         if (errorMessage) {
-            *errorMessage = QStringLiteral("无法将图片转换为 JPG：%1，%2").arg(imagePath, reader.errorString());
+            *errorMessage = QStringLiteral("无法分配 WebP 解码缓冲区");
+        }
+        return {};
+    }
+
+    const auto *decoded = WebPDecodeRGBAInto(
+        reinterpret_cast<const uint8_t *>(encodedBytes.constData()),
+        static_cast<size_t>(encodedBytes.size()),
+        image.bits(),
+        static_cast<size_t>(image.sizeInBytes()),
+        image.bytesPerLine());
+    if (!decoded) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("WebP 像素解码失败");
+        }
+        return {};
+    }
+
+    return image;
+}
+#endif
+
+QImage loadImageForVision(const QString &imagePath, QString *errorMessage)
+{
+    QString qtError;
+    auto image = loadImageWithQt(imagePath, &qtError);
+    if (!image.isNull()) {
+        return image;
+    }
+
+#if defined(CINEVAULT_HAS_BUNDLED_WEBP) && CINEVAULT_HAS_BUNDLED_WEBP
+    if (isWebpFile(imagePath)) {
+        QString webpError;
+        image = loadImageWithBundledWebpDecoder(imagePath, &webpError);
+        if (!image.isNull()) {
+            return image;
+        }
+        if (errorMessage) {
+            *errorMessage = webpError.trimmed().isEmpty()
+                ? qtError
+                : QStringLiteral("%1；WebP 兜底解码失败：%2").arg(qtError, webpError);
+        }
+        return {};
+    }
+#endif
+
+    if (errorMessage) {
+        *errorMessage = qtError;
+    }
+    return {};
+}
+
+std::optional<QString> imageAsJpegDataUrl(const QString &imagePath, QString *errorMessage)
+{
+    QString decodeError;
+    auto image = loadImageForVision(imagePath, &decodeError);
+    if (image.isNull()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("无法将图片转换为 JPG：%1，%2").arg(imagePath, decodeError);
         }
         return std::nullopt;
+    }
+    if (image.hasAlphaChannel()) {
+        image = image.convertToFormat(QImage::Format_RGB888);
     }
 
     QByteArray jpegBytes;
@@ -238,12 +355,131 @@ std::optional<QString> imageAsJpegDataUrl(const QString &imagePath, QString *err
         .arg(QString::fromUtf8(jpegBytes.toBase64()));
 }
 
-QJsonObject makeChatPayload(const QString &model, const QJsonArray &content, int maxTokens)
+QJsonObject stringArraySchema()
+{
+    return QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("array")},
+        {QStringLiteral("items"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}}}
+    };
+}
+
+QJsonObject genericJsonSchema()
+{
+    return QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("object")},
+        {QStringLiteral("additionalProperties"), true}
+    };
+}
+
+QJsonObject statusSchema()
+{
+    return QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("object")},
+        {QStringLiteral("properties"),
+         QJsonObject{
+             {QStringLiteral("status"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}}}
+         }},
+        {QStringLiteral("required"), QJsonArray{QStringLiteral("status")}},
+        {QStringLiteral("additionalProperties"), false}
+    };
+}
+
+QJsonObject frameAnalysisSchema()
+{
+    return QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("object")},
+        {QStringLiteral("properties"),
+         QJsonObject{
+             {QStringLiteral("caption"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}}},
+             {QStringLiteral("tags"), stringArraySchema()},
+             {QStringLiteral("objects"), stringArraySchema()},
+             {QStringLiteral("actions"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}}},
+             {QStringLiteral("setting"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}}}
+         }},
+        {QStringLiteral("required"),
+         QJsonArray{
+             QStringLiteral("caption"),
+             QStringLiteral("tags"),
+             QStringLiteral("objects"),
+             QStringLiteral("actions"),
+             QStringLiteral("setting")
+         }},
+        {QStringLiteral("additionalProperties"), false}
+    };
+}
+
+QJsonObject videoSummarySchema()
+{
+    return QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("object")},
+        {QStringLiteral("properties"),
+         QJsonObject{
+             {QStringLiteral("summary"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}}},
+             {QStringLiteral("keywords"), stringArraySchema()},
+             {QStringLiteral("scenes"), stringArraySchema()}
+         }},
+        {QStringLiteral("required"),
+         QJsonArray{QStringLiteral("summary"), QStringLiteral("keywords"), QStringLiteral("scenes")}},
+        {QStringLiteral("additionalProperties"), false}
+    };
+}
+
+QJsonObject dimensionAnalysisSchema()
+{
+    const QJsonObject dimensionItem{
+        {QStringLiteral("type"), QStringLiteral("object")},
+        {QStringLiteral("properties"),
+         QJsonObject{
+             {QStringLiteral("name"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}}},
+             {QStringLiteral("detail"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}}}
+         }},
+        {QStringLiteral("required"), QJsonArray{QStringLiteral("name"), QStringLiteral("detail")}},
+        {QStringLiteral("additionalProperties"), false}
+    };
+
+    return QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("object")},
+        {QStringLiteral("properties"),
+         QJsonObject{
+             {QStringLiteral("dimensions"),
+              QJsonObject{
+                  {QStringLiteral("type"), QStringLiteral("array")},
+                  {QStringLiteral("items"), dimensionItem}
+              }}
+         }},
+        {QStringLiteral("required"), QJsonArray{QStringLiteral("dimensions")}},
+        {QStringLiteral("additionalProperties"), false}
+    };
+}
+
+QJsonObject jsonSchemaResponseFormat(const QString &name, const QJsonObject &schema)
+{
+    return QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("json_schema")},
+        {QStringLiteral("json_schema"),
+         QJsonObject{
+             {QStringLiteral("name"), name},
+             {QStringLiteral("strict"), false},
+             {QStringLiteral("schema"), schema}
+         }}
+    };
+}
+
+QJsonObject textResponseFormat()
+{
+    return QJsonObject{{QStringLiteral("type"), QStringLiteral("text")}};
+}
+
+QJsonObject makeChatPayload(const QString &model,
+                            const QJsonArray &content,
+                            int maxTokens,
+                            const QString &schemaName,
+                            const QJsonObject &schema)
 {
     return QJsonObject{
         {QStringLiteral("model"), model},
         {QStringLiteral("max_tokens"), maxTokens},
-        {QStringLiteral("response_format"), QJsonObject{{QStringLiteral("type"), QStringLiteral("json_object")}}},
+        {QStringLiteral("response_format"), jsonSchemaResponseFormat(schemaName, schema)},
         {QStringLiteral("messages"), QJsonArray{
             QJsonObject{
                 {QStringLiteral("role"), QStringLiteral("user")},
@@ -269,8 +505,7 @@ HttpResult postChatPayload(const QString &endpoint,
 {
     auto result = postJson(endpoint, apiKey, payload, timeoutSec);
     if (!result.success && isResponseFormatRejected(result)) {
-        payload.insert(QStringLiteral("response_format"),
-                       QJsonObject{{QStringLiteral("type"), QStringLiteral("text")}});
+        payload.insert(QStringLiteral("response_format"), textResponseFormat());
         result = postJson(endpoint, apiKey, payload, timeoutSec);
     }
     return result;
@@ -320,7 +555,14 @@ std::optional<QJsonObject> repairAssistantPayload(const QByteArray &responseBody
         }
     };
 
-    const auto result = postChatPayload(endpoint, apiKey, makeChatPayload(model, content, maxTokens), timeoutSec);
+    const auto result = postChatPayload(endpoint,
+                                        apiKey,
+                                        makeChatPayload(model,
+                                                        content,
+                                                        maxTokens,
+                                                        QStringLiteral("vision_repair"),
+                                                        genericJsonSchema()),
+                                        timeoutSec);
     if (!result.success) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("%1；自动修复失败：%2").arg(failureReason, result.errorMessage);
@@ -404,6 +646,156 @@ std::optional<VisionVideoSummary> fallbackVideoSummaryFromResponse(const QByteAr
     }
     return summary;
 }
+
+QString fallbackFileName(const QString &fileName, const QString &path)
+{
+    const auto normalizedName = fileName.trimmed();
+    if (!normalizedName.isEmpty()) {
+        return normalizedName;
+    }
+    return QFileInfo(path).fileName();
+}
+
+QStringList normalizedDimensionNames(const QStringList &dimensions)
+{
+    QStringList normalized;
+    for (const auto &dimension : dimensions) {
+        const auto name = dimension.simplified();
+        if (name.isEmpty()) {
+            continue;
+        }
+        bool exists = false;
+        for (const auto &existing : normalized) {
+            if (existing.compare(name, Qt::CaseInsensitive) == 0) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            normalized.append(name);
+        }
+    }
+    return normalized;
+}
+
+QString jsonValueToText(const QJsonValue &value)
+{
+    if (value.isString()) {
+        return value.toString().simplified();
+    }
+    if (value.isArray()) {
+        QStringList parts;
+        const auto array = value.toArray();
+        for (const auto &item : array) {
+            const auto text = jsonValueToText(item);
+            if (!text.isEmpty()) {
+                parts.append(text);
+            }
+        }
+        return parts.join(QStringLiteral("；"));
+    }
+    if (value.isObject()) {
+        const auto object = value.toObject();
+        for (const auto &key : {
+                 QStringLiteral("detail"),
+                 QStringLiteral("analysis"),
+                 QStringLiteral("summary"),
+                 QStringLiteral("description"),
+                 QStringLiteral("text"),
+                 QStringLiteral("result")}) {
+            const auto text = jsonValueToText(object.value(key));
+            if (!text.isEmpty()) {
+                return text;
+            }
+        }
+    }
+    return {};
+}
+
+QJsonArray dimensionNameArray(const QStringList &dimensions)
+{
+    QJsonArray array;
+    for (const auto &dimension : dimensions) {
+        array.append(dimension);
+    }
+    return array;
+}
+
+std::optional<QVector<MaterialDimensionAnalysis>> normalizeDimensionAnalyses(const QJsonObject &payload,
+                                                                            const QStringList &requestedDimensions,
+                                                                            QString *errorMessage)
+{
+    QVector<MaterialDimensionAnalysis> analyses;
+
+    auto appendAnalysis = [&](QString name, QString detail) {
+        name = name.simplified();
+        detail = detail.simplified();
+        if (name.isEmpty() || detail.isEmpty()) {
+            return;
+        }
+        for (const auto &existing : analyses) {
+            if (existing.name.compare(name, Qt::CaseInsensitive) == 0) {
+                return;
+            }
+        }
+        MaterialDimensionAnalysis analysis;
+        analysis.name = name;
+        analysis.detail = detail;
+        analyses.append(analysis);
+    };
+
+    QJsonArray array;
+    for (const auto &key : {
+             QStringLiteral("dimensions"),
+             QStringLiteral("results"),
+             QStringLiteral("items"),
+             QStringLiteral("analyses")}) {
+        const auto value = payload.value(key);
+        if (value.isArray()) {
+            array = value.toArray();
+            break;
+        }
+    }
+
+    if (!array.isEmpty()) {
+        for (int index = 0; index < array.size(); ++index) {
+            const auto value = array.at(index);
+            if (value.isObject()) {
+                const auto object = value.toObject();
+                auto name = object.value(QStringLiteral("name")).toString().trimmed();
+                if (name.isEmpty()) {
+                    name = object.value(QStringLiteral("dimension")).toString().trimmed();
+                }
+                if (name.isEmpty()) {
+                    name = object.value(QStringLiteral("title")).toString().trimmed();
+                }
+                if (name.isEmpty() && index < requestedDimensions.size()) {
+                    name = requestedDimensions.at(index);
+                }
+                appendAnalysis(name, jsonValueToText(value));
+            } else if (index < requestedDimensions.size()) {
+                appendAnalysis(requestedDimensions.at(index), jsonValueToText(value));
+            }
+        }
+    }
+
+    if (analyses.isEmpty()) {
+        for (const auto &dimension : requestedDimensions) {
+            appendAnalysis(dimension, jsonValueToText(payload.value(dimension)));
+        }
+    }
+
+    if (analyses.isEmpty()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("视觉接口返回多维度解析字段为空");
+        }
+        return std::nullopt;
+    }
+    if (errorMessage) {
+        errorMessage->clear();
+    }
+    return analyses;
+}
 }
 
 bool VisionApiClient::testConnection(const QString &baseUrl,
@@ -424,7 +816,14 @@ bool VisionApiClient::testConnection(const QString &baseUrl,
         QJsonObject{{QStringLiteral("type"), QStringLiteral("text")},
                     {QStringLiteral("text"), QStringLiteral("请只返回 JSON：{\"status\":\"ok\"}")}}
     };
-    const auto result = postChatPayload(endpoint, apiKey, makeChatPayload(model, content, 32), timeoutSec);
+    const auto result = postChatPayload(endpoint,
+                                        apiKey,
+                                        makeChatPayload(model,
+                                                        content,
+                                                        32,
+                                                        QStringLiteral("vision_status"),
+                                                        statusSchema()),
+                                        timeoutSec);
     if (!result.success) {
         if (errorMessage) {
             *errorMessage = result.errorMessage;
@@ -437,6 +836,7 @@ bool VisionApiClient::testConnection(const QString &baseUrl,
 }
 
 std::optional<VisionFrameAnalysis> VisionApiClient::analyzeFrame(const QString &imagePath,
+                                                                 const QString &sourceFileName,
                                                                  const QString &baseUrl,
                                                                  const QString &apiKey,
                                                                  const QString &model,
@@ -450,18 +850,28 @@ std::optional<VisionFrameAnalysis> VisionApiClient::analyzeFrame(const QString &
     }
 
     const auto endpoint = normalizeEndpoint(baseUrl);
+    const auto fileName = fallbackFileName(sourceFileName, imagePath);
     const QJsonArray content = {
         QJsonObject{{QStringLiteral("type"), QStringLiteral("text")},
                     {QStringLiteral("text"),
-                     QStringLiteral("请分析这张视频帧图片，只返回 JSON，格式为 "
+                     QStringLiteral("这是素材文件《%1》的抽帧图片。请结合文件名线索分析这张视频帧，只返回 JSON，格式为 "
                                     "{\"caption\":\"\",\"tags\":[],\"objects\":[],\"actions\":\"\",\"setting\":\"\"}。"
-                                    "caption 用一句中文概括画面，tags/objects 为中文关键词数组。")}},
+                                    "caption 用一句中文概括画面，tags/objects 为中文关键词数组。"
+                                    "如果文件名包含品牌、日期、地点、项目名或版本信息，可作为辅助线索写入可确认的描述中。")
+                         .arg(fileName)}},
         QJsonObject{{QStringLiteral("type"), QStringLiteral("image_url")},
                     {QStringLiteral("image_url"),
                      QJsonObject{{QStringLiteral("url"), *imageDataUrl}}}}
     };
 
-    const auto result = postChatPayload(endpoint, apiKey, makeChatPayload(model, content, 300), timeoutSec);
+    const auto result = postChatPayload(endpoint,
+                                        apiKey,
+                                        makeChatPayload(model,
+                                                        content,
+                                                        300,
+                                                        QStringLiteral("vision_frame_analysis"),
+                                                        frameAnalysisSchema()),
+                                        timeoutSec);
     if (httpStatusCode) {
         *httpStatusCode = result.statusCode;
     }
@@ -523,7 +933,114 @@ std::optional<VisionFrameAnalysis> VisionApiClient::analyzeFrame(const QString &
     return analysis;
 }
 
+std::optional<QVector<MaterialDimensionAnalysis>> VisionApiClient::analyzeFrameDimensions(const QString &imagePath,
+                                                                                          const QString &sourceFileName,
+                                                                                          const QString &frameContext,
+                                                                                          const QStringList &dimensions,
+                                                                                          const QString &baseUrl,
+                                                                                          const QString &apiKey,
+                                                                                          const QString &model,
+                                                                                          int timeoutSec,
+                                                                                          QString *errorMessage,
+                                                                                          int *httpStatusCode) const
+{
+    const auto requestedDimensions = normalizedDimensionNames(dimensions);
+    if (requestedDimensions.isEmpty()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("请至少添加一个解析维度");
+        }
+        return std::nullopt;
+    }
+
+    auto imageDataUrl = imageAsJpegDataUrl(imagePath, errorMessage);
+    if (!imageDataUrl.has_value()) {
+        return std::nullopt;
+    }
+
+    const auto endpoint = normalizeEndpoint(baseUrl);
+    const auto displayName = fallbackFileName(sourceFileName, imagePath);
+    const auto schema = QStringLiteral("{\"dimensions\":[{\"name\":\"\",\"detail\":\"\"}]}");
+    const auto maxTokens = qBound(500, requestedDimensions.size() * 220 + 260, 1200);
+    const QJsonArray content = {
+        QJsonObject{{QStringLiteral("type"), QStringLiteral("text")},
+                    {QStringLiteral("text"),
+                     QStringLiteral("这是素材文件《%1》的一张视频帧。请只基于当前这一帧图片和这帧已有基础描述，"
+                                    "逐项补充用户指定的多维度分析。不要引用其他帧，不要汇总整段视频。"
+                                    "每个维度的 detail 用 1-2 句中文记录此帧可确认的细节、线索或不可见结论；"
+                                    "如果当前帧没有对应线索，也要明确写出“此帧未见明确线索”。"
+                                    "只返回 JSON，不要加入 Markdown。目标 JSON 格式为 %2。\n\n"
+                                    "需要分析的维度：%3\n\n"
+                                    "当前帧基础描述：\n%4")
+                         .arg(displayName,
+                              schema,
+                              QString::fromUtf8(QJsonDocument(dimensionNameArray(requestedDimensions)).toJson(QJsonDocument::Compact)),
+                              frameContext.trimmed().left(1600))}},
+        QJsonObject{{QStringLiteral("type"), QStringLiteral("image_url")},
+                    {QStringLiteral("image_url"),
+                     QJsonObject{{QStringLiteral("url"), *imageDataUrl}}}}
+    };
+
+    const auto result = postChatPayload(endpoint,
+                                        apiKey,
+                                        makeChatPayload(model,
+                                                        content,
+                                                        maxTokens,
+                                                        QStringLiteral("vision_dimension_analysis"),
+                                                        dimensionAnalysisSchema()),
+                                        timeoutSec);
+    if (httpStatusCode) {
+        *httpStatusCode = result.statusCode;
+    }
+    if (!result.success) {
+        if (errorMessage) {
+            *errorMessage = result.errorMessage;
+        }
+        return std::nullopt;
+    }
+
+    QString parseError;
+    auto payload = VisionResponseParser::parseAssistantJson(result.body, &parseError);
+    auto usedRepair = false;
+    if (!payload.has_value()) {
+        payload = repairAssistantPayload(result.body,
+                                         endpoint,
+                                         apiKey,
+                                         model,
+                                         timeoutSec,
+                                         schema,
+                                         parseError,
+                                         maxTokens,
+                                         errorMessage);
+        usedRepair = true;
+        if (!payload.has_value()) {
+            return std::nullopt;
+        }
+    }
+
+    QString normalizeError;
+    auto analyses = normalizeDimensionAnalyses(*payload, requestedDimensions, &normalizeError);
+    if (!analyses.has_value() && !usedRepair) {
+        payload = repairAssistantPayload(result.body,
+                                         endpoint,
+                                         apiKey,
+                                         model,
+                                         timeoutSec,
+                                         schema,
+                                         normalizeError,
+                                         maxTokens,
+                                         errorMessage);
+        if (payload.has_value()) {
+            analyses = normalizeDimensionAnalyses(*payload, requestedDimensions, &normalizeError);
+        }
+    }
+    if (!analyses.has_value() && errorMessage && errorMessage->isEmpty()) {
+        *errorMessage = normalizeError;
+    }
+    return analyses;
+}
+
 std::optional<VisionVideoSummary> VisionApiClient::analyzeImage(const QString &imagePath,
+                                                                const QString &fileName,
                                                                 const QString &baseUrl,
                                                                 const QString &apiKey,
                                                                 const QString &model,
@@ -537,20 +1054,30 @@ std::optional<VisionVideoSummary> VisionApiClient::analyzeImage(const QString &i
     }
 
     const auto endpoint = normalizeEndpoint(baseUrl);
+    const auto displayName = fallbackFileName(fileName, imagePath);
     const QJsonArray content = {
         QJsonObject{{QStringLiteral("type"), QStringLiteral("text")},
                     {QStringLiteral("text"),
-                     QStringLiteral("请分析这张图片素材，只返回 JSON，格式为 "
+                     QStringLiteral("请结合文件名《%1》分析这张图片素材，只返回 JSON，格式为 "
                                     "{\"summary\":\"\",\"keywords\":[],\"scenes\":[]}。"
                                     "summary 用 3-5 句中文说明主要主体、场景环境、可见物体、动作/状态、风格和可用于检索的画面特征。"
+                                    "文件名中的品牌、活动、日期、地点、项目名、版本号等信息可作为辅助线索，但不要编造画面中不可确认的事实。"
                                     "keywords 返回 8-16 个中文搜索关键词，scenes 返回场景/地点/环境类中文关键词数组。"
-                                    "不要加入 Markdown。")}},
+                                    "不要加入 Markdown。")
+                         .arg(displayName)}},
         QJsonObject{{QStringLiteral("type"), QStringLiteral("image_url")},
                     {QStringLiteral("image_url"),
                      QJsonObject{{QStringLiteral("url"), *imageDataUrl}}}}
     };
 
-    const auto result = postChatPayload(endpoint, apiKey, makeChatPayload(model, content, 700), timeoutSec);
+    const auto result = postChatPayload(endpoint,
+                                        apiKey,
+                                        makeChatPayload(model,
+                                                        content,
+                                                        700,
+                                                        QStringLiteral("vision_video_summary"),
+                                                        videoSummarySchema()),
+                                        timeoutSec);
     if (httpStatusCode) {
         *httpStatusCode = result.statusCode;
     }
@@ -641,7 +1168,14 @@ std::optional<VisionVideoSummary> VisionApiClient::summarizeText(const QString &
                          .arg(fileName, boundedText)}}
     };
 
-    const auto result = postChatPayload(endpoint, apiKey, makeChatPayload(model, content, 800), timeoutSec);
+    const auto result = postChatPayload(endpoint,
+                                        apiKey,
+                                        makeChatPayload(model,
+                                                        content,
+                                                        800,
+                                                        QStringLiteral("vision_video_summary"),
+                                                        videoSummarySchema()),
+                                        timeoutSec);
     if (httpStatusCode) {
         *httpStatusCode = result.statusCode;
     }
@@ -770,7 +1304,14 @@ std::optional<VisionVideoSummary> VisionApiClient::summarizeVideo(const QString 
                              .arg(fileName, frameLines.join(QStringLiteral("\n"))) }}
         };
 
-        const auto result = postChatPayload(endpoint, apiKey, makeChatPayload(model, content, maxTokens), timeoutSec);
+        const auto result = postChatPayload(endpoint,
+                                            apiKey,
+                                            makeChatPayload(model,
+                                                            content,
+                                                            maxTokens,
+                                                            QStringLiteral("vision_video_summary"),
+                                                            videoSummarySchema()),
+                                            timeoutSec);
         if (attemptStatusCode) {
             *attemptStatusCode = result.statusCode;
         }
@@ -872,6 +1413,170 @@ std::optional<VisionVideoSummary> VisionApiClient::summarizeVideo(const QString 
     if (attemptCount) {
         *attemptCount = usedAttempts;
     }
+    if (httpStatusCode) {
+        *httpStatusCode = lastStatusCode;
+    }
+    if (errorMessage) {
+        *errorMessage = lastError;
+    }
+    return std::nullopt;
+}
+
+std::optional<QVector<MaterialDimensionAnalysis>> VisionApiClient::analyzeDimensions(const QString &fileName,
+                                                                                     const QString &baseContext,
+                                                                                     const QStringList &dimensions,
+                                                                                     const QString &baseUrl,
+                                                                                     const QString &apiKey,
+                                                                                     const QString &model,
+                                                                                     int timeoutSec,
+                                                                                     QString *errorMessage,
+                                                                                     int *httpStatusCode) const
+{
+    const auto requestedDimensions = normalizedDimensionNames(dimensions);
+    if (requestedDimensions.isEmpty()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("请至少添加一个解析维度");
+        }
+        return std::nullopt;
+    }
+
+    const auto normalizedContext = baseContext.trimmed();
+    if (normalizedContext.isEmpty()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("没有可用于多维度解析的基础解析内容");
+        }
+        return std::nullopt;
+    }
+
+    const auto endpoint = normalizeEndpoint(baseUrl);
+    const auto schema = QStringLiteral("{\"dimensions\":[{\"name\":\"\",\"detail\":\"\"}]}");
+
+    auto attemptDimensions = [&](int maxContextChars,
+                                 int maxTokens,
+                                 QString *attemptError,
+                                 int *attemptStatusCode) -> std::optional<QVector<MaterialDimensionAnalysis>> {
+        if (attemptError) {
+            attemptError->clear();
+        }
+        if (attemptStatusCode) {
+            *attemptStatusCode = 0;
+        }
+
+        const auto boundedContext = normalizedContext.left(maxContextChars).trimmed();
+        if (boundedContext.isEmpty()) {
+            if (attemptError) {
+                *attemptError = QStringLiteral("没有可用于多维度解析的基础解析内容");
+            }
+            return std::nullopt;
+        }
+
+        const QJsonArray content = {
+            QJsonObject{{QStringLiteral("type"), QStringLiteral("text")},
+                        {QStringLiteral("text"),
+                         QStringLiteral("下面是素材文件《%1》的基础解析结果。请只基于这些已解析信息，补充用户指定的多维度分析。"
+                                        "不要重复改写已有摘要、关键词、场景；不要重新解析已存在维度；不要编造基础信息中无法确认的事实。"
+                                        "每个维度的 detail 用 2-4 句中文说明可确认的观察、用途或判断依据。"
+                                        "只返回 JSON，不要加入 Markdown。目标 JSON 格式为 %2。\n\n"
+                                        "需要补充的维度：%3\n\n"
+                                        "基础解析结果：\n%4")
+                             .arg(fileName.trimmed().isEmpty() ? QStringLiteral("未命名素材") : fileName.trimmed(),
+                                  schema,
+                                  QString::fromUtf8(QJsonDocument(dimensionNameArray(requestedDimensions)).toJson(QJsonDocument::Compact)),
+                                  boundedContext)}}
+        };
+
+        const auto result = postChatPayload(endpoint,
+                                            apiKey,
+                                            makeChatPayload(model,
+                                                            content,
+                                                            maxTokens,
+                                                            QStringLiteral("vision_dimension_analysis"),
+                                                            dimensionAnalysisSchema()),
+                                            timeoutSec);
+        if (attemptStatusCode) {
+            *attemptStatusCode = result.statusCode;
+        }
+        if (!result.success) {
+            if (attemptError) {
+                *attemptError = result.errorMessage;
+            }
+            return std::nullopt;
+        }
+
+        QString parseError;
+        auto payload = VisionResponseParser::parseAssistantJson(result.body, &parseError);
+        auto usedRepair = false;
+        if (!payload.has_value()) {
+            payload = repairAssistantPayload(result.body,
+                                             endpoint,
+                                             apiKey,
+                                             model,
+                                             timeoutSec,
+                                             schema,
+                                             parseError,
+                                             maxTokens,
+                                             attemptError);
+            usedRepair = true;
+            if (!payload.has_value()) {
+                return std::nullopt;
+            }
+        }
+
+        QString normalizeError;
+        auto analyses = normalizeDimensionAnalyses(*payload, requestedDimensions, &normalizeError);
+        if (!analyses.has_value() && !usedRepair) {
+            payload = repairAssistantPayload(result.body,
+                                             endpoint,
+                                             apiKey,
+                                             model,
+                                             timeoutSec,
+                                             schema,
+                                             normalizeError,
+                                             maxTokens,
+                                             attemptError);
+            if (payload.has_value()) {
+                analyses = normalizeDimensionAnalyses(*payload, requestedDimensions, &normalizeError);
+            }
+        }
+        if (!analyses.has_value() && attemptError && attemptError->isEmpty()) {
+            *attemptError = normalizeError;
+        }
+        return analyses;
+    };
+
+    QVector<QPair<int, int>> plans;
+    auto appendPlan = [&](int maxContextChars, int maxTokens) {
+        const auto boundedChars = qBound(1, maxContextChars, normalizedContext.size());
+        for (const auto &plan : plans) {
+            if (plan.first == boundedChars && plan.second == maxTokens) {
+                return;
+            }
+        }
+        plans.append({boundedChars, maxTokens});
+    };
+
+    appendPlan(12000, 1000);
+    appendPlan(8000, 800);
+    appendPlan(4000, 650);
+    appendPlan(2000, 500);
+
+    QString lastError = QStringLiteral("多维度解析失败");
+    int lastStatusCode = 0;
+    for (int index = 0; index < plans.size(); ++index) {
+        const auto &plan = plans.at(index);
+        auto analyses = attemptDimensions(plan.first, plan.second, &lastError, &lastStatusCode);
+        if (analyses.has_value()) {
+            if (httpStatusCode) {
+                *httpStatusCode = lastStatusCode;
+            }
+            return analyses;
+        }
+
+        if (index >= plans.size() - 1 || !shouldRetrySummaryFailure(lastStatusCode, lastError)) {
+            break;
+        }
+    }
+
     if (httpStatusCode) {
         *httpStatusCode = lastStatusCode;
     }

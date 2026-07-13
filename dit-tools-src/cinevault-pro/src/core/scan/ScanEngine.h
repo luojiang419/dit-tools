@@ -2,6 +2,7 @@
 
 #include "domain/Entities.h"
 
+#include <QFutureSynchronizer>
 #include <QObject>
 
 class DatabaseManager;
@@ -15,7 +16,10 @@ class ScanEngine : public QObject {
 public:
     explicit ScanEngine(DatabaseManager *databaseManager, JobEngine *jobEngine, MediaProbeEngine *mediaProbeEngine, ThumbnailEngine *thumbnailEngine, QObject *parent = nullptr);
 
+    static constexpr int CurrentScanVersion = 2;
+
     void startScan(const SourceRoot &sourceRoot, qint64 jobId);
+    void waitForIdle();
 
 signals:
     void scanBatchCommitted(const ScanBatch &batch);
@@ -29,4 +33,5 @@ private:
     JobEngine *m_jobEngine = nullptr;
     MediaProbeEngine *m_mediaProbeEngine = nullptr;
     ThumbnailEngine *m_thumbnailEngine = nullptr;
+    QFutureSynchronizer<void> m_scanFutures;
 };

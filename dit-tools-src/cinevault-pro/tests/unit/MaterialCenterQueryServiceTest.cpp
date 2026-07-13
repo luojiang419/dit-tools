@@ -124,6 +124,51 @@ private:
                             QStringLiteral("G:/projects/alpha/package/bundle.zip"),
                             QStringLiteral("package/bundle.zip"),
                             QStringLiteral("ZIP archive metadata only"),
+                            QString())
+            || !insertAsset(QStringLiteral("audio-1"),
+                            QStringLiteral("dialogue.wav"),
+                            QStringLiteral("wav"),
+                            AssetType::Audio,
+                            VideoAnalysisStatus::IndexedOnly,
+                            QStringLiteral("G:/projects/alpha/audio/dialogue.wav"),
+                            QStringLiteral("audio/dialogue.wav"),
+                            QStringLiteral("WAV audio metadata only"),
+                            QString())
+            || !insertAsset(QStringLiteral("subtitle-1"),
+                            QStringLiteral("captions.srt"),
+                            QStringLiteral("srt"),
+                            AssetType::Subtitle,
+                            VideoAnalysisStatus::Pending,
+                            QStringLiteral("G:/projects/alpha/subtitles/captions.srt"),
+                            QStringLiteral("subtitles/captions.srt"),
+                            QStringLiteral("SRT subtitle text"),
+                            QString())
+            || !insertAsset(QStringLiteral("project-file-1"),
+                            QStringLiteral("edit.prproj"),
+                            QStringLiteral("prproj"),
+                            AssetType::ProjectFile,
+                            VideoAnalysisStatus::IndexedOnly,
+                            QStringLiteral("G:/projects/alpha/edit/edit.prproj"),
+                            QStringLiteral("edit/edit.prproj"),
+                            QStringLiteral("Premiere project metadata only"),
+                            QString())
+            || !insertAsset(QStringLiteral("other-1"),
+                            QStringLiteral("lut.cube"),
+                            QStringLiteral("cube"),
+                            AssetType::Other,
+                            VideoAnalysisStatus::IndexedOnly,
+                            QStringLiteral("G:/projects/alpha/color/lut.cube"),
+                            QStringLiteral("color/lut.cube"),
+                            QStringLiteral("Color LUT metadata only"),
+                            QString())
+            || !insertAsset(QStringLiteral("unknown-1"),
+                            QStringLiteral("README"),
+                            QStringLiteral(""),
+                            AssetType::Unknown,
+                            VideoAnalysisStatus::IndexedOnly,
+                            QStringLiteral("G:/projects/alpha/README"),
+                            QStringLiteral("README"),
+                            QStringLiteral("Unknown extension metadata only"),
                             QString())) {
             return false;
         }
@@ -143,6 +188,12 @@ private:
                              jsonArray({QStringLiteral("授权")}),
                              jsonArray({QStringLiteral("文档")}),
                              QStringLiteral("项目授权说明摘要 授权"))) {
+            return false;
+        }
+
+        if (!insertDimension(QStringLiteral("image-1"),
+                             QStringLiteral("色彩风格"),
+                             QStringLiteral("冷蓝色调，海报标题对比强，适合品牌视觉延展。"))) {
             return false;
         }
 
@@ -314,6 +365,24 @@ private:
         }
         return true;
     }
+
+    bool insertDimension(const QString &key, const QString &name, const QString &detail)
+    {
+        QSqlQuery query(manager.database());
+        query.prepare(QStringLiteral(
+            "INSERT INTO material_dimension_analysis "
+            "(video_key, dimension_key, dimension_name, detail, model_name, prompt_version, analyzed_at) "
+            "VALUES (?, ?, ?, ?, 'test-model', 'test', '2026-07-04T10:08:00')"));
+        query.addBindValue(key);
+        query.addBindValue(name.toCaseFolded());
+        query.addBindValue(name);
+        query.addBindValue(detail);
+        if (!query.exec()) {
+            errorMessage = query.lastError().text();
+            return false;
+        }
+        return true;
+    }
 };
 }
 
@@ -330,15 +399,20 @@ private slots:
 
         const auto assets = service.fetchAssets(QString(), QString(), QString(), -1, -1, -1);
 
-        QCOMPARE(assets.size(), 4);
+        QCOMPARE(assets.size(), 9);
         QSet<int> types;
         for (const auto &asset : assets) {
             types.insert(static_cast<int>(asset.assetType));
         }
+        QVERIFY(types.contains(static_cast<int>(AssetType::Unknown)));
         QVERIFY(types.contains(static_cast<int>(AssetType::Video)));
+        QVERIFY(types.contains(static_cast<int>(AssetType::Audio)));
         QVERIFY(types.contains(static_cast<int>(AssetType::Image)));
+        QVERIFY(types.contains(static_cast<int>(AssetType::Subtitle)));
+        QVERIFY(types.contains(static_cast<int>(AssetType::ProjectFile)));
         QVERIFY(types.contains(static_cast<int>(AssetType::Document)));
         QVERIFY(types.contains(static_cast<int>(AssetType::Archive)));
+        QVERIFY(types.contains(static_cast<int>(AssetType::Other)));
     }
 
     void fetchAssets_searchesAcrossMetadataSummarySourceTextAndFrames()
@@ -349,6 +423,8 @@ private slots:
         MaterialCenterQueryService service(&fixture.manager, &searchEngine);
 
         QCOMPARE(keysFor(service.fetchAssets(QStringLiteral("品牌标签"), QString(), QString(), -1, -1, -1)),
+                 QStringList{QStringLiteral("image-1")});
+        QCOMPARE(keysFor(service.fetchAssets(QStringLiteral("冷蓝色调"), QString(), QString(), -1, -1, -1)),
                  QStringList{QStringLiteral("image-1")});
         QCOMPARE(keysFor(service.fetchAssets(QStringLiteral("独家授权词条"), QString(), QString(), -1, -1, -1)),
                  QStringList{QStringLiteral("doc-1")});
@@ -375,10 +451,15 @@ private slots:
         for (const auto &option : typeOptions) {
             values.insert(option.toMap().value(QStringLiteral("value")).toInt());
         }
+        QVERIFY(values.contains(static_cast<int>(AssetType::Unknown)));
         QVERIFY(values.contains(static_cast<int>(AssetType::Video)));
+        QVERIFY(values.contains(static_cast<int>(AssetType::Audio)));
         QVERIFY(values.contains(static_cast<int>(AssetType::Image)));
+        QVERIFY(values.contains(static_cast<int>(AssetType::Subtitle)));
+        QVERIFY(values.contains(static_cast<int>(AssetType::ProjectFile)));
         QVERIFY(values.contains(static_cast<int>(AssetType::Document)));
         QVERIFY(values.contains(static_cast<int>(AssetType::Archive)));
+        QVERIFY(values.contains(static_cast<int>(AssetType::Other)));
     }
 
     void fetchDetail_exposesTextAndTechnicalSummary()
@@ -395,6 +476,20 @@ private slots:
         QVERIFY(detail.asset.sourceText.contains(QStringLiteral("独家授权词条")));
         QCOMPARE(detail.asset.technicalSummary, QStringLiteral("Markdown 文本文档"));
         QCOMPARE(detail.asset.summary, QStringLiteral("项目授权说明摘要。"));
+    }
+
+    void fetchDetail_exposesDimensionAnalyses()
+    {
+        GlobalDbFixture fixture;
+        QVERIFY2(fixture.valid, qPrintable(fixture.errorMessage));
+        SearchEngine searchEngine;
+        MaterialCenterQueryService service(&fixture.manager, &searchEngine);
+
+        const auto detail = service.fetchDetail(QStringLiteral("image-1"));
+
+        QCOMPARE(detail.dimensionAnalyses.size(), 1);
+        QCOMPARE(detail.dimensionAnalyses.first().name, QStringLiteral("色彩风格"));
+        QVERIFY(detail.dimensionAnalyses.first().detail.contains(QStringLiteral("冷蓝色调")));
     }
 };
 

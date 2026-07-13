@@ -86,6 +86,22 @@ QString Formatters::statusColor(const QString &status)
     return QStringLiteral("#9AA4B2");
 }
 
+QString Formatters::jobTypeLabel(JobType type)
+{
+    switch (type) {
+    case JobType::Scan: return QStringLiteral("扫描");
+    case JobType::Metadata: return QStringLiteral("元数据");
+    case JobType::Thumbnail: return QStringLiteral("缩略图");
+    case JobType::GlobalSync: return QStringLiteral("全局索引");
+    case JobType::ContentAnalysis: return QStringLiteral("内容解析");
+    case JobType::Preview: return QStringLiteral("预览");
+    case JobType::Report: return QStringLiteral("报表");
+    case JobType::Export: return QStringLiteral("导出");
+    case JobType::Backup: return QStringLiteral("备份");
+    }
+    return QStringLiteral("任务");
+}
+
 QString Formatters::jobStateLabel(JobState state)
 {
     switch (state) {
@@ -96,6 +112,70 @@ QString Formatters::jobStateLabel(JobState state)
     case JobState::Cancelled: return QStringLiteral("已取消");
     }
     return QStringLiteral("未知");
+}
+
+QString Formatters::jobProgressLabel(const JobProgressContext &context)
+{
+    QStringList parts;
+    if (context.totalSteps > 0 && context.currentStep > 0) {
+        QString stepText = QStringLiteral("第%1/%2步").arg(context.currentStep).arg(context.totalSteps);
+        if (!context.stepLabel.trimmed().isEmpty()) {
+            stepText += QStringLiteral(" · %1").arg(context.stepLabel.trimmed());
+        }
+        parts.append(stepText);
+    } else if (!context.stepLabel.trimmed().isEmpty()) {
+        parts.append(context.stepLabel.trimmed());
+    }
+
+    const auto unit = context.unitLabel.trimmed();
+    if (context.totalItems > 0) {
+        if (unit == QStringLiteral("帧")) {
+            parts.append(QStringLiteral("第%1/%2帧").arg(context.currentItem).arg(context.totalItems));
+        } else if (unit == QStringLiteral("字节")) {
+            parts.append(QStringLiteral("%1/%2").arg(formatBytes(context.currentItem), formatBytes(context.totalItems)));
+        } else if (!unit.isEmpty()) {
+            parts.append(QStringLiteral("%1/%2%3").arg(context.currentItem).arg(context.totalItems).arg(unit));
+        } else {
+            parts.append(QStringLiteral("%1/%2").arg(context.currentItem).arg(context.totalItems));
+        }
+    } else if (context.currentItem > 0 && !unit.isEmpty()) {
+        parts.append(QStringLiteral("%1%2").arg(context.currentItem).arg(unit));
+    }
+
+    if (context.currentFrameNumber > 0) {
+        parts.append(QStringLiteral("当前帧 %1").arg(context.currentFrameNumber));
+    }
+    if (!context.extraLabel.trimmed().isEmpty()) {
+        parts.append(context.extraLabel.trimmed());
+    }
+
+    return parts.join(QStringLiteral(" · "));
+}
+
+QString Formatters::jobProgressShortLabel(const JobProgressContext &context)
+{
+    QStringList parts;
+    if (context.totalSteps > 0 && context.currentStep > 0) {
+        parts.append(QStringLiteral("第%1/%2步").arg(context.currentStep).arg(context.totalSteps));
+    }
+    const auto unit = context.unitLabel.trimmed();
+    if (context.totalItems > 0) {
+        if (unit == QStringLiteral("帧")) {
+            parts.append(QStringLiteral("第%1/%2帧").arg(context.currentItem).arg(context.totalItems));
+        } else if (unit == QStringLiteral("字节")) {
+            parts.append(QStringLiteral("%1/%2").arg(formatBytes(context.currentItem), formatBytes(context.totalItems)));
+        } else if (!unit.isEmpty()) {
+            parts.append(QStringLiteral("%1/%2%3").arg(context.currentItem).arg(context.totalItems).arg(unit));
+        } else {
+            parts.append(QStringLiteral("%1/%2").arg(context.currentItem).arg(context.totalItems));
+        }
+    } else if (!context.stepLabel.trimmed().isEmpty()) {
+        parts.append(context.stepLabel.trimmed());
+    }
+    if (context.currentFrameNumber > 0) {
+        parts.append(QStringLiteral("帧 %1").arg(context.currentFrameNumber));
+    }
+    return parts.join(QStringLiteral(" · "));
 }
 
 QString Formatters::workspaceLabel(WorkspaceId workspaceId)

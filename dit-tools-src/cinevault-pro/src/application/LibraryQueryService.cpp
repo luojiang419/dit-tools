@@ -370,7 +370,7 @@ QVector<SourceRoot> LibraryQueryService::fetchSourceRoots() const
 
     QSqlQuery query(m_databaseManager->database());
     if (!query.exec(QStringLiteral(
-        "SELECT id, name, path, status, total_files, total_folders, total_size_bytes, video_count, audio_count, image_count, other_count, warning_count "
+        "SELECT id, name, path, status, total_files, total_folders, total_size_bytes, video_count, audio_count, image_count, other_count, warning_count, COALESCE(scan_version, 0) "
         "FROM source_root ORDER BY created_at DESC"))) {
         Logger::warn(QStringLiteral("读取素材源列表失败：%1").arg(query.lastError().text()));
         return rows;
@@ -389,6 +389,7 @@ QVector<SourceRoot> LibraryQueryService::fetchSourceRoots() const
         row.imageCount = query.value(9).toLongLong();
         row.otherCount = query.value(10).toLongLong();
         row.warningCount = query.value(11).toLongLong();
+        row.scanVersion = query.value(12).toInt();
         rows.append(row);
     }
     return rows;

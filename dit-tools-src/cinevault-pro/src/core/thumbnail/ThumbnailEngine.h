@@ -12,10 +12,11 @@ class ThumbnailEngine : public QObject {
 
 public:
     explicit ThumbnailEngine(FFmpegAdapter *adapter, AppSettings *settings, QObject *parent = nullptr);
+    ~ThumbnailEngine() override = default;
 
     bool isAvailable() const;
     QString statusMessage() const;
-    ThumbnailResult createPlaceholder(const ThumbnailRequest &request) const;
+    virtual ThumbnailResult createPlaceholder(const ThumbnailRequest &request) const;
 
 private:
     FFmpegAdapter *m_adapter = nullptr;

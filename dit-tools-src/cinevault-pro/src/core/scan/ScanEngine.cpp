@@ -33,7 +33,14 @@ QString toIsoString(const std::filesystem::file_time_type &fileTime)
     return QDateTime::fromSecsSinceEpoch(duration_cast<seconds>(translated.time_since_epoch()).count()).toString(Qt::ISODate);
 }
 
-void bindSourceStats(QSqlQuery &query, const ScanBatch &batch, const QString &status, qint64 videoCount, qint64 audioCount, qint64 imageCount, qint64 otherCount)
+void bindSourceStats(QSqlQuery &query,
+                     const ScanBatch &batch,
+                     const QString &status,
+                     qint64 videoCount,
+                     qint64 audioCount,
+                     qint64 imageCount,
+                     qint64 otherCount,
+                     int scanVersion)
 {
     query.addBindValue(status);
     query.addBindValue(batch.totalFiles);
@@ -44,8 +51,23 @@ void bindSourceStats(QSqlQuery &query, const ScanBatch &batch, const QString &st
     query.addBindValue(imageCount);
     query.addBindValue(otherCount);
     query.addBindValue(batch.warningCount);
+    if (scanVersion >= 0) {
+        query.addBindValue(scanVersion);
+    }
     query.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODate));
     query.addBindValue(batch.sourceRootId);
+}
+
+JobProgressContext scanProgressContext(const ScanBatch &batch)
+{
+    JobProgressContext context;
+    context.currentStep = 1;
+    context.totalSteps = 1;
+    context.stepLabel = QStringLiteral("扫描目录");
+    context.currentItem = batch.totalFiles;
+    context.unitLabel = QStringLiteral("个文件");
+    context.extraLabel = QStringLiteral("%1个文件夹").arg(batch.totalFolders);
+    return context;
 }
 }
 
@@ -63,7 +85,12 @@ void ScanEngine::startScan(const SourceRoot &sourceRoot, qint64 jobId)
     auto future = QtConcurrent::run([this, sourceRoot, jobId]() {
         runScan(sourceRoot, jobId);
     });
-    Q_UNUSED(future);
+    m_scanFutures.addFuture(future);
+}
+
+void ScanEngine::waitForIdle()
+{
+    m_scanFutures.waitForFinished();
 }
 
 void ScanEngine::runScan(SourceRoot sourceRoot, qint64 jobId)
@@ -154,7 +181,7 @@ void ScanEngine::runScan(SourceRoot sourceRoot, qint64 jobId)
             "UPDATE source_root SET status = ?, total_files = ?, total_folders = ?, total_size_bytes = ?, "
             "video_count = ?, audio_count = ?, image_count = ?, other_count = ?, warning_count = ?, updated_at = ? WHERE id = ?"));
         batch.progressPercent = progressPercent;
-        bindSourceStats(sourceUpdate, batch, QStringLiteral("scanning"), videoCount, audioCount, imageCount, otherCount);
+        bindSourceStats(sourceUpdate, batch, QStringLiteral("scanning"), videoCount, audioCount, imageCount, otherCount, -1);
         if (!sourceUpdate.exec()) {
             db.rollback();
             return false;
@@ -166,7 +193,10 @@ void ScanEngine::runScan(SourceRoot sourceRoot, qint64 jobId)
         }
 
         QMetaObject::invokeMethod(this, [this, batch, jobId]() {
-            m_jobEngine->updateJob(jobId, batch.progressPercent, QStringLiteral("已扫描 %1 个文件夹，%2 个文件").arg(batch.totalFolders).arg(batch.totalFiles));
+            m_jobEngine->updateJob(jobId,
+                                   batch.progressPercent,
+                                   QStringLiteral("已扫描 %1 个文件夹，%2 个文件").arg(batch.totalFolders).arg(batch.totalFiles),
+                                   scanProgressContext(batch));
             emit scanBatchCommitted(batch);
         }, Qt::QueuedConnection);
 
@@ -239,8 +269,15 @@ void ScanEngine::runScan(SourceRoot sourceRoot, qint64 jobId)
         QSqlQuery finalUpdate(db);
         finalUpdate.prepare(QStringLiteral(
             "UPDATE source_root SET status = ?, total_files = ?, total_folders = ?, total_size_bytes = ?, "
-            "video_count = ?, audio_count = ?, image_count = ?, other_count = ?, warning_count = ?, updated_at = ? WHERE id = ?"));
-        bindSourceStats(finalUpdate, batch, batch.warningCount > 0 ? QStringLiteral("warning") : QStringLiteral("ok"), videoCount, audioCount, imageCount, otherCount);
+            "video_count = ?, audio_count = ?, image_count = ?, other_count = ?, warning_count = ?, scan_version = ?, updated_at = ? WHERE id = ?"));
+        bindSourceStats(finalUpdate,
+                        batch,
+                        batch.warningCount > 0 ? QStringLiteral("warning") : QStringLiteral("ok"),
+                        videoCount,
+                        audioCount,
+                        imageCount,
+                        otherCount,
+                        ScanEngine::CurrentScanVersion);
         finalUpdate.exec();
 
         QMetaObject::invokeMethod(this, [this, sourceRoot, batch, jobId]() {

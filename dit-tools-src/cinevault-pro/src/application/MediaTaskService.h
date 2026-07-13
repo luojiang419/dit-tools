@@ -23,6 +23,7 @@ public:
 
 public slots:
     void startForSourceRoot(qint64 sourceRootId);
+    void recoverStaleThumbnails();
 
 signals:
     void mediaCatalogChanged();
@@ -40,10 +41,15 @@ private:
                          qint64 sourceRootId,
                          qint64 jobId,
                          const QVector<AssetFile> &assets);
-    bool markThumbnailsRunning(QSqlDatabase &db, const QVector<AssetFile> &assets, QString *errorMessage) const;
+    QVector<AssetFile> fetchStaleThumbnailAssets(QSqlDatabase &db, qint64 sourceRootId, QString *errorMessage) const;
+    void runStaleThumbnailRecovery(qint64 sourceRootId,
+                                   const QString &sourceName,
+                                   const QString &projectDatabasePath,
+                                   qint64 thumbnailJobId);
+    bool markThumbnailRunning(QSqlDatabase &db, qint64 assetId, QString *errorMessage) const;
     bool persistMediaProbe(QSqlDatabase &db, const MediaProbeResult &result, QString *errorMessage) const;
     bool persistThumbnail(QSqlDatabase &db, const ThumbnailResult &result, QString *errorMessage) const;
-    void updateJob(qint64 jobId, qint64 progress, const QString &detail);
+    void updateJob(qint64 jobId, qint64 progress, const QString &detail, const JobProgressContext &progressContext = JobProgressContext());
     void completeJob(qint64 jobId, const QString &detail);
     void failJob(qint64 jobId, const QString &errorMessage);
     void notifyCatalogChanged();

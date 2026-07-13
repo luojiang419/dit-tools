@@ -377,6 +377,24 @@ if(BUILD_TESTING)
     target_link_libraries(LocalImageUrlHelperTest PRIVATE Qt6::Core Qt6::Test)
     add_test(NAME LocalImageUrlHelperTest COMMAND LocalImageUrlHelperTest)
 
+    qt_add_executable(JobListModelTest
+        tests/unit/JobListModelTest.cpp
+        src/ui/models/JobListModel.cpp
+        src/shared/Formatters.cpp
+    )
+    target_include_directories(JobListModelTest PRIVATE src)
+    target_link_libraries(JobListModelTest PRIVATE Qt6::Core Qt6::Test)
+    add_test(NAME JobListModelTest COMMAND JobListModelTest)
+
+    qt_add_executable(JobEngineTest
+        tests/unit/JobEngineTest.cpp
+        src/core/jobs/JobEngine.cpp
+        src/infrastructure/db/DatabaseManager.cpp
+    )
+    target_include_directories(JobEngineTest PRIVATE src)
+    target_link_libraries(JobEngineTest PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
+    add_test(NAME JobEngineTest COMMAND JobEngineTest)
+
     if(NOT CINEVAULT_BUILD_MINIMAL_GUI)
         qt_add_executable(DocumentPreviewServiceTest
             tests/unit/DocumentPreviewServiceTest.cpp
@@ -400,6 +418,51 @@ if(BUILD_TESTING)
         target_include_directories(MaterialCenterQueryServiceTest PRIVATE src)
         target_link_libraries(MaterialCenterQueryServiceTest PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
         add_test(NAME MaterialCenterQueryServiceTest COMMAND MaterialCenterQueryServiceTest)
+
+        qt_add_executable(MaterialCatalogSyncServiceTest
+            tests/unit/MaterialCatalogSyncServiceTest.cpp
+            src/application/MaterialCatalogSyncService.cpp
+            src/application/ProjectService.cpp
+            src/core/jobs/JobEngine.cpp
+            src/infrastructure/config/AppSettings.cpp
+            src/infrastructure/db/DatabaseManager.cpp
+            src/infrastructure/db/GlobalDatabaseManager.cpp
+            src/infrastructure/logging/Logger.cpp
+            src/shared/Formatters.cpp
+            src/shared/Paths.cpp
+        )
+        target_include_directories(MaterialCatalogSyncServiceTest PRIVATE src)
+        target_compile_definitions(MaterialCatalogSyncServiceTest PRIVATE CINEVAULT_TESTING=1)
+        target_link_libraries(MaterialCatalogSyncServiceTest PRIVATE Qt6::Core Qt6::Sql Qt6::Concurrent Qt6::Test)
+        add_test(NAME MaterialCatalogSyncServiceTest COMMAND MaterialCatalogSyncServiceTest)
+
+        qt_add_executable(ImportServiceLegacyRescanTest
+            tests/unit/ImportServiceLegacyRescanTest.cpp
+            src/application/ImportService.cpp
+            src/application/JobService.cpp
+            src/core/jobs/JobEngine.cpp
+            src/core/scan/FileTypeService.cpp
+            src/core/scan/ScanEngine.cpp
+            src/infrastructure/db/DatabaseManager.cpp
+        )
+        target_include_directories(ImportServiceLegacyRescanTest PRIVATE src)
+        target_link_libraries(ImportServiceLegacyRescanTest PRIVATE Qt6::Core Qt6::Sql Qt6::Concurrent Qt6::Test)
+        add_test(NAME ImportServiceLegacyRescanTest COMMAND ImportServiceLegacyRescanTest)
+
+        qt_add_executable(MediaTaskServiceRecoveryTest
+            tests/unit/MediaTaskServiceRecoveryTest.cpp
+            src/application/MediaTaskService.cpp
+            src/core/jobs/JobEngine.cpp
+            src/core/media/MediaProbeEngine.cpp
+            src/core/thumbnail/ThumbnailEngine.cpp
+            src/infrastructure/config/AppSettings.cpp
+            src/infrastructure/db/DatabaseManager.cpp
+            src/infrastructure/ffmpeg/FFmpegAdapter.cpp
+            src/shared/Paths.cpp
+        )
+        target_include_directories(MediaTaskServiceRecoveryTest PRIVATE src)
+        target_link_libraries(MediaTaskServiceRecoveryTest PRIVATE Qt6::Core Qt6::Sql Qt6::Concurrent Qt6::Test)
+        add_test(NAME MediaTaskServiceRecoveryTest COMMAND MediaTaskServiceRecoveryTest)
 
         qt_add_executable(FeedbackMessageListModelTest
             tests/unit/FeedbackMessageListModelTest.cpp
@@ -427,6 +490,25 @@ if(BUILD_TESTING)
     endif()
 
     if(CINEVAULT_HAS_BUNDLED_WEBP)
+        qt_add_executable(VisionApiClientImageTest
+            tests/unit/VisionApiClientImageTest.cpp
+            src/infrastructure/network/VisionApiClient.cpp
+            src/infrastructure/network/VisionResponseParser.cpp
+            src/infrastructure/logging/Logger.cpp
+        )
+        target_include_directories(VisionApiClientImageTest PRIVATE src)
+        target_compile_definitions(VisionApiClientImageTest PRIVATE
+            CINEVAULT_HAS_BUNDLED_WEBP=1
+        )
+        target_link_libraries(VisionApiClientImageTest PRIVATE
+            Qt6::Core
+            Qt6::Gui
+            Qt6::Network
+            Qt6::Test
+            webpdecoder
+        )
+        add_test(NAME VisionApiClientImageTest COMMAND VisionApiClientImageTest)
+
         qt_add_executable(LocalImageProviderTest
             tests/unit/LocalImageProviderTest.cpp
             src/ui/imaging/LocalImageProvider.cpp
@@ -460,6 +542,8 @@ if(BUILD_TESTING)
             VisionApiClientJsonTest
             UpdateServiceTest
             LocalImageUrlHelperTest
+            JobListModelTest
+            JobEngineTest
         )
         if(TARGET FeedbackMessageListModelTest)
             list(APPEND CINEVAULT_PATH_AWARE_TESTS FeedbackMessageListModelTest)
@@ -470,11 +554,23 @@ if(BUILD_TESTING)
         if(TARGET MaterialCenterQueryServiceTest)
             list(APPEND CINEVAULT_PATH_AWARE_TESTS MaterialCenterQueryServiceTest)
         endif()
+        if(TARGET MaterialCatalogSyncServiceTest)
+            list(APPEND CINEVAULT_PATH_AWARE_TESTS MaterialCatalogSyncServiceTest)
+        endif()
+        if(TARGET ImportServiceLegacyRescanTest)
+            list(APPEND CINEVAULT_PATH_AWARE_TESTS ImportServiceLegacyRescanTest)
+        endif()
+        if(TARGET MediaTaskServiceRecoveryTest)
+            list(APPEND CINEVAULT_PATH_AWARE_TESTS MediaTaskServiceRecoveryTest)
+        endif()
         if(TARGET FeedbackAttachmentCacheTest)
             list(APPEND CINEVAULT_PATH_AWARE_TESTS FeedbackAttachmentCacheTest)
         endif()
         if(TARGET LocalImageProviderTest)
             list(APPEND CINEVAULT_PATH_AWARE_TESTS LocalImageProviderTest)
+        endif()
+        if(TARGET VisionApiClientImageTest)
+            list(APPEND CINEVAULT_PATH_AWARE_TESTS VisionApiClientImageTest)
         endif()
         set_tests_properties(${CINEVAULT_PATH_AWARE_TESTS} PROPERTIES
             ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${CINEVAULT_TEST_QT_BIN_DIR}"

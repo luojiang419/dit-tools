@@ -234,6 +234,10 @@ QVector<GlobalVideoAsset> MaterialCenterQueryService::fetchAssets(const QString 
                 "OR g.project_name LIKE ? ESCAPE '\\' "
                 "OR g.source_root_name LIKE ? ESCAPE '\\' "
                 "OR EXISTS ("
+                "SELECT 1 FROM material_dimension_analysis d WHERE d.video_key = g.video_key "
+                "AND (COALESCE(d.dimension_name, '') LIKE ? ESCAPE '\\' "
+                "OR COALESCE(d.detail, '') LIKE ? ESCAPE '\\')) "
+                "OR EXISTS ("
                 "SELECT 1 FROM video_frame_analysis f WHERE f.video_key = g.video_key "
                 "AND (COALESCE(f.caption, '') LIKE ? ESCAPE '\\' "
                 "OR COALESCE(f.tags_json, '') LIKE ? ESCAPE '\\' "
@@ -253,6 +257,10 @@ QVector<GlobalVideoAsset> MaterialCenterQueryService::fetchAssets(const QString 
                 "OR g.project_name LIKE ? ESCAPE '\\' "
                 "OR g.source_root_name LIKE ? ESCAPE '\\' "
                 "OR EXISTS ("
+                "SELECT 1 FROM material_dimension_analysis d WHERE d.video_key = g.video_key "
+                "AND (COALESCE(d.dimension_name, '') LIKE ? ESCAPE '\\' "
+                "OR COALESCE(d.detail, '') LIKE ? ESCAPE '\\')) "
+                "OR EXISTS ("
                 "SELECT 1 FROM video_frame_analysis f WHERE f.video_key = g.video_key "
                 "AND (COALESCE(f.caption, '') LIKE ? ESCAPE '\\' "
                 "OR COALESCE(f.tags_json, '') LIKE ? ESCAPE '\\' "
@@ -260,7 +268,7 @@ QVector<GlobalVideoAsset> MaterialCenterQueryService::fetchAssets(const QString 
                 "OR COALESCE(f.actions, '') LIKE ? ESCAPE '\\' "
                 "OR COALESCE(f.setting_text, '') LIKE ? ESCAPE '\\')))");
         }
-        for (int index = 0; index < 14; ++index) {
+        for (int index = 0; index < 16; ++index) {
             binds.append(likePattern);
         }
     }
@@ -343,6 +351,24 @@ VideoAnalysisDetail MaterialCenterQueryService::fetchDetail(const QString &video
         frame.lastHttpStatus = frameQuery.value(12).toInt();
         frame.lastAttemptAt = frameQuery.value(13).toString();
         detail.frames.append(frame);
+    }
+
+    QSqlQuery dimensionQuery(m_globalDatabaseManager->database());
+    dimensionQuery.prepare(QStringLiteral(
+        "SELECT dimension_name, detail, analyzed_at "
+        "FROM material_dimension_analysis WHERE video_key = ? "
+        "ORDER BY analyzed_at DESC, id DESC"));
+    dimensionQuery.addBindValue(videoKey.trimmed());
+    if (!execOrEmpty(dimensionQuery)) {
+        return detail;
+    }
+
+    while (dimensionQuery.next()) {
+        MaterialDimensionAnalysis dimension;
+        dimension.name = dimensionQuery.value(0).toString();
+        dimension.detail = dimensionQuery.value(1).toString();
+        dimension.analyzedAt = dimensionQuery.value(2).toString();
+        detail.dimensionAnalyses.append(dimension);
     }
     return detail;
 }

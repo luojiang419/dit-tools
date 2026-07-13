@@ -39,6 +39,7 @@ struct SourceRoot {
     qint64 imageCount = 0;
     qint64 otherCount = 0;
     qint64 warningCount = 0;
+    int scanVersion = 0;
 };
 
 struct FolderNode {
@@ -150,6 +151,12 @@ struct VisionVideoSummary {
     QString summary;
     QStringList keywords;
     QStringList scenes;
+};
+
+struct MaterialDimensionAnalysis {
+    QString name;
+    QString detail;
+    QString analyzedAt;
 };
 
 struct VideoAnalysisTask {
@@ -345,6 +352,28 @@ struct BackupPlan {
 struct VideoAnalysisDetail {
     GlobalVideoAsset asset;
     QVector<FrameAnalysisRecord> frames;
+    QVector<MaterialDimensionAnalysis> dimensionAnalyses;
+};
+
+struct JobSubject {
+    QString kind;
+    QString key;
+    QString name;
+    QString path;
+    QString thumbnailPath;
+    ThumbnailStatus thumbnailStatus = ThumbnailStatus::Pending;
+    QString typeLabel;
+};
+
+struct JobProgressContext {
+    int currentStep = 0;
+    int totalSteps = 0;
+    QString stepLabel;
+    qint64 currentItem = 0;
+    qint64 totalItems = 0;
+    QString unitLabel;
+    int currentFrameNumber = 0;
+    QString extraLabel;
 };
 
 struct Job {
@@ -356,6 +385,8 @@ struct Job {
     QString errorMessage;
     qint64 progress = 0;
     qint64 sourceRootId = 0;
+    JobSubject subject;
+    JobProgressContext progressContext;
     QDateTime startedAt;
     QDateTime updatedAt;
 };

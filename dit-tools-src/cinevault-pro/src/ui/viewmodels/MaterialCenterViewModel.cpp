@@ -42,9 +42,56 @@ QVariantList stringListToVariants(const QStringList &items)
     return values;
 }
 
+QVariantList dimensionAnalysesToVariants(const QVector<MaterialDimensionAnalysis> &items)
+{
+    QVariantList values;
+    for (const auto &item : items) {
+        values.append(QVariantMap{
+            {QStringLiteral("name"), item.name},
+            {QStringLiteral("detail"), item.detail},
+            {QStringLiteral("analyzedAt"), item.analyzedAt}
+        });
+    }
+    return values;
+}
+
+QStringList variantListToStringList(const QVariantList &items)
+{
+    QStringList values;
+    for (const auto &item : items) {
+        const auto text = item.toString().simplified();
+        if (!text.isEmpty()) {
+            values.append(text);
+        }
+    }
+    values.removeDuplicates();
+    return values;
+}
+
 QStringList searchTerms(const QString &text)
 {
     return text.trimmed().split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
+}
+
+QVariantMap assetTypeOption(int value, const QString &label)
+{
+    return QVariantMap{{QStringLiteral("value"), value}, {QStringLiteral("label"), label}};
+}
+
+QVariantList fileTypeOptions()
+{
+    return {
+        assetTypeOption(-1, QStringLiteral("全部文件")),
+        assetTypeOption(static_cast<int>(AssetType::Video), QStringLiteral("视频文件")),
+        assetTypeOption(static_cast<int>(AssetType::Audio), QStringLiteral("音频文件")),
+        assetTypeOption(static_cast<int>(AssetType::Image), QStringLiteral("图片文件")),
+        assetTypeOption(static_cast<int>(AssetType::Subtitle), QStringLiteral("字幕文件")),
+        assetTypeOption(static_cast<int>(AssetType::ProjectFile), QStringLiteral("工程文件")),
+        assetTypeOption(static_cast<int>(AssetType::Document), QStringLiteral("文档文件")),
+        assetTypeOption(static_cast<int>(AssetType::Archive), QStringLiteral("压缩文件")),
+        assetTypeOption(static_cast<int>(AssetType::Other), QStringLiteral("其他文件")),
+        assetTypeOption(static_cast<int>(AssetType::Unknown), QStringLiteral("未识别文件"))
+    };
 }
 
 QString frameSearchText(const FrameAnalysisRecord &frame)
@@ -220,6 +267,7 @@ MaterialCenterViewModel::MaterialCenterViewModel(MaterialCenterQueryService *que
             m_analysisProgressByVideoKey.insert(videoKey, progressState);
             if (videoKey == m_detail.asset.videoKey) {
                 emit analysisProgressChanged();
+                emit dimensionAnalysisChanged();
             }
             if (state == static_cast<int>(JobState::Failed) && !errorMessage.trimmed().isEmpty()) {
                 setMessage(errorMessage);
@@ -233,6 +281,22 @@ MaterialCenterViewModel::MaterialCenterViewModel(MaterialCenterQueryService *que
             m_queuedAnalysisCount = queuedCount;
             emit analysisProgressChanged();
             emit statusChanged();
+        });
+        connect(m_analysisService, &VideoAnalysisService::dimensionAnalysisProgressChanged, this,
+                [this](const QString &videoKey, bool running, const QString &detail, const QString &errorMessage) {
+            DimensionProgressState state;
+            state.running = running;
+            state.detail = detail;
+            state.errorMessage = errorMessage;
+            m_dimensionProgressByVideoKey.insert(videoKey, state);
+            if (videoKey == m_detail.asset.videoKey) {
+                emit dimensionAnalysisChanged();
+            }
+            if (!errorMessage.trimmed().isEmpty()) {
+                setMessage(errorMessage);
+            } else if (!detail.trimmed().isEmpty()) {
+                setMessage(detail);
+            }
         });
     }
 }
@@ -278,6 +342,11 @@ QVariantList MaterialCenterViewModel::sourceOptions() const
 QVariantList MaterialCenterViewModel::assetTypeOptions() const
 {
     return m_assetTypeOptions;
+}
+
+int MaterialCenterViewModel::assetTypeFilter() const
+{
+    return m_assetTypeFilter;
 }
 
 QVariantList MaterialCenterViewModel::analysisStatusOptions() const
@@ -378,6 +447,11 @@ QVariantList MaterialCenterViewModel::selectedKeywords() const
 QVariantList MaterialCenterViewModel::selectedScenes() const
 {
     return stringListToVariants(m_detail.asset.scenes);
+}
+
+QVariantList MaterialCenterViewModel::selectedDimensionAnalyses() const
+{
+    return dimensionAnalysesToVariants(m_detail.dimensionAnalyses);
 }
 
 QVariantList MaterialCenterViewModel::selectedFrames() const
@@ -540,6 +614,46 @@ bool MaterialCenterViewModel::canConfirmSelected() const
     return hasSelection() && canConfirmAsset(m_detail.asset);
 }
 
+bool MaterialCenterViewModel::selectedDimensionAnalysisBusy() const
+{
+    return selectedDimensionProgressState().running;
+}
+
+QString MaterialCenterViewModel::selectedDimensionAnalysisText() const
+{
+    return selectedDimensionProgressState().detail;
+}
+
+QString MaterialCenterViewModel::selectedDimensionAnalysisError() const
+{
+    return selectedDimensionProgressState().errorMessage;
+}
+
+bool MaterialCenterViewModel::canAnalyzeSelectedDimensions() const
+{
+    return hasSelection()
+        && m_detail.asset.analysisStatus == VideoAnalysisStatus::Ready
+        && !selectedAnalysisBusy()
+        && !selectedDimensionAnalysisBusy();
+}
+
+bool MaterialCenterViewModel::canAnalyzeVisibleDimensions() const
+{
+    if (!m_analysisService) {
+        return false;
+    }
+
+    for (const auto &asset : m_assets) {
+        const auto state = m_dimensionProgressByVideoKey.value(asset.videoKey);
+        if (canAnalyzeAsset(asset)
+            && asset.analysisStatus == VideoAnalysisStatus::Ready
+            && !state.running) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool MaterialCenterViewModel::selectedIsVideo() const
 {
     return hasSelection() && m_detail.asset.assetType == AssetType::Video;
@@ -578,8 +692,7 @@ void MaterialCenterViewModel::reload()
 
     m_projectOptions = prependAllOption(m_queryService->fetchProjectOptions(), QStringLiteral("全部项目"));
     m_sourceOptions = prependAllOption(m_queryService->fetchSourceOptions(m_projectFilter), QStringLiteral("全部素材源"));
-    m_assetTypeOptions = m_queryService->fetchAssetTypeOptions();
-    m_assetTypeOptions.prepend(QVariantMap{{QStringLiteral("value"), -1}, {QStringLiteral("label"), QStringLiteral("全部类型")}});
+    m_assetTypeOptions = fileTypeOptions();
     m_assets = m_queryService->fetchAssets(m_searchText,
                                            m_projectFilter,
                                            m_sourceFilter,
@@ -600,6 +713,7 @@ void MaterialCenterViewModel::reload()
     emit statusChanged();
     emit selectionChanged();
     emit analysisProgressChanged();
+    emit dimensionAnalysisChanged();
 }
 
 void MaterialCenterViewModel::setSearchText(const QString &searchText)
@@ -666,6 +780,7 @@ void MaterialCenterViewModel::selectVideo(const QString &videoKey)
     prepareSelection(normalizedKey);
     emit selectionChanged();
     emit analysisProgressChanged();
+    emit dimensionAnalysisChanged();
 }
 
 void MaterialCenterViewModel::selectVideoAt(int index)
@@ -722,6 +837,87 @@ void MaterialCenterViewModel::analyzeSelected()
         m_analysisProgressByVideoKey.insert(m_detail.asset.videoKey, state);
         emit analysisProgressChanged();
     }
+}
+
+void MaterialCenterViewModel::analyzeSelectedDimensions(const QVariantList &dimensions)
+{
+    if (!hasSelection() || !m_analysisService) {
+        return;
+    }
+
+    const auto dimensionNames = variantListToStringList(dimensions);
+    QString errorMessage;
+    if (m_analysisService->analyzeDimensions(m_detail.asset.videoKey, dimensionNames, &errorMessage)) {
+        setMessage(QStringLiteral("已开始多维度解析：%1").arg(m_detail.asset.fileName));
+        return;
+    }
+
+    setMessage(errorMessage);
+    DimensionProgressState state;
+    state.running = false;
+    state.detail = errorMessage;
+    state.errorMessage = errorMessage;
+    m_dimensionProgressByVideoKey.insert(m_detail.asset.videoKey, state);
+    emit dimensionAnalysisChanged();
+}
+
+void MaterialCenterViewModel::analyzeVisibleDimensions(const QVariantList &dimensions)
+{
+    if (!m_analysisService) {
+        return;
+    }
+
+    const auto dimensionNames = variantListToStringList(dimensions);
+    if (dimensionNames.isEmpty()) {
+        setMessage(QStringLiteral("请至少添加一个解析维度。"));
+        return;
+    }
+
+    int accepted = 0;
+    int completed = 0;
+    QString lastError;
+    for (const auto &asset : m_assets) {
+        const auto state = m_dimensionProgressByVideoKey.value(asset.videoKey);
+        if (!canAnalyzeAsset(asset)
+            || asset.analysisStatus != VideoAnalysisStatus::Ready
+            || state.running) {
+            continue;
+        }
+
+        QString pendingError;
+        const auto pendingCount = m_analysisService->pendingDimensionCount(asset.videoKey, dimensionNames, &pendingError);
+        if (pendingCount == 0) {
+            ++completed;
+            continue;
+        }
+        if (pendingCount < 0) {
+            if (!pendingError.trimmed().isEmpty()) {
+                lastError = pendingError;
+            }
+            continue;
+        }
+
+        QString errorMessage;
+        if (m_analysisService->analyzeDimensions(asset.videoKey, dimensionNames, &errorMessage)) {
+            ++accepted;
+        } else if (!errorMessage.trimmed().isEmpty()) {
+            lastError = errorMessage;
+        }
+    }
+
+    if (accepted > 0) {
+        const auto completedText = completed > 0
+            ? QStringLiteral("，已跳过 %1 条已完成素材。").arg(completed)
+            : QStringLiteral("。");
+        setMessage(QStringLiteral("已开始 %1 条素材的全局多维度解析%2").arg(accepted).arg(completedText));
+    } else if (completed > 0) {
+        setMessage(QStringLiteral("当前结果中所选维度都已解析完成，无需重复解析。"));
+    } else if (!lastError.trimmed().isEmpty()) {
+        setMessage(lastError);
+    } else {
+        setMessage(QStringLiteral("当前结果没有可进行多维度解析的已解析素材。"));
+    }
+    emit dimensionAnalysisChanged();
 }
 
 void MaterialCenterViewModel::retrySelectedFrame(int frameNumber)
@@ -1002,6 +1198,7 @@ void MaterialCenterViewModel::loadPendingDetail()
     refreshSelectedCaches();
     emit selectionChanged();
     emit analysisProgressChanged();
+    emit dimensionAnalysisChanged();
 }
 
 void MaterialCenterViewModel::refreshSelectedCaches()
@@ -1192,6 +1389,15 @@ MaterialCenterViewModel::AnalysisProgressState MaterialCenterViewModel::selected
     const auto key = m_detail.asset.videoKey;
     if (!key.trimmed().isEmpty() && m_analysisProgressByVideoKey.contains(key)) {
         return m_analysisProgressByVideoKey.value(key);
+    }
+    return {};
+}
+
+MaterialCenterViewModel::DimensionProgressState MaterialCenterViewModel::selectedDimensionProgressState() const
+{
+    const auto key = m_detail.asset.videoKey;
+    if (!key.trimmed().isEmpty() && m_dimensionProgressByVideoKey.contains(key)) {
+        return m_dimensionProgressByVideoKey.value(key);
     }
     return {};
 }

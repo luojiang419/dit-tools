@@ -13,13 +13,26 @@ Rectangle {
         anchors.margins: 20
         spacing: 14
 
-        Text {
+        RowLayout {
             Layout.fillWidth: true
-            text: "任务"
-            color: Theme.text
-            font.pixelSize: 28
-            font.weight: Font.Black
-            elide: Text.ElideRight
+            spacing: 12
+
+            Text {
+                Layout.fillWidth: true
+                text: "任务"
+                color: Theme.text
+                font.pixelSize: 28
+                font.weight: Font.Black
+                elide: Text.ElideRight
+            }
+
+            ActionButton {
+                Layout.preferredWidth: 126
+                Layout.preferredHeight: 36
+                text: "清理已完成"
+                enabled: viewModel && viewModel.canClearCompletedJobs
+                onClicked: if (viewModel) viewModel.clearCompletedJobs()
+            }
         }
 
         ColumnLayout {
@@ -245,7 +258,7 @@ Rectangle {
 
                         delegate: Rectangle {
                             width: ListView.view.width
-                            height: 98
+                            height: 124
                             radius: 16
                             color: viewModel && viewModel.selectedJobId === model.jobId ? Theme.selectedBg : Theme.bg
                             border.width: 1
@@ -259,7 +272,7 @@ Rectangle {
                             ColumnLayout {
                                 anchors.fill: parent
                                 anchors.margins: 12
-                                spacing: 8
+                                spacing: 7
 
                                 RowLayout {
                                     Layout.fillWidth: true
@@ -283,10 +296,27 @@ Rectangle {
 
                                 Text {
                                     Layout.fillWidth: true
+                                    text: model.subjectName && model.subjectName.length > 0 ? model.subjectName : model.jobTypeLabel
+                                    color: Theme.text
+                                    font.pixelSize: 13
+                                    font.weight: Font.DemiBold
+                                    elide: Text.ElideRight
+                                }
+
+                                Text {
+                                    Layout.fillWidth: true
                                     text: model.detail
                                     color: Theme.muted
                                     wrapMode: Text.Wrap
-                                    maximumLineCount: 2
+                                    maximumLineCount: 1
+                                    elide: Text.ElideRight
+                                }
+
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: model.progressLabel && model.progressLabel.length > 0 ? model.progressLabel : "等待进度更新"
+                                    color: Theme.muted
+                                    font.pixelSize: 12
                                     elide: Text.ElideRight
                                 }
 

@@ -188,7 +188,8 @@ Rectangle {
                             anchors.fill: parent
                             anchors.leftMargin: 12
                             anchors.rightMargin: 12
-                            text: modelData.title + " " + modelData.progress + "% · " + modelData.stateLabel
+                            text: modelData.subjectName + " " + modelData.progress + "% · "
+                                + (modelData.progressLabel && modelData.progressLabel.length > 0 ? modelData.progressLabel : modelData.stateLabel)
                             color: Theme.text
                             font.pixelSize: 12
                             elide: Text.ElideRight

@@ -404,8 +404,41 @@ bool GlobalDatabaseManager::initializeSchema(QSqlDatabase &db, QString *errorMes
     }
 
     auto version = currentSchemaVersion(db);
-    if (version < 4) {
-        if (!setSchemaVersion(db, 4, errorMessage)) {
+    if (version < 6) {
+        if (!setSchemaVersion(db, 6, errorMessage)) {
+            return false;
+        }
+        version = 6;
+    }
+    if (version < 7) {
+        QSqlQuery successBackfill(db);
+        if (!successBackfill.exec(QStringLiteral(
+                "UPDATE video_frame_analysis SET analysis_state = 1 "
+                "WHERE COALESCE(analysis_state, 0) = 0 "
+                "AND TRIM(COALESCE(error_message, '')) = '' "
+                "AND (TRIM(COALESCE(caption, '')) <> '' "
+                "OR COALESCE(tags_json, '') NOT IN ('', '[]') "
+                "OR COALESCE(objects_json, '') NOT IN ('', '[]') "
+                "OR TRIM(COALESCE(actions, '')) <> '' "
+                "OR TRIM(COALESCE(setting_text, '')) <> '')"))) {
+            if (errorMessage) {
+                *errorMessage = successBackfill.lastError().text();
+            }
+            return false;
+        }
+
+        QSqlQuery failureBackfill(db);
+        if (!failureBackfill.exec(QStringLiteral(
+                "UPDATE video_frame_analysis SET analysis_state = 2 "
+                "WHERE COALESCE(analysis_state, 0) = 0 "
+                "AND TRIM(COALESCE(error_message, '')) <> ''"))) {
+            if (errorMessage) {
+                *errorMessage = failureBackfill.lastError().text();
+            }
+            return false;
+        }
+
+        if (!setSchemaVersion(db, 7, errorMessage)) {
             return false;
         }
     }
@@ -497,10 +530,41 @@ bool GlobalDatabaseManager::createSchema(QSqlDatabase &db, QString *errorMessage
                        "last_updated_at TEXT NOT NULL DEFAULT '',"
                        "FOREIGN KEY(video_key) REFERENCES global_video_asset(video_key) ON DELETE CASCADE"
                        ");"),
+        QStringLiteral("CREATE TABLE IF NOT EXISTS material_dimension_analysis ("
+                       "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                       "video_key TEXT NOT NULL,"
+                       "dimension_key TEXT NOT NULL,"
+                       "dimension_name TEXT NOT NULL,"
+                       "detail TEXT NOT NULL DEFAULT '',"
+                       "model_name TEXT NOT NULL DEFAULT '',"
+                       "prompt_version TEXT NOT NULL DEFAULT '',"
+                       "analyzed_at TEXT NOT NULL DEFAULT '',"
+                       "FOREIGN KEY(video_key) REFERENCES global_video_asset(video_key) ON DELETE CASCADE,"
+                       "UNIQUE(video_key, dimension_key)"
+                       ");"),
+        QStringLiteral("CREATE TABLE IF NOT EXISTS material_dimension_frame_analysis ("
+                       "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                       "video_key TEXT NOT NULL,"
+                       "dimension_key TEXT NOT NULL,"
+                       "dimension_name TEXT NOT NULL,"
+                       "frame_number INTEGER NOT NULL DEFAULT 0,"
+                       "timestamp_ms INTEGER NOT NULL DEFAULT 0,"
+                       "image_path TEXT NOT NULL DEFAULT '',"
+                       "detail TEXT NOT NULL DEFAULT '',"
+                       "error_message TEXT NOT NULL DEFAULT '',"
+                       "analysis_state INTEGER NOT NULL DEFAULT 0,"
+                       "model_name TEXT NOT NULL DEFAULT '',"
+                       "prompt_version TEXT NOT NULL DEFAULT '',"
+                       "analyzed_at TEXT NOT NULL DEFAULT '',"
+                       "FOREIGN KEY(video_key) REFERENCES global_video_asset(video_key) ON DELETE CASCADE,"
+                       "UNIQUE(video_key, dimension_key, frame_number)"
+                       ");"),
         QStringLiteral("CREATE INDEX IF NOT EXISTS idx_global_video_project ON global_video_asset(project_uuid);"),
         QStringLiteral("CREATE INDEX IF NOT EXISTS idx_global_video_source ON global_video_asset(source_root_name);"),
         QStringLiteral("CREATE INDEX IF NOT EXISTS idx_global_video_status ON global_video_asset(analysis_status, confirmation_status);"),
-        QStringLiteral("CREATE INDEX IF NOT EXISTS idx_frame_video_key ON video_frame_analysis(video_key);")
+        QStringLiteral("CREATE INDEX IF NOT EXISTS idx_frame_video_key ON video_frame_analysis(video_key);"),
+        QStringLiteral("CREATE INDEX IF NOT EXISTS idx_material_dimension_video ON material_dimension_analysis(video_key);"),
+        QStringLiteral("CREATE INDEX IF NOT EXISTS idx_material_dimension_frame_video ON material_dimension_frame_analysis(video_key, dimension_key, analysis_state);")
     };
 
     if (!executeBatch(db, statements, errorMessage)) {
@@ -524,6 +588,35 @@ bool GlobalDatabaseManager::ensureSchemaCompatibility(QSqlDatabase &db, QString 
                        "last_error_message TEXT NOT NULL DEFAULT '',"
                        "last_updated_at TEXT NOT NULL DEFAULT '',"
                        "FOREIGN KEY(video_key) REFERENCES global_video_asset(video_key) ON DELETE CASCADE"
+                       ");"),
+        QStringLiteral("CREATE TABLE IF NOT EXISTS material_dimension_analysis ("
+                       "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                       "video_key TEXT NOT NULL,"
+                       "dimension_key TEXT NOT NULL,"
+                       "dimension_name TEXT NOT NULL,"
+                       "detail TEXT NOT NULL DEFAULT '',"
+                       "model_name TEXT NOT NULL DEFAULT '',"
+                       "prompt_version TEXT NOT NULL DEFAULT '',"
+                       "analyzed_at TEXT NOT NULL DEFAULT '',"
+                       "FOREIGN KEY(video_key) REFERENCES global_video_asset(video_key) ON DELETE CASCADE,"
+                       "UNIQUE(video_key, dimension_key)"
+                       ");"),
+        QStringLiteral("CREATE TABLE IF NOT EXISTS material_dimension_frame_analysis ("
+                       "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                       "video_key TEXT NOT NULL,"
+                       "dimension_key TEXT NOT NULL,"
+                       "dimension_name TEXT NOT NULL,"
+                       "frame_number INTEGER NOT NULL DEFAULT 0,"
+                       "timestamp_ms INTEGER NOT NULL DEFAULT 0,"
+                       "image_path TEXT NOT NULL DEFAULT '',"
+                       "detail TEXT NOT NULL DEFAULT '',"
+                       "error_message TEXT NOT NULL DEFAULT '',"
+                       "analysis_state INTEGER NOT NULL DEFAULT 0,"
+                       "model_name TEXT NOT NULL DEFAULT '',"
+                       "prompt_version TEXT NOT NULL DEFAULT '',"
+                       "analyzed_at TEXT NOT NULL DEFAULT '',"
+                       "FOREIGN KEY(video_key) REFERENCES global_video_asset(video_key) ON DELETE CASCADE,"
+                       "UNIQUE(video_key, dimension_key, frame_number)"
                        ");")
     };
     if (!executeBatch(db, statements, errorMessage)) {
@@ -579,6 +672,18 @@ bool GlobalDatabaseManager::ensureSchemaCompatibility(QSqlDatabase &db, QString 
         return false;
     }
     if (!query.exec(QStringLiteral("CREATE INDEX IF NOT EXISTS idx_global_video_asset_type ON global_video_asset(asset_type);"))) {
+        if (errorMessage) {
+            *errorMessage = query.lastError().text();
+        }
+        return false;
+    }
+    if (!query.exec(QStringLiteral("CREATE INDEX IF NOT EXISTS idx_material_dimension_video ON material_dimension_analysis(video_key);"))) {
+        if (errorMessage) {
+            *errorMessage = query.lastError().text();
+        }
+        return false;
+    }
+    if (!query.exec(QStringLiteral("CREATE INDEX IF NOT EXISTS idx_material_dimension_frame_video ON material_dimension_frame_analysis(video_key, dimension_key, analysis_state);"))) {
         if (errorMessage) {
             *errorMessage = query.lastError().text();
         }

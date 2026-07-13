@@ -118,6 +118,8 @@ AppContext::AppContext(QObject *parent)
     connect(m_projectService, &ProjectService::projectChanged, m_jobTimelineViewModel, &JobTimelineViewModel::reload);
     connect(m_projectService, &ProjectService::projectChanged, m_inspectorViewModel, &InspectorViewModel::clear);
     connect(m_projectService, &ProjectService::projectChanged, m_materialCatalogSyncService, &MaterialCatalogSyncService::syncCurrentProject);
+    connect(m_projectService, &ProjectService::projectChanged, m_mediaTaskService, &MediaTaskService::recoverStaleThumbnails);
+    connect(m_projectService, &ProjectService::projectChanged, m_importService, &ImportService::rescanLegacySourceRoots);
     connect(m_importService, &ImportService::catalogChanged, m_sourceRailViewModel, &SourceRailViewModel::reload);
     connect(m_importService, &ImportService::catalogChanged, m_libraryWorkspaceViewModel, &LibraryWorkspaceViewModel::reload);
     connect(m_importService, &ImportService::catalogChanged, m_materialCatalogSyncService, &MaterialCatalogSyncService::syncCurrentProject);

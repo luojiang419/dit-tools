@@ -12,6 +12,7 @@ Rectangle {
     property real imageViewerScale: 1.0
     property real imageViewerOffsetX: 0
     property real imageViewerOffsetY: 0
+    property string dimensionDialogMessage: ""
 
     function imageFileSource(path) {
         return path && path.length > 0 && localImageUrlHelper
@@ -33,6 +34,65 @@ Rectangle {
 
     function closeImageViewer() {
         imageViewerSource = ""
+    }
+
+    function optionIndex(options, value) {
+        for (var index = 0; index < options.length; ++index) {
+            if (Number(options[index].value) === Number(value)) {
+                return index
+            }
+        }
+        return 0
+    }
+
+    function resetDimensionDrafts() {
+        dimensionDraftModel.clear()
+        var defaults = ["色彩风格", "构图与镜头语言", "品牌/文字线索", "适用场景", "情绪氛围"]
+        for (var index = 0; index < defaults.length; ++index) {
+            dimensionDraftModel.append({ name: defaults[index], selected: true, custom: false })
+        }
+        dimensionDialogMessage = ""
+        if (dimensionNameField) {
+            dimensionNameField.text = ""
+        }
+    }
+
+    function addDimensionDraft() {
+        var name = dimensionNameField.text.trim()
+        if (name.length === 0) {
+            dimensionDialogMessage = "请输入维度名称。"
+            return
+        }
+        for (var index = 0; index < dimensionDraftModel.count; ++index) {
+            if (String(dimensionDraftModel.get(index).name).toLowerCase() === name.toLowerCase()) {
+                dimensionDraftModel.setProperty(index, "selected", true)
+                dimensionDialogMessage = "该维度已在面板中。"
+                dimensionNameField.text = ""
+                return
+            }
+        }
+        dimensionDraftModel.append({ name: name, selected: true, custom: true })
+        dimensionNameField.text = ""
+        dimensionDialogMessage = ""
+    }
+
+    function selectedDimensionDrafts() {
+        var values = []
+        for (var index = 0; index < dimensionDraftModel.count; ++index) {
+            var item = dimensionDraftModel.get(index)
+            if (item.selected && String(item.name).trim().length > 0) {
+                values.push(String(item.name).trim())
+            }
+        }
+        return values
+    }
+
+    function hasSelectedDimensionDrafts() {
+        return selectedDimensionDrafts().length > 0
+    }
+
+    ListModel {
+        id: dimensionDraftModel
     }
 
     color: Theme.bg
@@ -117,6 +177,17 @@ Rectangle {
                     }
 
                     ActionButton {
+                        Layout.preferredWidth: 128
+                        Layout.preferredHeight: 36
+                        text: "全局多维度解析"
+                        enabled: viewModel && viewModel.canAnalyzeVisibleDimensions
+                        onClicked: {
+                            root.resetDimensionDrafts()
+                            dimensionAnalyzeDialog.open()
+                        }
+                    }
+
+                    ActionButton {
                         Layout.preferredWidth: 100
                         Layout.preferredHeight: 36
                         text: "重建全局索引"
@@ -160,9 +231,10 @@ Rectangle {
                     }
 
                     ThemedComboBox {
-                        Layout.preferredWidth: 126
+                        Layout.preferredWidth: 136
                         model: viewModel ? viewModel.assetTypeOptions : []
                         textRole: "label"
+                        currentIndex: viewModel ? root.optionIndex(viewModel.assetTypeOptions, viewModel.assetTypeFilter) : 0
                         onActivated: if (viewModel) viewModel.setAssetTypeFilter(model[index].value)
                     }
 
@@ -721,6 +793,98 @@ Rectangle {
                         }
 
                         Rectangle {
+                            id: dimensionCard
+
+                            Layout.fillWidth: true
+                            visible: viewModel
+                                && (viewModel.selectedDimensionAnalyses.length > 0
+                                    || viewModel.selectedDimensionAnalysisBusy
+                                    || viewModel.selectedDimensionAnalysisError.length > 0)
+                            radius: 16
+                            color: Theme.bg
+                            border.width: 1
+                            border.color: Theme.line
+                            clip: true
+                            implicitHeight: Math.max(130, dimensionColumn.implicitHeight + 28)
+
+                            ColumnLayout {
+                                id: dimensionColumn
+
+                                anchors.fill: parent
+                                anchors.margins: 14
+                                spacing: 10
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: "多维度分析"
+                                        color: Theme.text
+                                        font.pixelSize: 15
+                                        font.weight: Font.DemiBold
+                                    }
+
+                                    BusyIndicator {
+                                        visible: viewModel && viewModel.selectedDimensionAnalysisBusy
+                                        running: visible
+                                        width: 22
+                                        height: 22
+                                    }
+                                }
+
+                                Text {
+                                    Layout.fillWidth: true
+                                    visible: viewModel && viewModel.selectedDimensionAnalysisText.length > 0
+                                    text: viewModel ? viewModel.selectedDimensionAnalysisText : ""
+                                    color: Theme.muted
+                                    wrapMode: Text.WrapAnywhere
+                                }
+
+                                Text {
+                                    Layout.fillWidth: true
+                                    visible: viewModel && viewModel.selectedDimensionAnalysisError.length > 0
+                                    text: viewModel ? viewModel.selectedDimensionAnalysisError : ""
+                                    color: Theme.orange
+                                    wrapMode: Text.WrapAnywhere
+                                }
+
+                                Repeater {
+                                    model: viewModel ? viewModel.selectedDimensionAnalyses : []
+
+                                    delegate: ColumnLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 5
+
+                                        Rectangle {
+                                            Layout.fillWidth: true
+                                            Layout.preferredHeight: index === 0 ? 0 : 1
+                                            visible: index > 0
+                                            color: Theme.line
+                                        }
+
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: modelData.name
+                                            color: Theme.text
+                                            font.pixelSize: 13
+                                            font.weight: Font.DemiBold
+                                            wrapMode: Text.WrapAnywhere
+                                        }
+
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: modelData.detail
+                                            color: Theme.muted
+                                            wrapMode: Text.Wrap
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle {
                             id: pathCard
 
                             Layout.fillWidth: true
@@ -1096,6 +1260,166 @@ Rectangle {
                         if (viewModel) {
                             viewModel.analyzeVisibleAll()
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    Dialog {
+        id: dimensionAnalyzeDialog
+
+        modal: true
+        width: Math.max(280, Math.min(560, root.width - 48))
+        height: Math.max(360, Math.min(560, root.height - 48))
+        x: Math.max(12, Math.round((root.width - width) / 2))
+        y: Math.max(12, Math.round((root.height - height) / 2))
+        padding: 0
+        leftPadding: 0
+        rightPadding: 0
+        topPadding: 0
+        bottomPadding: 0
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+        background: Rectangle {
+            radius: 18
+            color: Theme.bg
+            border.width: 1
+            border.color: Theme.line
+        }
+
+        ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 20
+            spacing: 14
+
+            Text {
+                Layout.fillWidth: true
+                text: "全局多维度解析"
+                color: Theme.text
+                font.pixelSize: 20
+                font.weight: Font.Black
+            }
+
+            Text {
+                Layout.fillWidth: true
+                text: viewModel ? viewModel.statusText : ""
+                color: Theme.muted
+                font.pixelSize: 13
+                elide: Text.ElideRight
+                maximumLineCount: 1
+            }
+
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                radius: 14
+                color: Theme.panel2
+                border.width: 1
+                border.color: Theme.line
+                clip: true
+
+                ScrollView {
+                    id: dimensionDraftScroll
+
+                    anchors.fill: parent
+                    anchors.margins: 10
+                    clip: true
+
+                    ColumnLayout {
+                        width: dimensionDraftScroll.availableWidth
+                        spacing: 6
+
+                        Repeater {
+                            model: dimensionDraftModel
+
+                            delegate: RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+
+                                CheckBox {
+                                    checked: selected
+                                    onToggled: dimensionDraftModel.setProperty(index, "selected", checked)
+                                }
+
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: name
+                                    color: Theme.text
+                                    font.pixelSize: 14
+                                    elide: Text.ElideRight
+                                }
+
+                                ActionButton {
+                                    Layout.preferredWidth: 58
+                                    Layout.preferredHeight: 28
+                                    visible: custom
+                                    text: "删除"
+                                    textPixelSize: 12
+                                    onClicked: dimensionDraftModel.remove(index)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                ThemedTextField {
+                    id: dimensionNameField
+
+                    Layout.fillWidth: true
+                    placeholderText: "添加自定义维度"
+                    onAccepted: root.addDimensionDraft()
+                }
+
+                ActionButton {
+                    Layout.preferredWidth: 72
+                    Layout.preferredHeight: 34
+                    text: "添加"
+                    onClicked: root.addDimensionDraft()
+                }
+            }
+
+            Text {
+                Layout.fillWidth: true
+                visible: root.dimensionDialogMessage.length > 0
+                text: root.dimensionDialogMessage
+                color: Theme.orange
+                font.pixelSize: 12
+                wrapMode: Text.Wrap
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 10
+
+                Item { Layout.fillWidth: true }
+
+                ActionButton {
+                    Layout.preferredWidth: 74
+                    Layout.preferredHeight: 36
+                    text: "取消"
+                    onClicked: dimensionAnalyzeDialog.close()
+                }
+
+                ActionButton {
+                    Layout.preferredWidth: 104
+                    Layout.preferredHeight: 36
+                    text: "开始解析"
+                    primary: true
+                    enabled: viewModel && viewModel.canAnalyzeVisibleDimensions && root.hasSelectedDimensionDrafts()
+                    onClicked: {
+                        var dimensions = root.selectedDimensionDrafts()
+                        if (dimensions.length === 0) {
+                            root.dimensionDialogMessage = "请选择至少一个维度。"
+                            return
+                        }
+                        dimensionAnalyzeDialog.close()
+                        viewModel.analyzeVisibleDimensions(dimensions)
                     }
                 }
             }

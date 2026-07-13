@@ -218,6 +218,7 @@ bool DatabaseManager::createBaseSchema(QSqlDatabase &db, QString *errorMessage) 
                        "image_count INTEGER NOT NULL DEFAULT 0,"
                        "other_count INTEGER NOT NULL DEFAULT 0,"
                        "warning_count INTEGER NOT NULL DEFAULT 0,"
+                       "scan_version INTEGER NOT NULL DEFAULT 0,"
                        "created_at TEXT NOT NULL,"
                        "updated_at TEXT NOT NULL"
                        ");"),
@@ -299,6 +300,7 @@ bool DatabaseManager::ensureBaseSchemaCompatibility(QSqlDatabase &db, QString *e
                              {QStringLiteral("image_count"), QStringLiteral("image_count INTEGER NOT NULL DEFAULT 0")},
                              {QStringLiteral("other_count"), QStringLiteral("other_count INTEGER NOT NULL DEFAULT 0")},
                              {QStringLiteral("warning_count"), QStringLiteral("warning_count INTEGER NOT NULL DEFAULT 0")},
+                             {QStringLiteral("scan_version"), QStringLiteral("scan_version INTEGER NOT NULL DEFAULT 0")},
                              {QStringLiteral("created_at"), QStringLiteral("created_at TEXT NOT NULL DEFAULT ''")},
                              {QStringLiteral("updated_at"), QStringLiteral("updated_at TEXT NOT NULL DEFAULT ''")}
                          },

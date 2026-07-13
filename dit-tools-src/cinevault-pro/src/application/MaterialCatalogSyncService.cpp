@@ -8,6 +8,7 @@
 #include <QtConcurrent>
 
 #include <QDateTime>
+#include <QDir>
 #include <QJsonDocument>
 #include <QMetaObject>
 #include <QSet>
@@ -18,6 +19,8 @@
 
 namespace {
 struct ExistingVideoState {
+    QString videoKey;
+    QString absolutePath;
     qint64 sizeBytes = 0;
     QString modifiedAt;
     VideoAnalysisStatus analysisStatus = VideoAnalysisStatus::Pending;
@@ -67,6 +70,41 @@ QString buildTechnicalSummary(const QString &container, qint64 durationMs, qint6
         parts.append(Formatters::formatBitRate(bitRate));
     }
     return parts.join(QStringLiteral(" · "));
+}
+
+JobSubject projectJobSubject(const Project &project, const QString &fallbackName = QString())
+{
+    JobSubject subject;
+    subject.kind = QStringLiteral("project");
+    subject.key = project.id;
+    subject.name = project.name.trimmed().isEmpty() ? fallbackName : project.name;
+    subject.path = project.rootPath;
+    subject.typeLabel = QStringLiteral("项目");
+    return subject;
+}
+
+JobProgressContext projectProgressContext(const QString &stepLabel, qint64 current, qint64 total)
+{
+    JobProgressContext context;
+    context.currentStep = 1;
+    context.totalSteps = 1;
+    context.stepLabel = stepLabel;
+    context.currentItem = current;
+    context.totalItems = total;
+    context.unitLabel = QStringLiteral("个项目");
+    return context;
+}
+
+QString emptyIfNull(const QString &value)
+{
+    return value.isNull() ? QStringLiteral("") : value;
+}
+
+QString stablePathKey(QString path)
+{
+    auto normalized = QDir::cleanPath(path.trimmed());
+    normalized.replace(QLatin1Char('\\'), QLatin1Char('/'));
+    return normalized.toCaseFolded();
 }
 
 bool execQuery(QSqlQuery &query, QString *errorMessage)
@@ -151,7 +189,7 @@ QHash<QString, ExistingVideoState> loadExistingStates(QSqlDatabase &globalDb, co
     QHash<QString, ExistingVideoState> states;
     QSqlQuery query(globalDb);
     query.prepare(QStringLiteral(
-        "SELECT video_key, size_bytes, modified_at, analysis_status, confirmation_status, "
+        "SELECT video_key, COALESCE(absolute_path, ''), size_bytes, modified_at, analysis_status, confirmation_status, "
         "COALESCE(source_text, ''), COALESCE(error_message, '') "
         "FROM global_video_asset WHERE project_uuid = ?"));
     query.addBindValue(projectUuid);
@@ -161,13 +199,15 @@ QHash<QString, ExistingVideoState> loadExistingStates(QSqlDatabase &globalDb, co
 
     while (query.next()) {
         ExistingVideoState state;
-        state.sizeBytes = query.value(1).toLongLong();
-        state.modifiedAt = query.value(2).toString();
-        state.analysisStatus = static_cast<VideoAnalysisStatus>(query.value(3).toInt());
-        state.confirmationStatus = static_cast<ConfirmationStatus>(query.value(4).toInt());
-        state.sourceText = query.value(5).toString();
-        state.errorMessage = query.value(6).toString();
-        states.insert(query.value(0).toString(), state);
+        state.videoKey = query.value(0).toString();
+        state.absolutePath = query.value(1).toString();
+        state.sizeBytes = query.value(2).toLongLong();
+        state.modifiedAt = query.value(3).toString();
+        state.analysisStatus = static_cast<VideoAnalysisStatus>(query.value(4).toInt());
+        state.confirmationStatus = static_cast<ConfirmationStatus>(query.value(5).toInt());
+        state.sourceText = query.value(6).toString();
+        state.errorMessage = query.value(7).toString();
+        states.insert(state.videoKey, state);
     }
     return states;
 }
@@ -231,12 +271,77 @@ bool upsertSearchRow(QSqlDatabase &globalDb, const GlobalVideoAsset &asset, bool
     query.addBindValue(asset.absolutePath);
     query.addBindValue(Formatters::assetTypeLabel(asset.assetType));
     query.addBindValue(asset.extension);
-    query.addBindValue(asset.technicalSummary);
-    query.addBindValue(asset.summary);
+    query.addBindValue(emptyIfNull(asset.technicalSummary));
+    query.addBindValue(emptyIfNull(asset.summary));
     query.addBindValue(asset.keywords.join(QStringLiteral(" ")));
-    query.addBindValue(QString());
-    query.addBindValue(asset.sourceText);
+    query.addBindValue(QStringLiteral(""));
+    query.addBindValue(emptyIfNull(asset.sourceText));
     return execQuery(query, errorMessage);
+}
+
+bool migrateAnalysisArtifacts(QSqlDatabase &globalDb,
+                              const QString &oldVideoKey,
+                              const QString &newVideoKey,
+                              bool hasFts5,
+                              QString *errorMessage)
+{
+    if (oldVideoKey == newVideoKey) {
+        return true;
+    }
+
+    const QStringList deleteStatements = {
+        QStringLiteral("DELETE FROM material_dimension_frame_analysis WHERE video_key = ?"),
+        QStringLiteral("DELETE FROM video_frame_analysis WHERE video_key = ?"),
+        QStringLiteral("DELETE FROM video_analysis_result WHERE video_key = ?"),
+        QStringLiteral("DELETE FROM video_analysis_task WHERE video_key = ?"),
+        QStringLiteral("DELETE FROM material_dimension_analysis WHERE video_key = ?")
+    };
+    for (const auto &statement : deleteStatements) {
+        QSqlQuery query(globalDb);
+        query.prepare(statement);
+        query.addBindValue(newVideoKey);
+        if (!execQuery(query, errorMessage)) {
+            return false;
+        }
+    }
+
+    if (hasFts5) {
+        QSqlQuery deleteTargetFts(globalDb);
+        deleteTargetFts.prepare(QStringLiteral("DELETE FROM video_search_fts WHERE video_key = ?"));
+        deleteTargetFts.addBindValue(newVideoKey);
+        if (!execQuery(deleteTargetFts, errorMessage)) {
+            return false;
+        }
+    }
+
+    const QStringList updateStatements = {
+        QStringLiteral("UPDATE material_dimension_frame_analysis SET video_key = ? WHERE video_key = ?"),
+        QStringLiteral("UPDATE video_frame_analysis SET video_key = ? WHERE video_key = ?"),
+        QStringLiteral("UPDATE video_analysis_result SET video_key = ? WHERE video_key = ?"),
+        QStringLiteral("UPDATE video_analysis_task SET video_key = ? WHERE video_key = ?"),
+        QStringLiteral("UPDATE material_dimension_analysis SET video_key = ? WHERE video_key = ?")
+    };
+    for (const auto &statement : updateStatements) {
+        QSqlQuery query(globalDb);
+        query.prepare(statement);
+        query.addBindValue(newVideoKey);
+        query.addBindValue(oldVideoKey);
+        if (!execQuery(query, errorMessage)) {
+            return false;
+        }
+    }
+
+    if (hasFts5) {
+        QSqlQuery updateFts(globalDb);
+        updateFts.prepare(QStringLiteral("UPDATE video_search_fts SET video_key = ? WHERE video_key = ?"));
+        updateFts.addBindValue(newVideoKey);
+        updateFts.addBindValue(oldVideoKey);
+        if (!execQuery(updateFts, errorMessage)) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 bool syncProjectIntoGlobal(QSqlDatabase &globalDb,
@@ -272,6 +377,13 @@ bool syncProjectIntoGlobal(QSqlDatabase &globalDb,
     if (errorMessage && !errorMessage->isEmpty()) {
         return false;
     }
+    QHash<QString, ExistingVideoState> existingStatesByPath;
+    for (auto it = existingStates.cbegin(); it != existingStates.cend(); ++it) {
+        const auto key = stablePathKey(it.value().absolutePath);
+        if (!key.isEmpty() && !existingStatesByPath.contains(key)) {
+            existingStatesByPath.insert(key, it.value());
+        }
+    }
 
     if (!globalDb.transaction()) {
         if (errorMessage) {
@@ -290,6 +402,10 @@ bool syncProjectIntoGlobal(QSqlDatabase &globalDb,
     clearFrames.prepare(QStringLiteral("DELETE FROM video_frame_analysis WHERE video_key = ?"));
     QSqlQuery clearResult(globalDb);
     clearResult.prepare(QStringLiteral("DELETE FROM video_analysis_result WHERE video_key = ?"));
+    QSqlQuery clearDimensions(globalDb);
+    clearDimensions.prepare(QStringLiteral("DELETE FROM material_dimension_analysis WHERE video_key = ?"));
+    QSqlQuery clearDimensionFrames(globalDb);
+    clearDimensionFrames.prepare(QStringLiteral("DELETE FROM material_dimension_frame_analysis WHERE video_key = ?"));
     QSqlQuery upsert(globalDb);
     upsert.prepare(QStringLiteral(
         "INSERT INTO global_video_asset "
@@ -324,15 +440,30 @@ bool syncProjectIntoGlobal(QSqlDatabase &globalDb,
         "last_synced_at = excluded.last_synced_at, "
         "updated_at = excluded.updated_at"));
 
+    QSet<QString> claimedExistingKeys;
     for (auto asset : assets) {
         currentKeys.insert(asset.videoKey);
-        const auto existing = existingStates.value(asset.videoKey);
-        const bool changed = !existingStates.contains(asset.videoKey)
+        const bool exactMatch = existingStates.contains(asset.videoKey);
+        auto existing = existingStates.value(asset.videoKey);
+        bool remappedExisting = false;
+        if (!exactMatch) {
+            const auto pathKey = stablePathKey(asset.absolutePath);
+            const auto pathMatch = existingStatesByPath.constFind(pathKey);
+            if (pathMatch != existingStatesByPath.cend() && !claimedExistingKeys.contains(pathMatch.value().videoKey)) {
+                existing = pathMatch.value();
+                remappedExisting = true;
+            }
+        }
+        const bool hasExisting = exactMatch || remappedExisting;
+        if (hasExisting) {
+            claimedExistingKeys.insert(existing.videoKey);
+        }
+        const bool changed = !hasExisting
             || existing.sizeBytes != asset.sizeBytes
             || existing.modifiedAt != asset.modifiedAt;
-        if (!changed) {
-            asset.sourceText = existing.sourceText;
-        }
+        asset.technicalSummary = emptyIfNull(asset.technicalSummary);
+        asset.sourceText = changed ? QStringLiteral("") : emptyIfNull(existing.sourceText);
+        const auto errorMessageText = changed ? QStringLiteral("") : emptyIfNull(existing.errorMessage);
 
         if (changed) {
             clearFrames.addBindValue(asset.videoKey);
@@ -348,6 +479,20 @@ bool syncProjectIntoGlobal(QSqlDatabase &globalDb,
                 return false;
             }
             clearResult.finish();
+
+            clearDimensions.addBindValue(asset.videoKey);
+            if (!execQuery(clearDimensions, errorMessage)) {
+                globalDb.rollback();
+                return false;
+            }
+            clearDimensions.finish();
+
+            clearDimensionFrames.addBindValue(asset.videoKey);
+            if (!execQuery(clearDimensionFrames, errorMessage)) {
+                globalDb.rollback();
+                return false;
+            }
+            clearDimensionFrames.finish();
 
             if (!deleteFtsRow(globalDb, asset.videoKey, hasFts5, errorMessage)) {
                 globalDb.rollback();
@@ -375,8 +520,8 @@ bool syncProjectIntoGlobal(QSqlDatabase &globalDb,
         upsert.addBindValue(static_cast<int>(changed ? initialAnalysisStatusForAsset(asset.assetType, asset.extension) : existing.analysisStatus));
         upsert.addBindValue(static_cast<int>(changed ? ConfirmationStatus::Pending : existing.confirmationStatus));
         upsert.addBindValue(asset.technicalSummary);
-        upsert.addBindValue(changed ? QString() : existing.sourceText);
-        upsert.addBindValue(changed ? QString() : existing.errorMessage);
+        upsert.addBindValue(asset.sourceText);
+        upsert.addBindValue(errorMessageText);
         upsert.addBindValue(now);
         upsert.addBindValue(now);
         if (!execQuery(upsert, errorMessage)) {
@@ -385,7 +530,13 @@ bool syncProjectIntoGlobal(QSqlDatabase &globalDb,
         }
         upsert.finish();
 
-        if (!upsertSearchRow(globalDb, asset, hasFts5, errorMessage)) {
+        if (remappedExisting && !changed
+            && !migrateAnalysisArtifacts(globalDb, existing.videoKey, asset.videoKey, hasFts5, errorMessage)) {
+            globalDb.rollback();
+            return false;
+        }
+
+        if (changed && !upsertSearchRow(globalDb, asset, hasFts5, errorMessage)) {
             globalDb.rollback();
             return false;
         }
@@ -445,6 +596,13 @@ QVector<Project> loadRegisteredProjects(QSqlDatabase &globalDb, QString *errorMe
 }
 }
 
+#ifdef CINEVAULT_TESTING
+bool syncProjectIntoGlobalForTest(QSqlDatabase &globalDb, const Project &project, bool hasFts5, QString *errorMessage)
+{
+    return syncProjectIntoGlobal(globalDb, project, hasFts5, errorMessage);
+}
+#endif
+
 MaterialCatalogSyncService::MaterialCatalogSyncService(GlobalDatabaseManager *globalDatabaseManager,
                                                        JobEngine *jobEngine,
                                                        ProjectService *projectService,
@@ -458,15 +616,23 @@ MaterialCatalogSyncService::MaterialCatalogSyncService(GlobalDatabaseManager *gl
 
 void MaterialCatalogSyncService::syncCurrentProject()
 {
-    if (m_syncRunning.exchange(true) || !m_globalDatabaseManager || !m_projectService || !m_projectService->hasOpenProject()) {
+    if (!m_globalDatabaseManager || !m_projectService || !m_projectService->hasOpenProject()) {
         return;
     }
+    if (m_syncRunning.exchange(true)) {
+        m_syncPending = true;
+        return;
+    }
+    m_syncPending = false;
 
     const auto project = m_projectService->currentProject();
     const auto jobId = m_jobEngine
         ? m_jobEngine->createJob(JobType::GlobalSync,
                                  QStringLiteral("同步全局索引 %1").arg(project.name),
-                                 QStringLiteral("准备同步当前项目素材到素材管理中心"))
+                                 QStringLiteral("准备同步当前项目素材到素材管理中心"),
+                                 0,
+                                 projectJobSubject(project),
+                                 projectProgressContext(QStringLiteral("同步项目索引"), 0, 1))
         : 0;
 
     auto future = QtConcurrent::run([this, project, jobId]() {
@@ -478,19 +644,20 @@ void MaterialCatalogSyncService::syncCurrentProject()
         if (!db.isOpen()) {
             failJob(jobId, errorMessage);
             m_globalDatabaseManager->closeThreadConnection(connectionName);
-            m_syncRunning = false;
+            finishSyncRun();
             return;
         }
 
-        updateJob(jobId, 25, QStringLiteral("正在读取项目素材索引"));
+        updateJob(jobId, 25, QStringLiteral("正在读取项目素材索引"), projectProgressContext(QStringLiteral("同步项目索引"), 0, 1));
         if (!syncProjectIntoGlobal(db, project, m_globalDatabaseManager->hasFts5(), &errorMessage)) {
             failJob(jobId, errorMessage);
         } else {
+            updateJob(jobId, 100, QStringLiteral("当前项目素材已同步到素材管理中心"), projectProgressContext(QStringLiteral("同步项目索引"), 1, 1));
             completeJob(jobId, QStringLiteral("当前项目素材已同步到素材管理中心"));
             notifyCatalogChanged();
         }
         m_globalDatabaseManager->closeThreadConnection(connectionName);
-        m_syncRunning = false;
+        finishSyncRun();
     });
     Q_UNUSED(future);
 }
@@ -501,10 +668,19 @@ void MaterialCatalogSyncService::rebuildAllProjects()
         return;
     }
 
+    JobSubject catalogSubject;
+    catalogSubject.kind = QStringLiteral("projectCatalog");
+    catalogSubject.key = QStringLiteral("all");
+    catalogSubject.name = QStringLiteral("全部已登记项目");
+    catalogSubject.typeLabel = QStringLiteral("项目索引");
+
     const auto jobId = m_jobEngine
         ? m_jobEngine->createJob(JobType::GlobalSync,
                                  QStringLiteral("重建全局素材索引"),
-                                 QStringLiteral("准备重建所有已登记项目的素材索引"))
+                                 QStringLiteral("准备重建所有已登记项目的素材索引"),
+                                 0,
+                                 catalogSubject,
+                                 projectProgressContext(QStringLiteral("重建项目索引"), 0, 0))
         : 0;
 
     auto future = QtConcurrent::run([this, jobId]() {
@@ -514,7 +690,7 @@ void MaterialCatalogSyncService::rebuildAllProjects()
         if (!db.isOpen()) {
             failJob(jobId, errorMessage);
             m_globalDatabaseManager->closeThreadConnection(connectionName);
-            m_syncRunning = false;
+            finishSyncRun();
             return;
         }
 
@@ -522,13 +698,13 @@ void MaterialCatalogSyncService::rebuildAllProjects()
         if (!errorMessage.isEmpty()) {
             failJob(jobId, errorMessage);
             m_globalDatabaseManager->closeThreadConnection(connectionName);
-            m_syncRunning = false;
+            finishSyncRun();
             return;
         }
         if (projects.isEmpty()) {
             completeJob(jobId, QStringLiteral("没有可重建的已登记项目"));
             m_globalDatabaseManager->closeThreadConnection(connectionName);
-            m_syncRunning = false;
+            finishSyncRun();
             return;
         }
 
@@ -540,7 +716,8 @@ void MaterialCatalogSyncService::rebuildAllProjects()
                       qBound<qint64>(qint64{1},
                                      (static_cast<qint64>(index) * qint64{100}) / static_cast<qint64>(projects.size()),
                                      qint64{99}),
-                      QStringLiteral("正在重建：%1").arg(project.name));
+                      QStringLiteral("正在重建：%1").arg(project.name),
+                      projectProgressContext(QStringLiteral("重建项目索引"), index + 1, projects.size()));
 
             QString syncError;
             if (syncProjectIntoGlobal(db, project, m_globalDatabaseManager->hasFts5(), &syncError)) {
@@ -552,24 +729,26 @@ void MaterialCatalogSyncService::rebuildAllProjects()
         }
 
         if (failedCount > 0) {
+            updateJob(jobId, 100, QStringLiteral("全局索引重建完成，成功 %1 个项目，失败 %2 个项目").arg(successCount).arg(failedCount), projectProgressContext(QStringLiteral("重建项目索引"), projects.size(), projects.size()));
             completeJob(jobId, QStringLiteral("全局索引重建完成，成功 %1 个项目，失败 %2 个项目").arg(successCount).arg(failedCount));
         } else {
+            updateJob(jobId, 100, QStringLiteral("全局索引重建完成，共 %1 个项目").arg(successCount), projectProgressContext(QStringLiteral("重建项目索引"), projects.size(), projects.size()));
             completeJob(jobId, QStringLiteral("全局索引重建完成，共 %1 个项目").arg(successCount));
         }
         notifyCatalogChanged();
         m_globalDatabaseManager->closeThreadConnection(connectionName);
-        m_syncRunning = false;
+        finishSyncRun();
     });
     Q_UNUSED(future);
 }
 
-void MaterialCatalogSyncService::updateJob(qint64 jobId, qint64 progress, const QString &detail)
+void MaterialCatalogSyncService::updateJob(qint64 jobId, qint64 progress, const QString &detail, const JobProgressContext &progressContext)
 {
     if (!m_jobEngine || jobId <= 0) {
         return;
     }
-    QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, jobId, progress, detail]() {
-        engine->updateJob(jobId, progress, detail);
+    QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, jobId, progress, detail, progressContext]() {
+        engine->updateJob(jobId, progress, detail, progressContext);
     }, Qt::QueuedConnection);
 }
 
@@ -591,6 +770,14 @@ void MaterialCatalogSyncService::failJob(qint64 jobId, const QString &errorMessa
     QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, jobId, errorMessage]() {
         engine->failJob(jobId, errorMessage);
     }, Qt::QueuedConnection);
+}
+
+void MaterialCatalogSyncService::finishSyncRun()
+{
+    m_syncRunning = false;
+    if (m_syncPending.exchange(false)) {
+        QMetaObject::invokeMethod(this, &MaterialCatalogSyncService::syncCurrentProject, Qt::QueuedConnection);
+    }
 }
 
 void MaterialCatalogSyncService::notifyCatalogChanged()

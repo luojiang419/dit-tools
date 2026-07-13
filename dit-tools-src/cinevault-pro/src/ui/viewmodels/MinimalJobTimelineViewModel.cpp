@@ -23,6 +23,16 @@ QVariantList MinimalJobTimelineViewModel::timelineItems() const
     return m_timelineItems;
 }
 
+bool MinimalJobTimelineViewModel::canClearCompletedJobs() const
+{
+    for (const auto &job : m_jobs) {
+        if (job.state == JobState::Completed) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void MinimalJobTimelineViewModel::reload()
 {
     m_model->setItems(m_jobs);
@@ -38,6 +48,22 @@ void MinimalJobTimelineViewModel::reload()
     }
     m_timelineItems = rows;
     emit timelineChanged();
+}
+
+void MinimalJobTimelineViewModel::clearCompletedJobs()
+{
+    QVector<Job> keptJobs;
+    keptJobs.reserve(m_jobs.size());
+    for (const auto &job : m_jobs) {
+        if (job.state != JobState::Completed) {
+            keptJobs.append(job);
+        }
+    }
+    if (keptJobs.size() == m_jobs.size()) {
+        return;
+    }
+    m_jobs = keptJobs;
+    reload();
 }
 
 void MinimalJobTimelineViewModel::seedJobs()

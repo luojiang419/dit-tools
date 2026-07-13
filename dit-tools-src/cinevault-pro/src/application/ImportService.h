@@ -17,6 +17,9 @@ public:
     bool importDirectory(const QString &directoryPath, QString *errorMessage);
     QString lastMessage() const;
 
+public slots:
+    void rescanLegacySourceRoots();
+
 signals:
     void importStateChanged();
     void catalogChanged();

@@ -12,7 +12,10 @@ public:
     static QString assetTypeLabel(AssetType type);
     static QString statusLabel(const QString &status);
     static QString statusColor(const QString &status);
+    static QString jobTypeLabel(JobType type);
     static QString jobStateLabel(JobState state);
+    static QString jobProgressLabel(const JobProgressContext &context);
+    static QString jobProgressShortLabel(const JobProgressContext &context);
     static QString workspaceLabel(WorkspaceId workspaceId);
     static QString probeStatusLabel(ProbeStatus status);
     static QString analysisModeLabel(AnalysisMode mode);

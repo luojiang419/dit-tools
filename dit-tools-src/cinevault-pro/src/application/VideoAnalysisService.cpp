@@ -14,6 +14,7 @@
 
 #include <QDateTime>
 #include <QDir>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QMetaObject>
@@ -34,6 +35,59 @@ struct AnalysisConfig {
     int contactSheetFrameCount = 24;
     int timeoutSec = 60;
 };
+
+struct DimensionFrameAnalysisRecord {
+    QString dimensionKey;
+    QString dimensionName;
+    int frameNumber = 0;
+    qint64 timestampMs = 0;
+    QString imagePath;
+    QString detail;
+};
+
+JobSubject analysisSubjectForKey(const QString &videoKey, const QString &label)
+{
+    JobSubject subject;
+    subject.kind = QStringLiteral("asset");
+    subject.key = videoKey;
+    subject.name = label.trimmed().isEmpty() ? videoKey : label.trimmed();
+    subject.typeLabel = QStringLiteral("素材");
+    return subject;
+}
+
+JobSubject analysisSubjectForAsset(const GlobalVideoAsset &asset)
+{
+    JobSubject subject;
+    subject.kind = QStringLiteral("asset");
+    subject.key = asset.videoKey;
+    subject.name = asset.fileName;
+    subject.path = asset.absolutePath;
+    subject.thumbnailPath = asset.assetType == AssetType::Image ? asset.absolutePath : asset.thumbnailPath;
+    subject.thumbnailStatus = asset.assetType == AssetType::Image ? ThumbnailStatus::Success : asset.thumbnailStatus;
+    subject.typeLabel = Formatters::assetTypeLabel(asset.assetType);
+    return subject;
+}
+
+JobProgressContext analysisProgressContext(int currentStep,
+                                           int totalSteps,
+                                           const QString &stepLabel,
+                                           qint64 currentItem = 0,
+                                           qint64 totalItems = 0,
+                                           const QString &unitLabel = QString(),
+                                           int currentFrameNumber = 0,
+                                           const QString &extraLabel = QString())
+{
+    JobProgressContext context;
+    context.currentStep = currentStep;
+    context.totalSteps = totalSteps;
+    context.stepLabel = stepLabel;
+    context.currentItem = currentItem;
+    context.totalItems = totalItems;
+    context.unitLabel = unitLabel;
+    context.currentFrameNumber = currentFrameNumber;
+    context.extraLabel = extraLabel;
+    return context;
+}
 
 bool execQuery(QSqlQuery &query, QString *errorMessage)
 {
@@ -288,11 +342,488 @@ QVector<FrameAnalysisRecord> successfulFrames(const QVector<FrameAnalysisRecord>
 {
     QVector<FrameAnalysisRecord> items;
     for (const auto &frame : frames) {
-        if (frame.analysisState == FrameAnalysisState::Success && frame.errorMessage.trimmed().isEmpty()) {
+        const auto hasAnalysisContent = !frame.caption.trimmed().isEmpty()
+            || !frame.tags.isEmpty()
+            || !frame.objects.isEmpty()
+            || !frame.actions.trimmed().isEmpty()
+            || !frame.setting.trimmed().isEmpty();
+        const auto isLegacySuccessfulFrame = frame.analysisState == FrameAnalysisState::Pending
+            && hasAnalysisContent
+            && frame.errorMessage.trimmed().isEmpty();
+        if ((frame.analysisState == FrameAnalysisState::Success || isLegacySuccessfulFrame)
+            && frame.errorMessage.trimmed().isEmpty()) {
             items.append(frame);
         }
     }
     return items;
+}
+
+QString dimensionKey(QString name)
+{
+    return name.simplified().toCaseFolded();
+}
+
+QStringList normalizedDimensionNames(const QStringList &dimensions)
+{
+    QStringList normalized;
+    for (const auto &dimension : dimensions) {
+        const auto name = dimension.simplified();
+        const auto key = dimensionKey(name);
+        if (key.isEmpty()) {
+            continue;
+        }
+        bool exists = false;
+        for (const auto &existing : normalized) {
+            if (dimensionKey(existing) == key) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            normalized.append(name);
+        }
+    }
+    return normalized;
+}
+
+QVector<FrameAnalysisRecord> sampleFramesForContext(const QVector<FrameAnalysisRecord> &frames, int maxFrames)
+{
+    if (maxFrames <= 0 || frames.size() <= maxFrames) {
+        return frames;
+    }
+    if (maxFrames == 1) {
+        return QVector<FrameAnalysisRecord>{frames.first()};
+    }
+
+    QVector<FrameAnalysisRecord> sampled;
+    sampled.reserve(maxFrames);
+    QSet<int> usedIndexes;
+    for (int index = 0; index < maxFrames; ++index) {
+        const auto mappedIndex = static_cast<int>((static_cast<qint64>(index) * (frames.size() - 1)) / (maxFrames - 1));
+        if (usedIndexes.contains(mappedIndex)) {
+            continue;
+        }
+        usedIndexes.insert(mappedIndex);
+        sampled.append(frames.at(mappedIndex));
+    }
+    return sampled;
+}
+
+bool loadAnalysisSummary(QSqlDatabase &db, const QString &videoKey, VisionVideoSummary *summary, QString *errorMessage)
+{
+    if (!summary) {
+        return false;
+    }
+
+    QSqlQuery query(db);
+    query.prepare(QStringLiteral(
+        "SELECT COALESCE(summary, ''), COALESCE(keywords_json, '[]'), COALESCE(scenes_json, '[]') "
+        "FROM video_analysis_result WHERE video_key = ?"));
+    query.addBindValue(videoKey);
+    if (!execQuery(query, errorMessage)) {
+        return false;
+    }
+    if (!query.next()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("当前素材还没有基础解析结果，请先完成内容解析。");
+        }
+        return false;
+    }
+
+    summary->summary = query.value(0).toString();
+    summary->keywords = parseJsonList(query.value(1).toString());
+    summary->scenes = parseJsonList(query.value(2).toString());
+    return true;
+}
+
+QVector<MaterialDimensionAnalysis> loadDimensionAnalyses(QSqlDatabase &db,
+                                                         const QString &videoKey,
+                                                         QString *errorMessage)
+{
+    QVector<MaterialDimensionAnalysis> analyses;
+    QSqlQuery query(db);
+    query.prepare(QStringLiteral(
+        "SELECT dimension_name, detail, analyzed_at "
+        "FROM material_dimension_analysis WHERE video_key = ? ORDER BY analyzed_at DESC, id DESC"));
+    query.addBindValue(videoKey);
+    if (!execQuery(query, errorMessage)) {
+        return analyses;
+    }
+
+    while (query.next()) {
+        MaterialDimensionAnalysis analysis;
+        analysis.name = query.value(0).toString();
+        analysis.detail = query.value(1).toString();
+        analysis.analyzedAt = query.value(2).toString();
+        analyses.append(analysis);
+    }
+    return analyses;
+}
+
+QStringList filterNewDimensions(const QStringList &requestedDimensions,
+                                const QVector<MaterialDimensionAnalysis> &existingDimensions)
+{
+    QStringList filtered;
+    for (const auto &requested : requestedDimensions) {
+        const auto requestedKey = dimensionKey(requested);
+        bool exists = false;
+        for (const auto &existing : existingDimensions) {
+            if (dimensionKey(existing.name) == requestedKey) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            filtered.append(requested);
+        }
+    }
+    return filtered;
+}
+
+QString buildFrameContextLine(const FrameAnalysisRecord &frame)
+{
+    QStringList parts;
+    if (!frame.caption.trimmed().isEmpty()) {
+        parts.append(QStringLiteral("描述：%1").arg(frame.caption.trimmed()));
+    }
+    if (!frame.tags.isEmpty()) {
+        parts.append(QStringLiteral("标签：%1").arg(frame.tags.join(QStringLiteral("、"))));
+    }
+    if (!frame.objects.isEmpty()) {
+        parts.append(QStringLiteral("对象：%1").arg(frame.objects.join(QStringLiteral("、"))));
+    }
+    if (!frame.actions.trimmed().isEmpty()) {
+        parts.append(QStringLiteral("动作：%1").arg(frame.actions.trimmed()));
+    }
+    if (!frame.setting.trimmed().isEmpty()) {
+        parts.append(QStringLiteral("场景：%1").arg(frame.setting.trimmed()));
+    }
+    return parts.isEmpty()
+        ? QString()
+        : QStringLiteral("第 %1 帧：%2").arg(frame.frameNumber).arg(parts.join(QStringLiteral("；")));
+}
+
+QString buildFrameDimensionContext(const FrameAnalysisRecord &frame)
+{
+    QStringList lines;
+    lines.append(QStringLiteral("帧号：%1").arg(frame.frameNumber));
+    lines.append(QStringLiteral("时间戳：%1 ms").arg(frame.timestampMs));
+    const auto frameLine = buildFrameContextLine(frame);
+    if (!frameLine.trimmed().isEmpty()) {
+        lines.append(frameLine);
+    }
+    if (!frame.errorMessage.trimmed().isEmpty()) {
+        lines.append(QStringLiteral("基础帧解析备注：%1").arg(frame.errorMessage.trimmed()));
+    }
+    return lines.join(QStringLiteral("\n"));
+}
+
+QHash<QString, QSet<int>> loadCompletedDimensionFrames(QSqlDatabase &db,
+                                                       const QString &videoKey,
+                                                       const QStringList &dimensions,
+                                                       QString *errorMessage)
+{
+    QHash<QString, QSet<int>> completed;
+    QSet<QString> requestedKeys;
+    for (const auto &dimension : dimensions) {
+        const auto key = dimensionKey(dimension);
+        if (!key.isEmpty()) {
+            requestedKeys.insert(key);
+        }
+    }
+    if (requestedKeys.isEmpty()) {
+        return completed;
+    }
+
+    QSqlQuery query(db);
+    query.prepare(QStringLiteral(
+        "SELECT dimension_key, frame_number "
+        "FROM material_dimension_frame_analysis "
+        "WHERE video_key = ? AND analysis_state = ?"));
+    query.addBindValue(videoKey);
+    query.addBindValue(static_cast<int>(FrameAnalysisState::Success));
+    if (!execQuery(query, errorMessage)) {
+        return {};
+    }
+
+    while (query.next()) {
+        const auto key = query.value(0).toString();
+        if (!requestedKeys.contains(key)) {
+            continue;
+        }
+        completed[key].insert(query.value(1).toInt());
+    }
+    return completed;
+}
+
+bool persistDimensionFrameAnalyses(QSqlDatabase &db,
+                                   const QString &videoKey,
+                                   const FrameAnalysisRecord &frame,
+                                   const QVector<MaterialDimensionAnalysis> &analyses,
+                                   const QString &modelName,
+                                   QString *errorMessage)
+{
+    const auto analyzedAt = nowIso();
+    QSqlQuery query(db);
+    query.prepare(QStringLiteral(
+        "INSERT INTO material_dimension_frame_analysis "
+        "(video_key, dimension_key, dimension_name, frame_number, timestamp_ms, image_path, detail, error_message, "
+        "analysis_state, model_name, prompt_version, analyzed_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?) "
+        "ON CONFLICT(video_key, dimension_key, frame_number) DO UPDATE SET "
+        "dimension_name = excluded.dimension_name, "
+        "timestamp_ms = excluded.timestamp_ms, "
+        "image_path = excluded.image_path, "
+        "detail = excluded.detail, "
+        "error_message = '', "
+        "analysis_state = excluded.analysis_state, "
+        "model_name = excluded.model_name, "
+        "prompt_version = excluded.prompt_version, "
+        "analyzed_at = excluded.analyzed_at"));
+
+    for (const auto &analysis : analyses) {
+        const auto key = dimensionKey(analysis.name);
+        const auto detail = analysis.detail.simplified();
+        if (key.isEmpty() || detail.isEmpty()) {
+            continue;
+        }
+        query.addBindValue(videoKey);
+        query.addBindValue(key);
+        query.addBindValue(analysis.name.simplified());
+        query.addBindValue(frame.frameNumber);
+        query.addBindValue(frame.timestampMs);
+        query.addBindValue(frame.imagePath);
+        query.addBindValue(detail);
+        query.addBindValue(static_cast<int>(FrameAnalysisState::Success));
+        query.addBindValue(modelName);
+        query.addBindValue(QStringLiteral("v1-dimension-frame"));
+        query.addBindValue(analyzedAt);
+        if (!execQuery(query, errorMessage)) {
+            return false;
+        }
+        query.finish();
+    }
+    return true;
+}
+
+bool persistDimensionFrameFailures(QSqlDatabase &db,
+                                   const QString &videoKey,
+                                   const FrameAnalysisRecord &frame,
+                                   const QStringList &dimensions,
+                                   const QString &modelName,
+                                   const QString &failureMessage,
+                                   QString *errorMessage)
+{
+    const auto analyzedAt = nowIso();
+    QSqlQuery query(db);
+    query.prepare(QStringLiteral(
+        "INSERT INTO material_dimension_frame_analysis "
+        "(video_key, dimension_key, dimension_name, frame_number, timestamp_ms, image_path, detail, error_message, "
+        "analysis_state, model_name, prompt_version, analyzed_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?) "
+        "ON CONFLICT(video_key, dimension_key, frame_number) DO UPDATE SET "
+        "dimension_name = excluded.dimension_name, "
+        "timestamp_ms = excluded.timestamp_ms, "
+        "image_path = excluded.image_path, "
+        "error_message = excluded.error_message, "
+        "analysis_state = excluded.analysis_state, "
+        "model_name = excluded.model_name, "
+        "prompt_version = excluded.prompt_version, "
+        "analyzed_at = excluded.analyzed_at"));
+
+    for (const auto &dimension : dimensions) {
+        const auto name = dimension.simplified();
+        const auto key = dimensionKey(name);
+        if (key.isEmpty()) {
+            continue;
+        }
+        query.addBindValue(videoKey);
+        query.addBindValue(key);
+        query.addBindValue(name);
+        query.addBindValue(frame.frameNumber);
+        query.addBindValue(frame.timestampMs);
+        query.addBindValue(frame.imagePath);
+        query.addBindValue(failureMessage.simplified());
+        query.addBindValue(static_cast<int>(FrameAnalysisState::Failed));
+        query.addBindValue(modelName);
+        query.addBindValue(QStringLiteral("v1-dimension-frame"));
+        query.addBindValue(analyzedAt);
+        if (!execQuery(query, errorMessage)) {
+            return false;
+        }
+        query.finish();
+    }
+    return true;
+}
+
+QVector<DimensionFrameAnalysisRecord> loadDimensionFrameAnalyses(QSqlDatabase &db,
+                                                                 const QString &videoKey,
+                                                                 const QStringList &dimensions,
+                                                                 QString *errorMessage)
+{
+    QVector<DimensionFrameAnalysisRecord> records;
+    QSet<QString> requestedKeys;
+    for (const auto &dimension : dimensions) {
+        const auto key = dimensionKey(dimension);
+        if (!key.isEmpty()) {
+            requestedKeys.insert(key);
+        }
+    }
+    if (requestedKeys.isEmpty()) {
+        return records;
+    }
+
+    QSqlQuery query(db);
+    query.prepare(QStringLiteral(
+        "SELECT dimension_key, dimension_name, frame_number, timestamp_ms, COALESCE(image_path, ''), COALESCE(detail, '') "
+        "FROM material_dimension_frame_analysis "
+        "WHERE video_key = ? AND analysis_state = ? "
+        "ORDER BY frame_number, dimension_name"));
+    query.addBindValue(videoKey);
+    query.addBindValue(static_cast<int>(FrameAnalysisState::Success));
+    if (!execQuery(query, errorMessage)) {
+        return {};
+    }
+
+    while (query.next()) {
+        const auto key = query.value(0).toString();
+        const auto detail = query.value(5).toString().simplified();
+        if (!requestedKeys.contains(key) || detail.isEmpty()) {
+            continue;
+        }
+        DimensionFrameAnalysisRecord record;
+        record.dimensionKey = key;
+        record.dimensionName = query.value(1).toString();
+        record.frameNumber = query.value(2).toInt();
+        record.timestampMs = query.value(3).toLongLong();
+        record.imagePath = query.value(4).toString();
+        record.detail = detail;
+        records.append(record);
+    }
+    return records;
+}
+
+QString buildDimensionFrameSummaryContext(const GlobalVideoAsset &asset,
+                                          const VisionVideoSummary &summary,
+                                          const QVector<DimensionFrameAnalysisRecord> &records)
+{
+    QStringList parts;
+    parts.append(QStringLiteral("文件名：%1").arg(asset.fileName));
+    parts.append(QStringLiteral("素材类型：%1").arg(Formatters::assetTypeLabel(asset.assetType)));
+    if (!summary.summary.trimmed().isEmpty()) {
+        parts.append(QStringLiteral("基础摘要：%1").arg(summary.summary.trimmed()));
+    }
+    if (!summary.keywords.isEmpty()) {
+        parts.append(QStringLiteral("关键词：%1").arg(summary.keywords.join(QStringLiteral("、"))));
+    }
+
+    QStringList detailLines;
+    int usedChars = 0;
+    for (const auto &record : records) {
+        const auto line = QStringLiteral("第 %1 帧（%2 ms）/%3：%4")
+            .arg(record.frameNumber)
+            .arg(record.timestampMs)
+            .arg(record.dimensionName, record.detail);
+        if (usedChars + line.size() > 12000) {
+            break;
+        }
+        usedChars += line.size();
+        detailLines.append(line);
+    }
+    if (!detailLines.isEmpty()) {
+        parts.append(QStringLiteral("逐帧多维度明细（每条来自单帧请求）：\n%1").arg(detailLines.join(QStringLiteral("\n"))));
+    }
+    if (detailLines.size() < records.size()) {
+        parts.append(QStringLiteral("另有 %1 条逐帧明细因汇总上下文限制未直接列入。").arg(records.size() - detailLines.size()));
+    }
+    return parts.join(QStringLiteral("\n\n"));
+}
+
+QString buildDimensionBaseContext(const GlobalVideoAsset &asset,
+                                  const VisionVideoSummary &summary,
+                                  const QVector<FrameAnalysisRecord> &frames,
+                                  const QVector<MaterialDimensionAnalysis> &existingDimensions)
+{
+    QStringList parts;
+    parts.append(QStringLiteral("文件名：%1").arg(asset.fileName));
+    parts.append(QStringLiteral("素材类型：%1").arg(Formatters::assetTypeLabel(asset.assetType)));
+    if (!asset.technicalSummary.trimmed().isEmpty()) {
+        parts.append(QStringLiteral("技术摘要：%1").arg(asset.technicalSummary.trimmed()));
+    }
+    if (!summary.summary.trimmed().isEmpty()) {
+        parts.append(QStringLiteral("基础摘要：%1").arg(summary.summary.trimmed()));
+    }
+    if (!summary.keywords.isEmpty()) {
+        parts.append(QStringLiteral("关键词：%1").arg(summary.keywords.join(QStringLiteral("、"))));
+    }
+    if (!summary.scenes.isEmpty()) {
+        parts.append(QStringLiteral("场景/地点：%1").arg(summary.scenes.join(QStringLiteral("、"))));
+    }
+    if (!asset.sourceText.trimmed().isEmpty()) {
+        parts.append(QStringLiteral("正文/文本预览：%1").arg(asset.sourceText.trimmed().left(8000)));
+    }
+
+    QStringList frameLines;
+    for (const auto &frame : sampleFramesForContext(successfulFrames(frames), 36)) {
+        const auto line = buildFrameContextLine(frame);
+        if (!line.isEmpty()) {
+            frameLines.append(line);
+        }
+    }
+    if (!frameLines.isEmpty()) {
+        parts.append(QStringLiteral("逐帧解析节选：\n%1").arg(frameLines.join(QStringLiteral("\n"))));
+    }
+
+    QStringList existingLines;
+    for (const auto &dimension : existingDimensions) {
+        if (!dimension.name.trimmed().isEmpty() && !dimension.detail.trimmed().isEmpty()) {
+            existingLines.append(QStringLiteral("%1：%2").arg(dimension.name.trimmed(), dimension.detail.trimmed()));
+        }
+    }
+    if (!existingLines.isEmpty()) {
+        parts.append(QStringLiteral("已有补充维度（不要重复解析）：\n%1").arg(existingLines.join(QStringLiteral("\n"))));
+    }
+    return parts.join(QStringLiteral("\n\n"));
+}
+
+bool persistDimensionAnalyses(QSqlDatabase &db,
+                              const QString &videoKey,
+                              const QVector<MaterialDimensionAnalysis> &analyses,
+                              const QString &modelName,
+                              QString *errorMessage)
+{
+    const auto analyzedAt = nowIso();
+    QSqlQuery query(db);
+    query.prepare(QStringLiteral(
+        "INSERT INTO material_dimension_analysis "
+        "(video_key, dimension_key, dimension_name, detail, model_name, prompt_version, analyzed_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(video_key, dimension_key) DO UPDATE SET "
+        "dimension_name = excluded.dimension_name, "
+        "detail = excluded.detail, "
+        "model_name = excluded.model_name, "
+        "prompt_version = excluded.prompt_version, "
+        "analyzed_at = excluded.analyzed_at"));
+
+    for (const auto &analysis : analyses) {
+        const auto key = dimensionKey(analysis.name);
+        const auto detail = analysis.detail.simplified();
+        if (key.isEmpty() || detail.isEmpty()) {
+            continue;
+        }
+        query.addBindValue(videoKey);
+        query.addBindValue(key);
+        query.addBindValue(analysis.name.simplified());
+        query.addBindValue(detail);
+        query.addBindValue(modelName);
+        query.addBindValue(QStringLiteral("v1-dimension-supplement"));
+        query.addBindValue(analyzedAt);
+        if (!execQuery(query, errorMessage)) {
+            return false;
+        }
+        query.finish();
+    }
+    return true;
 }
 
 void recalculateTaskCounts(const QVector<FrameAnalysisRecord> &frames, VideoAnalysisTask *task)
@@ -382,6 +913,20 @@ bool deleteAnalysisArtifacts(QSqlDatabase &db, const QString &videoKey, bool has
     }
 
     if (!deleteAnalysisTask(db, videoKey, errorMessage)) {
+        return false;
+    }
+
+    QSqlQuery dimensionFrames(db);
+    dimensionFrames.prepare(QStringLiteral("DELETE FROM material_dimension_frame_analysis WHERE video_key = ?"));
+    dimensionFrames.addBindValue(videoKey);
+    if (!execQuery(dimensionFrames, errorMessage)) {
+        return false;
+    }
+
+    QSqlQuery dimensions(db);
+    dimensions.prepare(QStringLiteral("DELETE FROM material_dimension_analysis WHERE video_key = ?"));
+    dimensions.addBindValue(videoKey);
+    if (!execQuery(dimensions, errorMessage)) {
         return false;
     }
 
@@ -809,9 +1354,11 @@ bool VideoAnalysisService::validateReadyForEnqueue(const QString &videoKey, QStr
         }
         return false;
     }
-    if (m_currentVideoKey == normalizedKey || m_queuedVideoKeys.contains(normalizedKey)) {
+    if (m_currentVideoKey == normalizedKey
+        || m_queuedVideoKeys.contains(normalizedKey)
+        || m_dimensionAnalysisKeys.contains(normalizedKey)) {
         if (errorMessage) {
-            *errorMessage = QStringLiteral("该素材已在解析队列中。");
+            *errorMessage = QStringLiteral("该素材已在视觉解析队列中。");
         }
         return false;
     }
@@ -939,6 +1486,442 @@ bool VideoAnalysisService::retryFrame(const QString &videoKey, int frameNumber, 
     return enqueueJob(AnalysisJob{normalizedKey, AnalysisRunMode::SingleFrame, frameNumber}, errorMessage);
 }
 
+int VideoAnalysisService::pendingDimensionCount(const QString &videoKey,
+                                                const QStringList &dimensions,
+                                                QString *errorMessage) const
+{
+    if (errorMessage) {
+        errorMessage->clear();
+    }
+
+    const auto normalizedKey = videoKey.trimmed();
+    if (normalizedKey.isEmpty()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("请先选择一个素材。");
+        }
+        return -1;
+    }
+    if (!m_globalDatabaseManager || !m_globalDatabaseManager->isOpen()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("素材管理中心尚未准备好。");
+        }
+        return -1;
+    }
+
+    const auto requestedDimensions = normalizedDimensionNames(dimensions);
+    if (requestedDimensions.isEmpty()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("请至少添加一个解析维度。");
+        }
+        return -1;
+    }
+
+    auto db = m_globalDatabaseManager->database();
+    const auto existingDimensions = loadDimensionAnalyses(db, normalizedKey, errorMessage);
+    if (errorMessage && !errorMessage->trimmed().isEmpty()) {
+        return -1;
+    }
+    return filterNewDimensions(requestedDimensions, existingDimensions).size();
+}
+
+bool VideoAnalysisService::analyzeDimensions(const QString &videoKey,
+                                             const QStringList &dimensions,
+                                             QString *errorMessage)
+{
+    const auto normalizedKey = videoKey.trimmed();
+    if (normalizedKey.isEmpty()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("请先选择一个素材。");
+        }
+        return false;
+    }
+    if (!m_globalDatabaseManager || !m_globalDatabaseManager->isOpen() || !m_visionApiClient) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("素材管理中心尚未准备好。");
+        }
+        return false;
+    }
+
+    const auto requestedDimensions = normalizedDimensionNames(dimensions);
+    if (requestedDimensions.isEmpty()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("请至少添加一个解析维度。");
+        }
+        return false;
+    }
+    if (m_dimensionAnalysisKeys.contains(normalizedKey)
+        || m_currentVideoKey == normalizedKey
+        || m_queuedVideoKeys.contains(normalizedKey)) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("该素材已在视觉解析队列中。");
+        }
+        return false;
+    }
+
+    const auto config = loadConfig(m_settings);
+    if (config.baseUrl.isEmpty() || config.apiKey.isEmpty() || config.model.isEmpty()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("视觉接口参数不完整，请在设置中保存并应用后重试。");
+        }
+        return false;
+    }
+
+    m_dimensionAnalysisKeys.insert(normalizedKey);
+    m_dimensionAnalysisQueue.enqueue(DimensionAnalysisJob{normalizedKey, requestedDimensions});
+    emit dimensionAnalysisProgressChanged(normalizedKey, true, QStringLiteral("等待多维度解析队列"), QString());
+    startNextAnalysis();
+    return true;
+}
+
+bool VideoAnalysisService::startDimensionAnalysisNow(const QString &videoKey,
+                                                     const QStringList &dimensions,
+                                                     QString *errorMessage)
+{
+    const auto normalizedKey = videoKey.trimmed();
+    if (normalizedKey.isEmpty()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("请先选择一个素材。");
+        }
+        return false;
+    }
+    if (!m_globalDatabaseManager || !m_globalDatabaseManager->isOpen() || !m_visionApiClient) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("素材管理中心尚未准备好。");
+        }
+        return false;
+    }
+
+    const auto requestedDimensions = normalizedDimensionNames(dimensions);
+    if (requestedDimensions.isEmpty()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("请至少添加一个解析维度。");
+        }
+        return false;
+    }
+    if (m_dimensionAnalysisKeys.contains(normalizedKey)) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("该素材正在进行多维度解析。");
+        }
+        return false;
+    }
+
+    const auto config = loadConfig(m_settings);
+    if (config.baseUrl.isEmpty() || config.apiKey.isEmpty() || config.model.isEmpty()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("视觉接口参数不完整，请在设置中保存并应用后重试。");
+        }
+        return false;
+    }
+
+    m_dimensionAnalysisKeys.insert(normalizedKey);
+    emit dimensionAnalysisProgressChanged(normalizedKey, true, QStringLiteral("准备多维度解析"), QString());
+
+    const auto jobId = m_jobEngine
+        ? m_jobEngine->createJob(JobType::ContentAnalysis,
+                                 QStringLiteral("素材多维度解析"),
+                                 QStringLiteral("准备多维度解析"),
+                                 0,
+                                 analysisSubjectForKey(normalizedKey, lookupVideoLabel(normalizedKey)),
+                                 analysisProgressContext(1, 4, QStringLiteral("准备多维度解析")))
+        : 0;
+
+    auto future = QtConcurrent::run([this, normalizedKey, requestedDimensions, config, jobId]() {
+        const auto connectionName = QStringLiteral("dimension_analysis_%1").arg(reinterpret_cast<quintptr>(QThread::currentThreadId()));
+        QString errorMessage;
+
+        auto report = [&](const QString &detail, qint64 progress, const JobProgressContext &progressContext) {
+            updateJob(jobId, progress, detail, progressContext);
+            QMetaObject::invokeMethod(this, [this, normalizedKey, detail]() {
+                emit dimensionAnalysisProgressChanged(normalizedKey, true, detail, QString());
+            }, Qt::QueuedConnection);
+        };
+
+        auto finish = [&](bool success, const QString &detail, const QString &error) {
+            if (success) {
+                completeJob(jobId, detail);
+            } else {
+                failJob(jobId, error.trimmed().isEmpty() ? detail : error);
+            }
+            m_globalDatabaseManager->closeThreadConnection(connectionName);
+            QMetaObject::invokeMethod(this, [this, normalizedKey, success, detail, error]() {
+                m_dimensionAnalysisKeys.remove(normalizedKey);
+                emit dimensionAnalysisProgressChanged(normalizedKey, false, detail, error);
+                if (success) {
+                    emit catalogChanged();
+                }
+                m_analysisRunning = false;
+                emit analysisQueueChanged(m_currentVideoKey, m_analysisQueue.size());
+                startNextAnalysis();
+            }, Qt::QueuedConnection);
+        };
+
+        auto db = m_globalDatabaseManager->openThreadConnection(connectionName, &errorMessage);
+        if (!db.isOpen()) {
+            finish(false, QStringLiteral("多维度解析失败"), errorMessage);
+            return;
+        }
+
+        report(QStringLiteral("正在读取基础解析结果"),
+               10,
+               analysisProgressContext(1, 4, QStringLiteral("读取基础解析")));
+        GlobalVideoAsset asset;
+        if (!loadVideoAsset(db, normalizedKey, &asset, &errorMessage)) {
+            finish(false, QStringLiteral("多维度解析失败"), errorMessage);
+            return;
+        }
+        updateJobSubject(jobId, analysisSubjectForAsset(asset));
+        if (asset.analysisStatus != VideoAnalysisStatus::Ready) {
+            finish(false,
+                   QStringLiteral("请先完成基础内容解析。"),
+                   QStringLiteral("多维度解析需要基于已完成的基础解析结果。"));
+            return;
+        }
+
+        VisionVideoSummary summary;
+        if (!loadAnalysisSummary(db, normalizedKey, &summary, &errorMessage)) {
+            finish(false, QStringLiteral("多维度解析失败"), errorMessage);
+            return;
+        }
+
+        const auto frames = loadFrameRows(db, normalizedKey, &errorMessage);
+        if (!errorMessage.trimmed().isEmpty()) {
+            finish(false, QStringLiteral("多维度解析失败"), errorMessage);
+            return;
+        }
+
+        const auto existingDimensions = loadDimensionAnalyses(db, normalizedKey, &errorMessage);
+        if (!errorMessage.trimmed().isEmpty()) {
+            finish(false, QStringLiteral("多维度解析失败"), errorMessage);
+            return;
+        }
+
+        const auto pendingDimensions = filterNewDimensions(requestedDimensions, existingDimensions);
+        if (pendingDimensions.isEmpty()) {
+            finish(true,
+                   QStringLiteral("所选维度已存在，无需重复解析。"),
+                   QString());
+            return;
+        }
+
+        int httpStatusCode = 0;
+        QString analysisError;
+        std::optional<QVector<MaterialDimensionAnalysis>> analyses;
+        if (asset.assetType == AssetType::Video) {
+            const auto usableFrames = successfulFrames(frames);
+            if (usableFrames.isEmpty()) {
+                finish(false,
+                       QStringLiteral("多维度解析失败"),
+                       QStringLiteral("没有可用于逐帧多维度解析的成功帧。"));
+                return;
+            }
+
+            auto completedFrames = loadCompletedDimensionFrames(db, normalizedKey, pendingDimensions, &errorMessage);
+            if (!errorMessage.trimmed().isEmpty()) {
+                finish(false, QStringLiteral("多维度解析失败"), errorMessage);
+                return;
+            }
+
+            int totalFrameRequests = 0;
+            for (const auto &frame : usableFrames) {
+                for (const auto &dimension : pendingDimensions) {
+                    if (!completedFrames.value(dimensionKey(dimension)).contains(frame.frameNumber)) {
+                        ++totalFrameRequests;
+                        break;
+                    }
+                }
+            }
+
+            int frameRequestIndex = 0;
+            for (const auto &frame : usableFrames) {
+                QStringList framePendingDimensions;
+                for (const auto &dimension : pendingDimensions) {
+                    if (!completedFrames.value(dimensionKey(dimension)).contains(frame.frameNumber)) {
+                        framePendingDimensions.append(dimension);
+                    }
+                }
+                if (framePendingDimensions.isEmpty()) {
+                    continue;
+                }
+
+                ++frameRequestIndex;
+                const auto frameTotal = qMax(1, totalFrameRequests);
+                const auto frameProgress = 20 + (static_cast<qint64>(frameRequestIndex) * 55) / frameTotal;
+                report(QStringLiteral("逐帧多维度解析 %1/%2：第 %3 帧")
+                           .arg(frameRequestIndex)
+                           .arg(frameTotal)
+                           .arg(frame.frameNumber),
+                       frameProgress,
+                       analysisProgressContext(2,
+                                               4,
+                                               QStringLiteral("逐帧多维度解析"),
+                                               frameRequestIndex,
+                                               frameTotal,
+                                               QStringLiteral("帧"),
+                                               frame.frameNumber));
+
+                if (frame.imagePath.trimmed().isEmpty() || !QFileInfo::exists(frame.imagePath)) {
+                    const auto missingImageError = QStringLiteral("帧图不存在，无法执行单帧多维度解析。");
+                    if (!persistDimensionFrameFailures(db,
+                                                       normalizedKey,
+                                                       frame,
+                                                       framePendingDimensions,
+                                                       config.model,
+                                                       missingImageError,
+                                                       &errorMessage)) {
+                        finish(false, QStringLiteral("多维度解析失败"), errorMessage);
+                        return;
+                    }
+                    continue;
+                }
+
+                QString frameError;
+                int frameHttpStatusCode = 0;
+                const auto frameAnalyses = m_visionApiClient->analyzeFrameDimensions(frame.imagePath,
+                                                                                    asset.fileName,
+                                                                                    buildFrameDimensionContext(frame),
+                                                                                    framePendingDimensions,
+                                                                                    config.baseUrl,
+                                                                                    config.apiKey,
+                                                                                    config.model,
+                                                                                    config.timeoutSec,
+                                                                                    &frameError,
+                                                                                    &frameHttpStatusCode);
+                if (frameAnalyses.has_value()) {
+                    if (!persistDimensionFrameAnalyses(db, normalizedKey, frame, *frameAnalyses, config.model, &errorMessage)) {
+                        finish(false, QStringLiteral("多维度解析失败"), errorMessage);
+                        return;
+                    }
+                    for (const auto &analysis : *frameAnalyses) {
+                        const auto key = dimensionKey(analysis.name);
+                        if (!key.isEmpty()) {
+                            completedFrames[key].insert(frame.frameNumber);
+                        }
+                    }
+                } else {
+                    const auto errorText = frameError.trimmed().isEmpty()
+                        ? QStringLiteral("单帧多维度解析失败。")
+                        : frameError.trimmed();
+                    if (!persistDimensionFrameFailures(db,
+                                                       normalizedKey,
+                                                       frame,
+                                                       framePendingDimensions,
+                                                       config.model,
+                                                       errorText,
+                                                       &errorMessage)) {
+                        finish(false, QStringLiteral("多维度解析失败"), errorMessage);
+                        return;
+                    }
+                }
+            }
+
+            const auto frameDimensionAnalyses = loadDimensionFrameAnalyses(db, normalizedKey, pendingDimensions, &errorMessage);
+            if (!errorMessage.trimmed().isEmpty()) {
+                finish(false, QStringLiteral("多维度解析失败"), errorMessage);
+                return;
+            }
+            if (frameDimensionAnalyses.isEmpty()) {
+                finish(false,
+                       QStringLiteral("多维度解析失败"),
+                       QStringLiteral("逐帧多维度解析没有生成可用于汇总的明细。"));
+                return;
+            }
+
+            const auto summaryContext = buildDimensionFrameSummaryContext(asset, summary, frameDimensionAnalyses);
+            report(QStringLiteral("正在汇总 %1 条逐帧多维度明细").arg(frameDimensionAnalyses.size()),
+                   80,
+                   analysisProgressContext(3,
+                                           4,
+                                           QStringLiteral("汇总多维度结果"),
+                                           frameDimensionAnalyses.size(),
+                                           frameDimensionAnalyses.size(),
+                                           QStringLiteral("条明细")));
+            analyses = m_visionApiClient->analyzeDimensions(asset.fileName,
+                                                            summaryContext,
+                                                            pendingDimensions,
+                                                            config.baseUrl,
+                                                            config.apiKey,
+                                                            config.model,
+                                                            config.timeoutSec,
+                                                            &analysisError,
+                                                            &httpStatusCode);
+        } else {
+            const auto baseContext = buildDimensionBaseContext(asset, summary, frames, existingDimensions);
+            report(QStringLiteral("正在补充 %1 个维度").arg(pendingDimensions.size()),
+                   55,
+                   analysisProgressContext(2,
+                                           4,
+                                           QStringLiteral("补充维度解析"),
+                                           pendingDimensions.size(),
+                                           pendingDimensions.size(),
+                                           QStringLiteral("个维度")));
+            analyses = m_visionApiClient->analyzeDimensions(asset.fileName,
+                                                            baseContext,
+                                                            pendingDimensions,
+                                                            config.baseUrl,
+                                                            config.apiKey,
+                                                            config.model,
+                                                            config.timeoutSec,
+                                                            &analysisError,
+                                                            &httpStatusCode);
+        }
+        if (!analyses.has_value()) {
+            finish(false, QStringLiteral("多维度解析失败"), analysisError);
+            return;
+        }
+
+        updateJob(jobId,
+                  90,
+                  QStringLiteral("正在保存多维度解析结果"),
+                  analysisProgressContext(4, 4, QStringLiteral("保存解析结果")));
+        if (!db.transaction()) {
+            finish(false, QStringLiteral("多维度解析失败"), db.lastError().text());
+            return;
+        }
+        if (!persistDimensionAnalyses(db, normalizedKey, *analyses, config.model, &errorMessage)) {
+            db.rollback();
+            finish(false, QStringLiteral("多维度解析失败"), errorMessage);
+            return;
+        }
+        if (!db.commit()) {
+            finish(false, QStringLiteral("多维度解析失败"), db.lastError().text());
+            return;
+        }
+
+        updateJob(jobId,
+                  100,
+                  QStringLiteral("多维度解析完成，新增 %1 个维度。").arg(analyses->size()),
+                  analysisProgressContext(4, 4, QStringLiteral("完成多维度解析"), analyses->size(), analyses->size(), QStringLiteral("个维度")));
+        finish(true, QStringLiteral("多维度解析完成，新增 %1 个维度。").arg(analyses->size()), QString());
+    });
+    Q_UNUSED(future);
+    return true;
+}
+
+void VideoAnalysisService::startNextDimensionAnalysis()
+{
+    if (m_analysisRunning || m_dimensionAnalysisQueue.isEmpty()) {
+        return;
+    }
+
+    const auto job = m_dimensionAnalysisQueue.dequeue();
+    m_analysisRunning = true;
+    m_dimensionAnalysisKeys.remove(job.videoKey);
+
+    QString errorMessage;
+    if (startDimensionAnalysisNow(job.videoKey, job.dimensions, &errorMessage)) {
+        return;
+    }
+
+    m_dimensionAnalysisKeys.remove(job.videoKey);
+    m_analysisRunning = false;
+    emit dimensionAnalysisProgressChanged(job.videoKey,
+                                          false,
+                                          errorMessage.trimmed().isEmpty() ? QStringLiteral("多维度解析失败") : errorMessage,
+                                          errorMessage);
+    emit analysisQueueChanged(m_currentVideoKey, m_analysisQueue.size());
+    startNextAnalysis();
+}
+
 void VideoAnalysisService::analyzeVideo(const QString &videoKey)
 {
     QString errorMessage;
@@ -951,6 +1934,10 @@ void VideoAnalysisService::startNextAnalysis()
         return;
     }
     if (m_analysisQueue.isEmpty()) {
+        if (!m_dimensionAnalysisQueue.isEmpty()) {
+            startNextDimensionAnalysis();
+            return;
+        }
         emit analysisQueueChanged(QString(), 0);
         return;
     }
@@ -980,7 +1967,12 @@ void VideoAnalysisService::startNextAnalysis()
     const auto jobId = m_jobEngine
         ? m_jobEngine->createJob(JobType::ContentAnalysis,
                                  job.mode == AnalysisRunMode::SingleFrame ? QStringLiteral("视频帧补解析") : QStringLiteral("素材内容解析"),
-                                 job.mode == AnalysisRunMode::SingleFrame ? QStringLiteral("准备重解析失败视频帧") : QStringLiteral("准备解析素材内容"))
+                                 job.mode == AnalysisRunMode::SingleFrame ? QStringLiteral("准备重解析失败视频帧") : QStringLiteral("准备解析素材内容"),
+                                 0,
+                                 analysisSubjectForKey(job.videoKey, lookupVideoLabel(job.videoKey)),
+                                 job.mode == AnalysisRunMode::SingleFrame
+                                     ? analysisProgressContext(1, 2, QStringLiteral("准备重解析帧"), 0, 1, QStringLiteral("帧"), job.frameNumber)
+                                     : analysisProgressContext(1, 4, QStringLiteral("准备解析素材")))
         : 0;
     reportAnalysisProgress(job.videoKey,
                            0,
@@ -1013,9 +2005,9 @@ void VideoAnalysisService::startNextAnalysis()
             }, Qt::QueuedConnection);
         };
 
-        auto updateRunning = [&](qint64 progress, const QString &detail) {
+        auto updateRunning = [&](qint64 progress, const QString &detail, const JobProgressContext &progressContext = JobProgressContext()) {
             lastProgress = progress;
-            updateJob(jobId, progress, detail);
+            updateJob(jobId, progress, detail, progressContext);
             reportAnalysisProgress(job.videoKey, progress, detail, JobState::Running);
         };
 
@@ -1040,6 +2032,7 @@ void VideoAnalysisService::startNextAnalysis()
             finishFailure(errorMessage, &db, false);
             return;
         }
+        updateJobSubject(jobId, analysisSubjectForAsset(asset));
 
         if (!canAnalyzeAsset(asset.assetType, asset.extension)) {
             const auto message = QStringLiteral("该素材类型当前仅参与索引，不支持内容解析。");
@@ -1054,10 +2047,13 @@ void VideoAnalysisService::startNextAnalysis()
                 return;
             }
 
-            updateRunning(20, QStringLiteral("正在转换图片为 JPG 并提交视觉解析"));
+            updateRunning(20,
+                          QStringLiteral("正在转换图片为 JPG 并提交视觉解析"),
+                          analysisProgressContext(1, 3, QStringLiteral("提交图片解析"), 0, 1, QStringLiteral("张")));
             int httpStatusCode = 0;
             QString imageError;
             const auto summary = m_visionApiClient->analyzeImage(asset.absolutePath,
+                                                                 asset.fileName,
                                                                  config.baseUrl,
                                                                  config.apiKey,
                                                                  config.model,
@@ -1070,11 +2066,14 @@ void VideoAnalysisService::startNextAnalysis()
                 return;
             }
 
+            updateRunning(85,
+                          QStringLiteral("正在保存图片解析结果"),
+                          analysisProgressContext(2, 3, QStringLiteral("保存解析结果"), 1, 1, QStringLiteral("张")));
             if (!db.transaction()) {
                 finishFailure(db.lastError().text(), &db);
                 return;
             }
-            if (!persistSummary(db, asset, *summary, {}, QString(), m_globalDatabaseManager->hasFts5(), &errorMessage)) {
+            if (!persistSummary(db, asset, *summary, {}, QStringLiteral(""), m_globalDatabaseManager->hasFts5(), &errorMessage)) {
                 db.rollback();
                 finishFailure(errorMessage, &db, false);
                 return;
@@ -1084,6 +2083,10 @@ void VideoAnalysisService::startNextAnalysis()
                 return;
             }
 
+            updateJob(jobId,
+                      100,
+                      QStringLiteral("图片解析完成，等待确认"),
+                      analysisProgressContext(3, 3, QStringLiteral("完成图片解析"), 1, 1, QStringLiteral("张")));
             finishSuccess(QStringLiteral("图片解析完成，等待确认"));
             return;
         }
@@ -1094,7 +2097,9 @@ void VideoAnalysisService::startNextAnalysis()
                 return;
             }
 
-            updateRunning(15, QStringLiteral("正在提取文本/文档内容"));
+            updateRunning(15,
+                          QStringLiteral("正在提取文本/文档内容"),
+                          analysisProgressContext(1, 3, QStringLiteral("提取文本内容"), 0, 1, QStringLiteral("个文件")));
             bool textTruncated = false;
             QString extractionError;
             const auto sourceText = DocumentPreviewService::extractTextForSummary(asset.absolutePath, &textTruncated, &extractionError);
@@ -1121,7 +2126,9 @@ void VideoAnalysisService::startNextAnalysis()
                 return;
             }
 
-            updateRunning(45, textTruncated ? QStringLiteral("正在归纳文本内容（已截取前段内容）") : QStringLiteral("正在归纳文本内容"));
+            updateRunning(45,
+                          textTruncated ? QStringLiteral("正在归纳文本内容（已截取前段内容）") : QStringLiteral("正在归纳文本内容"),
+                          analysisProgressContext(2, 3, QStringLiteral("归纳文本内容"), 1, 1, QStringLiteral("个文件")));
             int httpStatusCode = 0;
             QString summaryError;
             const auto summary = m_visionApiClient->summarizeText(asset.fileName,
@@ -1138,6 +2145,9 @@ void VideoAnalysisService::startNextAnalysis()
                 return;
             }
 
+            updateRunning(85,
+                          QStringLiteral("正在保存文本/文档解析结果"),
+                          analysisProgressContext(3, 3, QStringLiteral("保存解析结果"), 1, 1, QStringLiteral("个文件")));
             if (!db.transaction()) {
                 finishFailure(db.lastError().text(), &db);
                 return;
@@ -1152,6 +2162,10 @@ void VideoAnalysisService::startNextAnalysis()
                 return;
             }
 
+            updateJob(jobId,
+                      100,
+                      QStringLiteral("文本/文档解析完成，等待确认"),
+                      analysisProgressContext(3, 3, QStringLiteral("完成文本解析"), 1, 1, QStringLiteral("个文件")));
             finishSuccess(QStringLiteral("文本/文档解析完成，等待确认"));
             return;
         }
@@ -1200,7 +2214,14 @@ void VideoAnalysisService::startNextAnalysis()
                 return false;
             }
 
-            updateRunning(90, QStringLiteral("正在汇总视频内容"));
+            updateRunning(90,
+                          QStringLiteral("正在汇总视频内容"),
+                          analysisProgressContext(job.mode == AnalysisRunMode::SingleFrame ? 2 : 3,
+                                                  job.mode == AnalysisRunMode::SingleFrame ? 2 : 4,
+                                                  QStringLiteral("汇总视频内容"),
+                                                  task.successfulFrames,
+                                                  task.totalFrames,
+                                                  QStringLiteral("帧")));
             const auto summary = m_visionApiClient->summarizeVideo(asset.fileName,
                                                                    successfulFrames(frames),
                                                                    config.baseUrl,
@@ -1242,6 +2263,15 @@ void VideoAnalysisService::startNextAnalysis()
                 return false;
             }
 
+            updateJob(jobId,
+                      100,
+                      successMessage,
+                      analysisProgressContext(job.mode == AnalysisRunMode::SingleFrame ? 2 : 4,
+                                              job.mode == AnalysisRunMode::SingleFrame ? 2 : 4,
+                                              job.mode == AnalysisRunMode::SingleFrame ? QStringLiteral("完成帧重解析") : QStringLiteral("完成视频解析"),
+                                              task.completedFrames,
+                                              task.totalFrames,
+                                              QStringLiteral("帧")));
             completeJob(jobId, successMessage);
             reportAnalysisProgress(job.videoKey, 100, successMessage, JobState::Completed);
             return true;
@@ -1275,12 +2305,16 @@ void VideoAnalysisService::startNextAnalysis()
 
             auto target = frames.at(frameIndex);
             const auto previousStatus = asset.analysisStatus;
+            updateRunning(40,
+                          QStringLiteral("正在重解析第 %1 帧").arg(target.frameNumber),
+                          analysisProgressContext(1, 2, QStringLiteral("重解析视频帧"), 1, 1, QStringLiteral("帧"), target.frameNumber));
             int attempt = 0;
             while (attempt < kMaxFrameRetryCount) {
                 ++attempt;
                 int httpStatusCode = 0;
                 QString frameError;
                 const auto analysis = m_visionApiClient->analyzeFrame(target.imagePath,
+                                                                      asset.fileName,
                                                                       config.baseUrl,
                                                                       config.apiKey,
                                                                       config.model,
@@ -1376,7 +2410,9 @@ void VideoAnalysisService::startNextAnalysis()
                 }
 
                 removeDirectoryContents(cacheDirectory);
-                updateRunning(8, QStringLiteral("正在抽取视频帧：%1").arg(asset.fileName));
+                updateRunning(8,
+                              QStringLiteral("正在抽取视频帧：%1").arg(asset.fileName),
+                              analysisProgressContext(1, 4, QStringLiteral("抽取视频帧")));
 
                 FrameExtractionRequest request;
                 request.assetId = asset.assetId;
@@ -1422,7 +2458,9 @@ void VideoAnalysisService::startNextAnalysis()
                     return;
                 }
                 buildContactSheet(frames);
-                updateRunning(10, QStringLiteral("已抽取 %1 帧，开始视觉解析").arg(frames.size()));
+                updateRunning(10,
+                              QStringLiteral("已抽取 %1 帧，开始视觉解析").arg(frames.size()),
+                              analysisProgressContext(2, 4, QStringLiteral("解析视频帧"), 0, frames.size(), QStringLiteral("帧")));
             } else {
                 recalculateTaskCounts(frames, &task);
                 if (task.stage == VideoAnalysisTaskStage::Pending || task.stage == VideoAnalysisTaskStage::ExtractingFrames) {
@@ -1436,7 +2474,15 @@ void VideoAnalysisService::startNextAnalysis()
                               QStringLiteral("继续解析视频帧，已完成 %1/%2，跳过 %3 帧")
                                   .arg(task.completedFrames)
                                   .arg(task.totalFrames)
-                                  .arg(task.skippedFrames));
+                                  .arg(task.skippedFrames),
+                              analysisProgressContext(2,
+                                                      4,
+                                                      QStringLiteral("解析视频帧"),
+                                                      task.completedFrames,
+                                                      task.totalFrames,
+                                                      QStringLiteral("帧"),
+                                                      0,
+                                                      QStringLiteral("跳过 %1 帧").arg(task.skippedFrames)));
             }
 
             for (int index = 0; index < frames.size(); ++index) {
@@ -1451,6 +2497,7 @@ void VideoAnalysisService::startNextAnalysis()
                     int httpStatusCode = 0;
                     QString frameError;
                     const auto analysis = m_visionApiClient->analyzeFrame(frame.imagePath,
+                                                                          asset.fileName,
                                                                           config.baseUrl,
                                                                           config.apiKey,
                                                                           config.model,
@@ -1502,7 +2549,15 @@ void VideoAnalysisService::startNextAnalysis()
                                   .arg(task.completedFrames)
                                   .arg(task.totalFrames)
                                   .arg(task.successfulFrames)
-                                  .arg(task.skippedFrames));
+                                  .arg(task.skippedFrames),
+                              analysisProgressContext(2,
+                                                      4,
+                                                      QStringLiteral("解析视频帧"),
+                                                      task.completedFrames,
+                                                      task.totalFrames,
+                                                      QStringLiteral("帧"),
+                                                      frame.frameNumber,
+                                                      QStringLiteral("成功 %1 · 跳过 %2").arg(task.successfulFrames).arg(task.skippedFrames)));
             }
 
             const auto succeededFrames = successfulFrames(frames);
@@ -1636,7 +2691,10 @@ void VideoAnalysisService::reportAnalysisProgress(const QString &videoKey,
 
 void VideoAnalysisService::resetBatchSummaryIfIdle()
 {
-    if (m_analysisRunning || !m_currentVideoKey.trimmed().isEmpty() || !m_analysisQueue.isEmpty()) {
+    if (m_analysisRunning
+        || !m_currentVideoKey.trimmed().isEmpty()
+        || !m_analysisQueue.isEmpty()
+        || !m_dimensionAnalysisQueue.isEmpty()) {
         return;
     }
     if (m_batchStates.isEmpty()) {
@@ -1700,13 +2758,23 @@ QString VideoAnalysisService::lookupVideoLabel(const QString &videoKey) const
     return label.isEmpty() ? videoKey : label;
 }
 
-void VideoAnalysisService::updateJob(qint64 jobId, qint64 progress, const QString &detail)
+void VideoAnalysisService::updateJob(qint64 jobId, qint64 progress, const QString &detail, const JobProgressContext &progressContext)
 {
     if (!m_jobEngine || jobId <= 0) {
         return;
     }
-    QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, jobId, progress, detail]() {
-        engine->updateJob(jobId, progress, detail);
+    QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, jobId, progress, detail, progressContext]() {
+        engine->updateJob(jobId, progress, detail, progressContext);
+    }, Qt::QueuedConnection);
+}
+
+void VideoAnalysisService::updateJobSubject(qint64 jobId, const JobSubject &subject)
+{
+    if (!m_jobEngine || jobId <= 0) {
+        return;
+    }
+    QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, jobId, subject]() {
+        engine->updateJobSubject(jobId, subject);
     }, Qt::QueuedConnection);
 }
 

@@ -17,7 +17,17 @@ public:
         StateRole,
         StateLabelRole,
         SourceRootIdRole,
-        ErrorRole
+        ErrorRole,
+        JobTypeLabelRole,
+        SubjectKindRole,
+        SubjectKeyRole,
+        SubjectNameRole,
+        SubjectPathRole,
+        SubjectThumbnailPathRole,
+        SubjectTypeLabelRole,
+        ProgressLabelRole,
+        ProgressShortLabelRole,
+        StepLabelRole
     };
 
     explicit JobListModel(QObject *parent = nullptr);
@@ -27,6 +37,7 @@ public:
     QHash<int, QByteArray> roleNames() const override;
 
     void setItems(const QVector<Job> &items);
+    static void sortForDisplay(QVector<Job> &items);
 
 private:
     QVector<Job> m_items;
