@@ -136,6 +136,18 @@ QByteArray reasonPhrase(int statusCode)
     if (statusCode == 400) {
         return QByteArray("Bad Request");
     }
+    if (statusCode == 500) {
+        return QByteArray("Internal Server Error");
+    }
+    if (statusCode == 502) {
+        return QByteArray("Bad Gateway");
+    }
+    if (statusCode == 503) {
+        return QByteArray("Service Unavailable");
+    }
+    if (statusCode == 504) {
+        return QByteArray("Gateway Timeout");
+    }
     return QByteArray("OK");
 }
 
@@ -242,6 +254,8 @@ private slots:
     void analyzeDimensions_fallsBackToTextWhenResponseFormatRejected();
     void understandSearchQuery_postsBoundedSchema();
     void rerankFrameCandidates_filtersInventedIds();
+    void testConnection_retriesTransientGatewayFailure();
+    void testConnection_stopsAfterBoundedGatewayRetries();
 };
 
 void VisionApiClientImageTest::analyzeFrame_requestsBoundEntitiesAndOcr()
@@ -607,6 +621,55 @@ void VisionApiClientImageTest::rerankFrameCandidates_filtersInventedIds()
         }
     }
     QCOMPARE(imageCount, 2);
+}
+
+void VisionApiClientImageTest::testConnection_retriesTransientGatewayFailure()
+{
+    QTcpServer server;
+    QVERIFY2(server.listen(QHostAddress::LocalHost), qPrintable(server.errorString()));
+    QVector<QByteArray> capturedBodies;
+    installSequentialChatCompletionResponder(
+        &server,
+        &capturedBodies,
+        {
+            {502, QByteArray()},
+            {200, chatResponseForPayload(QJsonObject{{QStringLiteral("status"), QStringLiteral("ok")}})}
+        });
+
+    VisionApiClient client;
+    QString error;
+    const auto result = client.testConnection(
+        QStringLiteral("http://127.0.0.1:%1/v1").arg(server.serverPort()),
+        QStringLiteral("test-key"), QStringLiteral("test-model"), 5, &error);
+
+    QVERIFY2(result, qPrintable(error));
+    QCOMPARE(capturedBodies.size(), 2);
+}
+
+void VisionApiClientImageTest::testConnection_stopsAfterBoundedGatewayRetries()
+{
+    QTcpServer server;
+    QVERIFY2(server.listen(QHostAddress::LocalHost), qPrintable(server.errorString()));
+    QVector<QByteArray> capturedBodies;
+    installSequentialChatCompletionResponder(
+        &server,
+        &capturedBodies,
+        {
+            {502, QByteArray()},
+            {502, QByteArray()},
+            {200, chatResponseForPayload(QJsonObject{{QStringLiteral("status"), QStringLiteral("ok")}})}
+        });
+
+    VisionApiClient client;
+    QString error;
+    const auto result = client.testConnection(
+        QStringLiteral("http://127.0.0.1:%1/v1").arg(server.serverPort()),
+        QStringLiteral("test-key"), QStringLiteral("test-model"), 5, &error);
+
+    QVERIFY(!result);
+    QCOMPARE(capturedBodies.size(), 2);
+    QVERIFY(error.contains(QStringLiteral("502")));
+    QVERIFY(error.contains(QStringLiteral("已重试 1 次仍失败")));
 }
 
 QTEST_MAIN(VisionApiClientImageTest)

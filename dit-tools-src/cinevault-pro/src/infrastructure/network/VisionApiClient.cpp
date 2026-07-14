@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <QBuffer>
+#include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
@@ -19,6 +20,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QTimer>
+#include <QThread>
 #include <QUrl>
 #include <QtMath>
 
@@ -32,7 +34,11 @@ struct HttpResult {
     int statusCode = 0;
     QByteArray body;
     QString errorMessage;
+    qint64 elapsedMs = 0;
 };
+
+constexpr int kTransientHttpMaxAttempts = 2;
+constexpr unsigned long kTransientHttpRetryDelayMs = 350;
 
 QString truncateForLog(QString text, int maxLength = 600)
 {
@@ -89,6 +95,14 @@ QString httpStatusMessage(int statusCode, const QByteArray &body)
         base = QStringLiteral("视觉接口请求内容过大（413）");
     } else if (statusCode == 429) {
         base = QStringLiteral("视觉接口触发限流（429）");
+    } else if (statusCode == 500) {
+        base = QStringLiteral("视觉模型服务内部错误（500）");
+    } else if (statusCode == 502) {
+        base = QStringLiteral("视觉模型网关无法连接后端（502）");
+    } else if (statusCode == 503) {
+        base = QStringLiteral("视觉模型服务暂不可用（503）");
+    } else if (statusCode == 504) {
+        base = QStringLiteral("视觉模型服务响应超时（504）");
     } else {
         base = QStringLiteral("视觉接口返回异常状态码：%1").arg(statusCode);
     }
@@ -167,12 +181,23 @@ QString normalizeEndpoint(QString baseUrl)
     return url + QStringLiteral("/chat/completions");
 }
 
-HttpResult postJson(const QString &endpoint,
-                    const QString &apiKey,
-                    const QJsonObject &payload,
-                    int timeoutSec)
+bool isTransientHttpFailure(const HttpResult &result)
+{
+    return result.statusCode == 500
+        || result.statusCode == 502
+        || result.statusCode == 503
+        || result.statusCode == 504
+        || (result.statusCode == 0 && result.errorMessage != QStringLiteral("请求超时"));
+}
+
+HttpResult postJsonOnce(const QString &endpoint,
+                        const QString &apiKey,
+                        const QByteArray &requestBody,
+                        int timeoutSec)
 {
     HttpResult result;
+    QElapsedTimer elapsed;
+    elapsed.start();
 
     QNetworkAccessManager manager;
     QNetworkRequest request{QUrl(endpoint)};
@@ -185,7 +210,7 @@ HttpResult postJson(const QString &endpoint,
     QTimer timer;
     timer.setSingleShot(true);
 
-    auto *reply = manager.post(request, QJsonDocument(payload).toJson(QJsonDocument::Compact));
+    auto *reply = manager.post(request, requestBody);
     QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
     QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
     timer.start(qMax(5, timeoutSec) * 1000);
@@ -196,12 +221,14 @@ HttpResult postJson(const QString &endpoint,
     } else {
         reply->abort();
         result.errorMessage = QStringLiteral("请求超时");
+        result.elapsedMs = elapsed.elapsed();
         reply->deleteLater();
         return result;
     }
 
     result.statusCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     result.body = reply->readAll();
+    result.elapsedMs = elapsed.elapsed();
     if (reply->error() != QNetworkReply::NoError && result.statusCode == 0) {
         result.errorMessage = reply->errorString();
         reply->deleteLater();
@@ -210,15 +237,53 @@ HttpResult postJson(const QString &endpoint,
 
     if (result.statusCode != 200) {
         result.errorMessage = httpStatusMessage(result.statusCode, result.body);
-        Logger::warn(QStringLiteral("视觉接口请求失败：status=%1 endpoint=%2 body=%3")
-                         .arg(result.statusCode)
-                         .arg(endpoint, truncateForLog(QString::fromUtf8(result.body))));
         reply->deleteLater();
         return result;
     }
 
     result.success = true;
     reply->deleteLater();
+    return result;
+}
+
+HttpResult postJson(const QString &endpoint,
+                    const QString &apiKey,
+                    const QJsonObject &payload,
+                    int timeoutSec)
+{
+    const auto requestBody = QJsonDocument(payload).toJson(QJsonDocument::Compact);
+    HttpResult result;
+    int attempt = 0;
+    for (; attempt < kTransientHttpMaxAttempts; ++attempt) {
+        result = postJsonOnce(endpoint, apiKey, requestBody, timeoutSec);
+        if (result.success) {
+            if (attempt > 0) {
+                Logger::info(QStringLiteral("视觉接口瞬时故障后恢复：attempt=%1/%2 elapsed_ms=%3 endpoint=%4")
+                                 .arg(attempt + 1)
+                                 .arg(kTransientHttpMaxAttempts)
+                                 .arg(result.elapsedMs)
+                                 .arg(endpoint));
+            }
+            return result;
+        }
+
+        Logger::warn(QStringLiteral("视觉接口请求失败：status=%1 attempt=%2/%3 elapsed_ms=%4 endpoint=%5 body=%6 error=%7")
+                         .arg(result.statusCode)
+                         .arg(attempt + 1)
+                         .arg(kTransientHttpMaxAttempts)
+                         .arg(result.elapsedMs)
+                         .arg(endpoint,
+                              truncateForLog(QString::fromUtf8(result.body)),
+                              truncateForLog(result.errorMessage, 240)));
+        if (!isTransientHttpFailure(result) || attempt + 1 >= kTransientHttpMaxAttempts) {
+            break;
+        }
+        QThread::msleep(kTransientHttpRetryDelayMs);
+    }
+
+    if (attempt > 0 && !result.errorMessage.isEmpty()) {
+        result.errorMessage += QStringLiteral("，已重试 %1 次仍失败").arg(attempt);
+    }
     return result;
 }
 
