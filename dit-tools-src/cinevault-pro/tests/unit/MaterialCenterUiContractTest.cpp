@@ -407,6 +407,7 @@ private slots:
         QVERIFY(qml.contains(QStringLiteral("objectName: \"customAnalysisDimensionButton\"")));
         QVERIFY(qml.contains(QStringLiteral("objectName: \"customAnalysisDimensionDialog\"")));
         QVERIFY(qml.contains(QStringLiteral("objectName: \"customAnalysisDimensionGlassFlow\"")));
+        QVERIFY(!qml.contains(QStringLiteral("implicitHeight: childrenRect.height")));
         QVERIFY(qml.contains(QStringLiteral("Qt.rgba(0.36, 0.61, 1.0, 0.15)")));
         QVERIFY(qml.contains(QStringLiteral("已并入常规解析")));
         QVERIFY(qml.contains(QStringLiteral("色彩风格")));

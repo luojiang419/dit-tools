@@ -1074,7 +1074,7 @@ Item {
                 Flow {
                     id: builtInDimensionFlow
                     Layout.fillWidth: true
-                    implicitHeight: childrenRect.height
+                    Layout.preferredHeight: childrenRect.height
                     spacing: 9
 
                     Repeater {
@@ -1157,7 +1157,7 @@ Item {
                     id: customDimensionFlow
                     objectName: "customAnalysisDimensionGlassFlow"
                     Layout.fillWidth: true
-                    implicitHeight: childrenRect.height
+                    Layout.preferredHeight: childrenRect.height
                     spacing: 10
 
                     Repeater {
