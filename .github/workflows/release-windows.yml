@@ -223,6 +223,7 @@ jobs:
               --test-dir dit-tools-src/cinevault-pro/build/windows-msvc-release-real `
               --build-config Release `
               --output-on-failure `
+              --verbose `
               --label-exclude gpu-integration `
               --parallel 1
           if ($LASTEXITCODE -ne 0) {
