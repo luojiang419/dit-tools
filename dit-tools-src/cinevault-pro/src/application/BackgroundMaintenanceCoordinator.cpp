@@ -61,7 +61,7 @@ BackgroundMaintenanceCoordinator::BackgroundMaintenanceCoordinator(
     connect(m_systemIdleMonitor, &SystemIdleMonitor::becameIdle, this, [this]() {
         m_attemptedThisIdle.clear();
         m_analysisDispatchBlocked = false;
-        setStatusText(QStringLiteral("电脑已空闲 30 分钟，开始无感更新索引。"));
+        setStatusText(QStringLiteral("电脑已空闲 1 小时，开始无感更新索引与自动解析。"));
         processNext();
     });
     connect(m_systemIdleMonitor, &SystemIdleMonitor::activityResumed, this, [this]() {
@@ -112,7 +112,7 @@ void BackgroundMaintenanceCoordinator::start()
     }
     m_running = true;
     handleProjectChanged();
-    m_systemIdleMonitor->start(30 * 60 * 1000, 5000);
+    m_systemIdleMonitor->start(60 * 60 * 1000, 5000);
     emit stateChanged();
 }
 
@@ -224,7 +224,7 @@ void BackgroundMaintenanceCoordinator::markSourceDirty(qint64 sourceRootId,
     if (!m_systemIdleMonitor->isIdle()) {
         m_attemptedThisIdle.remove(sourceRootId);
     }
-    setStatusText(QStringLiteral("已检测到文件变化：%1；将在电脑空闲 30 分钟后自动更新。")
+    setStatusText(QStringLiteral("已检测到文件变化：%1；将在电脑空闲 1 小时后自动更新并解析。")
                       .arg(QFileInfo(sourcePath).fileName().isEmpty()
                                ? sourcePath
                                : QFileInfo(sourcePath).fileName()));

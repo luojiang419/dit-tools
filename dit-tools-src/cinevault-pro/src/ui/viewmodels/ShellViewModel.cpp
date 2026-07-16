@@ -186,6 +186,7 @@ void ShellViewModel::enterProjectFromLibrary()
 
 void ShellViewModel::enterMaterialCenterFromQuickSearch(const QString &searchText)
 {
+    Q_UNUSED(searchText);
     if (!m_projectService->hasOpenProject()) {
         m_projectEntered = false;
         m_lastMessage = QStringLiteral("无法定位快捷搜索结果：所属工程尚未打开。");
@@ -197,22 +198,17 @@ void ShellViewModel::enterMaterialCenterFromQuickSearch(const QString &searchTex
         return;
     }
 
-    // Apply the complete navigation state before dispatching the search. This
-    // avoids briefly entering the library workspace and sending the query to
-    // the wrong view model while a project is being opened from quick search.
+    // Apply the navigation state without dispatching the quick-search query to
+    // the main-window search field.
     m_projectEntered = true;
-    const bool searchChanged = m_globalSearchText != searchText;
-    if (searchChanged) {
-        m_globalSearchText = searchText;
-        emit globalSearchTextChanged();
-    }
+    // 快捷搜索拥有独立的输入语义。进入主窗口只切换工作区，不能把快捷
+    // 查询写回主搜索框，也不能触发主搜索框对应的搜索链路。
     if (m_currentWorkspace != WorkspaceId::MaterialCenter) {
         m_currentWorkspace = WorkspaceId::MaterialCenter;
         emit currentWorkspaceChanged();
     }
     m_lastMessage = QStringLiteral("已进入素材管理中心并定位快捷搜索结果。");
     emit stateChanged();
-    emit searchRequested(m_globalSearchText);
 }
 
 void ShellViewModel::setGlobalSearchText(const QString &text)

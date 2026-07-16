@@ -297,8 +297,10 @@ private slots:
             QStringLiteral("ScrollBar.horizontal.policy: ScrollBar.AlwaysOff"),
             QStringLiteral("viewModel.openFolderProject(folderKey)"),
             QStringLiteral("viewModel.locateFolder(folderKey)"),
-            QStringLiteral("viewModel.openAssetFolder(videoKey)"),
-            QStringLiteral("viewModel.copyAssetPath(videoKey)"),
+            QStringLiteral("viewModel.openAssetFolder(frameContextMenu.targetVideoKey)"),
+            QStringLiteral("viewModel.copyAssetPath(frameContextMenu.targetVideoKey)"),
+            QStringLiteral("viewModel.openAssetFolder(assetContextMenu.targetVideoKey)"),
+            QStringLiteral("viewModel.copyAssetPath(assetContextMenu.targetVideoKey)"),
             QStringLiteral("viewModel.copyFolderPath(folderKey)"),
             QStringLiteral("text: \"打开所在目录\""),
             QStringLiteral("text: \"复制文件路径\""),
@@ -806,10 +808,13 @@ private slots:
             QStringLiteral("void ShellViewModel::setGlobalSearchText"));
         verifyOrdered(shellQuickNavigation, {
             QStringLiteral("m_projectEntered = true"),
-            QStringLiteral("m_globalSearchText = searchText"),
             QStringLiteral("m_currentWorkspace = WorkspaceId::MaterialCenter"),
-            QStringLiteral("emit searchRequested(m_globalSearchText)")
+            QStringLiteral("emit stateChanged()")
         });
+        QVERIFY(shellQuickNavigation.contains(QStringLiteral("Q_UNUSED(searchText)")));
+        QVERIFY(!shellQuickNavigation.contains(QStringLiteral("m_globalSearchText = searchText")));
+        QVERIFY(!shellQuickNavigation.contains(QStringLiteral("emit globalSearchTextChanged()")));
+        QVERIFY(!shellQuickNavigation.contains(QStringLiteral("emit searchRequested")));
         QVERIFY(materialCenterSource.contains(QStringLiteral("sameProjectDatabasePath")));
         QVERIFY(shellQuickNavigation.contains(QStringLiteral("m_projectService->hasOpenProject()")));
         const QStringList neutralDarkPaletteContracts = {
@@ -831,6 +836,34 @@ private slots:
         QVERIFY(controllerSource.contains(QStringLiteral("availableGeometry")));
         QVERIFY(mainQml.contains(QStringLiteral("sequence: \"Ctrl+K\"")));
         QVERIFY(mainQml.contains(QStringLiteral("QuickSearchWindow")));
+    }
+
+    void backgroundAnalysisStartsAfterOneHourOfSystemIdle()
+    {
+        const auto coordinator = sourceFile(
+            QStringLiteral("src/application/BackgroundMaintenanceCoordinator.cpp"));
+        const auto idleMonitor = sourceFile(
+            QStringLiteral("src/application/SystemIdleMonitor.h"));
+        const auto analysisService = sourceFile(
+            QStringLiteral("src/application/VideoAnalysisService.cpp"));
+        QVERIFY2(!coordinator.isEmpty() && !idleMonitor.isEmpty()
+                     && !analysisService.isEmpty(),
+                 "无法读取系统空闲自动解析契约源码");
+
+        QVERIFY(coordinator.contains(
+            QStringLiteral("m_systemIdleMonitor->start(60 * 60 * 1000, 5000)")));
+        QVERIFY(coordinator.contains(QStringLiteral("电脑已空闲 1 小时")));
+        QVERIFY(coordinator.contains(QStringLiteral("dispatchNextAnalysis()")));
+        QVERIFY(coordinator.contains(QStringLiteral("enqueueVideo(videoKey")));
+        QVERIFY(idleMonitor.contains(
+            QStringLiteral("idleThresholdMs = 60 * 60 * 1000")));
+        const auto finishAnalysis = sourceSection(
+            analysisService,
+            QStringLiteral("void VideoAnalysisService::finishCurrentAnalysis"),
+            QStringLiteral("void VideoAnalysisService::reportAnalysisProgress"));
+        QVERIFY(finishAnalysis.contains(
+            QStringLiteral("enqueueConfiguredDimensionsIfNeeded(videoKey")));
+        QVERIFY(!coordinator.contains(QStringLiteral("电脑已空闲 30 分钟")));
     }
 
     void searchAssistantPreloadsAndUnloadsAfterConfigurableAppIdleTime()
@@ -944,6 +977,11 @@ private slots:
         QVERIFY(materialCenter.contains(QStringLiteral("id: frameContextMenu")));
         QVERIFY(materialCenter.contains(QStringLiteral("id: folderContextMenu")));
         QVERIFY(materialCenter.contains(QStringLiteral("id: assetContextMenu")));
+        QVERIFY(materialCenter.count(QStringLiteral("property string targetVideoKey")) >= 2);
+        QVERIFY(materialCenter.contains(
+            QStringLiteral("frameContextMenu.targetVideoKey = videoKey")));
+        QVERIFY(materialCenter.contains(
+            QStringLiteral("assetContextMenu.targetVideoKey = videoKey")));
         QVERIFY(library.count(QStringLiteral("viewModel.copyAssetPath(assetId)")) >= 2);
         QVERIFY(materialHeader.contains(QStringLiteral("openAssetFolder(const QString &videoKey)")));
         QVERIFY(materialHeader.contains(QStringLiteral("copyAssetPath(const QString &videoKey)")));
@@ -951,6 +989,7 @@ private slots:
         QVERIFY(materialSource.contains(QStringLiteral("QGuiApplication::clipboard()")));
         QVERIFY(materialSource.contains(QStringLiteral("QDir::toNativeSeparators")));
         QVERIFY(materialSource.contains(QStringLiteral("FileRevealService::revealFile")));
+        QVERIFY(fileRevealService.contains(QStringLiteral("SHOpenFolderAndSelectItems")));
         QVERIFY(fileRevealService.contains(QStringLiteral("/select,")));
         QVERIFY(fileRevealService.contains(QStringLiteral("explorer.exe")));
         QVERIFY(libraryHeader.contains(QStringLiteral("copyAssetPath(qint64 assetId)")));

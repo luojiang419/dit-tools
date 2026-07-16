@@ -11,7 +11,7 @@ class SystemIdleMonitor final : public QObject {
 public:
     explicit SystemIdleMonitor(QObject *parent = nullptr);
 
-    void start(qint64 idleThresholdMs = 30 * 60 * 1000, int pollIntervalMs = 5000);
+    void start(qint64 idleThresholdMs = 60 * 60 * 1000, int pollIntervalMs = 5000);
     void stop();
 
     [[nodiscard]] bool isActive() const;
@@ -35,7 +35,7 @@ private:
     QTimer m_pollTimer;
     std::function<qint64()> m_testProvider;
     qint64 m_idleDurationMs = 0;
-    qint64 m_idleThresholdMs = 30 * 60 * 1000;
+    qint64 m_idleThresholdMs = 60 * 60 * 1000;
     bool m_active = false;
     bool m_idle = false;
 };

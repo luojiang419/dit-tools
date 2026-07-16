@@ -6,6 +6,10 @@
 #include <QProcess>
 #include <QUrl>
 
+#ifdef Q_OS_WIN
+#include <shlobj.h>
+#endif
+
 namespace {
 void setError(QString *errorMessage, const QString &message)
 {
@@ -13,6 +17,32 @@ void setError(QString *errorMessage, const QString &message)
         *errorMessage = message;
     }
 }
+
+#ifdef Q_OS_WIN
+bool revealFileWithWindowsShell(const QString &filePath)
+{
+    auto *absoluteItem = ILCreateFromPathW(
+        reinterpret_cast<PCWSTR>(filePath.utf16()));
+    if (!absoluteItem) {
+        return false;
+    }
+
+    auto *parentFolder = ILCloneFull(absoluteItem);
+    const auto *childItem = ILFindLastID(absoluteItem);
+    if (!parentFolder || !childItem || !ILRemoveLastID(parentFolder)) {
+        if (parentFolder) {
+            ILFree(parentFolder);
+        }
+        ILFree(absoluteItem);
+        return false;
+    }
+
+    const auto result = SHOpenFolderAndSelectItems(parentFolder, 1, &childItem, 0);
+    ILFree(parentFolder);
+    ILFree(absoluteItem);
+    return SUCCEEDED(result);
+}
+#endif
 }
 
 bool FileRevealService::revealFile(const QString &filePath, QString *errorMessage)
@@ -32,6 +62,9 @@ bool FileRevealService::revealFile(const QString &filePath, QString *errorMessag
 
 #ifdef Q_OS_WIN
     const auto nativePath = QDir::toNativeSeparators(info.absoluteFilePath());
+    if (revealFileWithWindowsShell(nativePath)) {
+        return true;
+    }
     if (QProcess::startDetached(QStringLiteral("explorer.exe"),
                                 {QStringLiteral("/select,%1").arg(nativePath)})) {
         return true;

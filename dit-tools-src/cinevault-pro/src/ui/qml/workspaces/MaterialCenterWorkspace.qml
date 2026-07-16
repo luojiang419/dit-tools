@@ -731,14 +731,19 @@ Rectangle {
 
                             ThemedMenu {
                                 id: frameContextMenu
+                                property string targetVideoKey: ""
 
                                 ThemedMenuItem {
                                     text: "打开所在目录"
-                                    onTriggered: if (viewModel) viewModel.openAssetFolder(videoKey)
+                                    onTriggered: if (viewModel) {
+                                        viewModel.openAssetFolder(frameContextMenu.targetVideoKey)
+                                    }
                                 }
                                 ThemedMenuItem {
                                     text: "复制文件路径"
-                                    onTriggered: if (viewModel) viewModel.copyAssetPath(videoKey)
+                                    onTriggered: if (viewModel) {
+                                        viewModel.copyAssetPath(frameContextMenu.targetVideoKey)
+                                    }
                                 }
                             }
 
@@ -750,6 +755,7 @@ Rectangle {
                                     if (viewModel) {
                                         viewModel.selectVideo(videoKey)
                                     }
+                                    frameContextMenu.targetVideoKey = videoKey
                                     frameContextMenu.popup(frameContextArea, mouse.x, mouse.y)
                                 }
                             }
@@ -1202,14 +1208,19 @@ Rectangle {
 
                         ThemedMenu {
                             id: assetContextMenu
+                            property string targetVideoKey: ""
 
                             ThemedMenuItem {
                                 text: "打开所在目录"
-                                onTriggered: if (viewModel) viewModel.openAssetFolder(videoKey)
+                                onTriggered: if (viewModel) {
+                                    viewModel.openAssetFolder(assetContextMenu.targetVideoKey)
+                                }
                             }
                             ThemedMenuItem {
                                 text: "复制文件路径"
-                                onTriggered: if (viewModel) viewModel.copyAssetPath(videoKey)
+                                onTriggered: if (viewModel) {
+                                    viewModel.copyAssetPath(assetContextMenu.targetVideoKey)
+                                }
                             }
                         }
 
@@ -1221,6 +1232,7 @@ Rectangle {
                                 if (viewModel) {
                                     viewModel.selectVideo(videoKey)
                                 }
+                                assetContextMenu.targetVideoKey = videoKey
                                 assetContextMenu.popup(assetContextArea, mouse.x, mouse.y)
                             }
                         }
