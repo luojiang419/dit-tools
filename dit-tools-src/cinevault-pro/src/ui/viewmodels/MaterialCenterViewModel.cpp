@@ -87,19 +87,6 @@ QVariantList dimensionAnalysesToVariants(const QVector<MaterialDimensionAnalysis
     return values;
 }
 
-QStringList variantListToStringList(const QVariantList &items)
-{
-    QStringList values;
-    for (const auto &item : items) {
-        const auto text = item.toString().simplified();
-        if (!text.isEmpty()) {
-            values.append(text);
-        }
-    }
-    values.removeDuplicates();
-    return values;
-}
-
 QStringList searchTerms(const QString &text)
 {
     return text.trimmed().split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
@@ -905,31 +892,6 @@ QString MaterialCenterViewModel::selectedDimensionAnalysisError() const
     return selectedDimensionProgressState().errorMessage;
 }
 
-bool MaterialCenterViewModel::canAnalyzeSelectedDimensions() const
-{
-    return hasSelection()
-        && m_detail.asset.analysisStatus == VideoAnalysisStatus::Ready
-        && !selectedAnalysisBusy()
-        && !selectedDimensionAnalysisBusy();
-}
-
-bool MaterialCenterViewModel::canAnalyzeVisibleDimensions() const
-{
-    if (!m_analysisService) {
-        return false;
-    }
-
-    for (const auto &asset : m_assets) {
-        const auto state = m_dimensionProgressByVideoKey.value(asset.videoKey);
-        if (canAnalyzeAsset(asset)
-            && asset.analysisStatus == VideoAnalysisStatus::Ready
-            && !state.running) {
-            return true;
-        }
-    }
-    return false;
-}
-
 bool MaterialCenterViewModel::selectedIsVideo() const
 {
     return hasSelection() && m_detail.asset.assetType == AssetType::Video;
@@ -1420,87 +1382,6 @@ void MaterialCenterViewModel::analyzeSelected()
     }
 }
 
-void MaterialCenterViewModel::analyzeSelectedDimensions(const QVariantList &dimensions)
-{
-    if (!hasSelection() || !m_analysisService) {
-        return;
-    }
-
-    const auto dimensionNames = variantListToStringList(dimensions);
-    QString errorMessage;
-    if (m_analysisService->analyzeDimensions(m_detail.asset.videoKey, dimensionNames, &errorMessage)) {
-        setMessage(QStringLiteral("已开始多维度解析：%1").arg(m_detail.asset.fileName));
-        return;
-    }
-
-    setMessage(errorMessage);
-    DimensionProgressState state;
-    state.running = false;
-    state.detail = errorMessage;
-    state.errorMessage = errorMessage;
-    m_dimensionProgressByVideoKey.insert(m_detail.asset.videoKey, state);
-    emit dimensionAnalysisChanged();
-}
-
-void MaterialCenterViewModel::analyzeVisibleDimensions(const QVariantList &dimensions)
-{
-    if (!m_analysisService) {
-        return;
-    }
-
-    const auto dimensionNames = variantListToStringList(dimensions);
-    if (dimensionNames.isEmpty()) {
-        setMessage(QStringLiteral("请至少添加一个解析维度。"));
-        return;
-    }
-
-    int accepted = 0;
-    int completed = 0;
-    QString lastError;
-    for (const auto &asset : m_assets) {
-        const auto state = m_dimensionProgressByVideoKey.value(asset.videoKey);
-        if (!canAnalyzeAsset(asset)
-            || asset.analysisStatus != VideoAnalysisStatus::Ready
-            || state.running) {
-            continue;
-        }
-
-        QString pendingError;
-        const auto pendingCount = m_analysisService->pendingDimensionCount(asset.videoKey, dimensionNames, &pendingError);
-        if (pendingCount == 0) {
-            ++completed;
-            continue;
-        }
-        if (pendingCount < 0) {
-            if (!pendingError.trimmed().isEmpty()) {
-                lastError = pendingError;
-            }
-            continue;
-        }
-
-        QString errorMessage;
-        if (m_analysisService->analyzeDimensions(asset.videoKey, dimensionNames, &errorMessage)) {
-            ++accepted;
-        } else if (!errorMessage.trimmed().isEmpty()) {
-            lastError = errorMessage;
-        }
-    }
-
-    if (accepted > 0) {
-        const auto completedText = completed > 0
-            ? QStringLiteral("，已跳过 %1 条已完成素材。").arg(completed)
-            : QStringLiteral("。");
-        setMessage(QStringLiteral("已开始 %1 条素材的全局多维度解析%2").arg(accepted).arg(completedText));
-    } else if (completed > 0) {
-        setMessage(QStringLiteral("当前结果中所选维度都已解析完成，无需重复解析。"));
-    } else if (!lastError.trimmed().isEmpty()) {
-        setMessage(lastError);
-    } else {
-        setMessage(QStringLiteral("当前结果没有可进行多维度解析的已解析素材。"));
-    }
-    emit dimensionAnalysisChanged();
-}
-
 void MaterialCenterViewModel::retrySelectedFrame(int frameNumber)
 {
     if (!hasSelection() || !m_analysisService) {
@@ -1512,35 +1393,6 @@ void MaterialCenterViewModel::retrySelectedFrame(int frameNumber)
         setMessage(QStringLiteral("已加入第 %1 帧重解析队列：%2").arg(frameNumber).arg(m_detail.asset.fileName));
     } else {
         setMessage(errorMessage);
-    }
-}
-
-void MaterialCenterViewModel::analyzeVisiblePending()
-{
-    if (!m_analysisService) {
-        return;
-    }
-
-    QStringList videoKeys;
-    for (const auto &asset : m_assets) {
-        if (canAnalyzeAsset(asset)
-            && (asset.analysisStatus == VideoAnalysisStatus::Pending
-            || asset.analysisStatus == VideoAnalysisStatus::Failed
-            || asset.analysisStatus == VideoAnalysisStatus::Running)) {
-            videoKeys.append(asset.videoKey);
-        }
-    }
-    if (videoKeys.isEmpty()) {
-        setMessage(QStringLiteral("当前结果没有未完成素材。"));
-        return;
-    }
-
-    QString message;
-    const auto accepted = m_analysisService->enqueueVideos(videoKeys, &message);
-    if (accepted > 0) {
-        setMessage(QStringLiteral("已加入 %1 条素材到解析队列。").arg(accepted));
-    } else {
-        setMessage(message);
     }
 }
 

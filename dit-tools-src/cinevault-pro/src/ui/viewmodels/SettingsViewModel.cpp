@@ -42,6 +42,27 @@ QString autoUnloadTimeLabel(int minutes)
     }
     return QStringLiteral("%1分钟").arg(minutes);
 }
+
+QStringList builtInAnalysisDimensions()
+{
+    return {
+        QStringLiteral("色彩风格"),
+        QStringLiteral("构图与镜头语言"),
+        QStringLiteral("品牌/文字线索"),
+        QStringLiteral("适用场景"),
+        QStringLiteral("情绪氛围")
+    };
+}
+
+bool containsDimension(const QStringList &dimensions, const QString &name)
+{
+    for (const auto &dimension : dimensions) {
+        if (dimension.compare(name, Qt::CaseInsensitive) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
 }
 
 SettingsViewModel::SettingsViewModel(AppSettings *settings,
@@ -138,6 +159,72 @@ void SettingsViewModel::setVisionModel(const QString &value)
     }
     m_settings->setVisionModel(value);
     emit settingsChanged();
+}
+
+QStringList SettingsViewModel::customAnalysisDimensions() const
+{
+    return m_settings ? m_settings->customAnalysisDimensions() : QStringList{};
+}
+
+bool SettingsViewModel::addCustomAnalysisDimension(const QString &name)
+{
+    if (!m_settings) {
+        setLastMessage(QStringLiteral("设置服务尚未准备好。"));
+        return false;
+    }
+
+    const auto normalized = name.trimmed();
+    if (normalized.isEmpty()) {
+        setLastMessage(QStringLiteral("请输入自定义解析维度。"));
+        return false;
+    }
+    if (normalized.size() > 32) {
+        setLastMessage(QStringLiteral("维度名称不能超过 32 个字符。"));
+        return false;
+    }
+    if (containsDimension(builtInAnalysisDimensions(), normalized)) {
+        setLastMessage(QStringLiteral("该维度已包含在常规解析任务中，无需重复添加。"));
+        return false;
+    }
+
+    auto dimensions = m_settings->customAnalysisDimensions();
+    if (containsDimension(dimensions, normalized)) {
+        setLastMessage(QStringLiteral("该自定义维度已经存在。"));
+        return false;
+    }
+    if (dimensions.size() >= 20) {
+        setLastMessage(QStringLiteral("最多可添加 20 个自定义解析维度。"));
+        return false;
+    }
+
+    dimensions.append(normalized);
+    m_settings->setCustomAnalysisDimensions(dimensions);
+    m_settings->sync();
+    setLastMessage(QStringLiteral("已添加自定义解析维度：%1").arg(normalized));
+    emit settingsChanged();
+    return true;
+}
+
+bool SettingsViewModel::removeCustomAnalysisDimension(const QString &name)
+{
+    if (!m_settings) {
+        return false;
+    }
+
+    const auto normalized = name.trimmed();
+    auto dimensions = m_settings->customAnalysisDimensions();
+    for (qsizetype index = 0; index < dimensions.size(); ++index) {
+        if (dimensions.at(index).compare(normalized, Qt::CaseInsensitive) != 0) {
+            continue;
+        }
+        const auto removed = dimensions.takeAt(index);
+        m_settings->setCustomAnalysisDimensions(dimensions);
+        m_settings->sync();
+        setLastMessage(QStringLiteral("已移除自定义解析维度：%1").arg(removed));
+        emit settingsChanged();
+        return true;
+    }
+    return false;
 }
 
 bool SettingsViewModel::searchAssistantEnabled() const

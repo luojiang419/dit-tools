@@ -98,6 +98,32 @@ private slots:
         QCOMPARE(settings.searchAssistantAutoUnloadMinutes(), 5);
     }
 
+    void customAnalysisDimensionsPersistAndNormalize()
+    {
+        {
+            AppSettings settings;
+            settings.setCustomAnalysisDimensions({
+                QStringLiteral(" 电商转化潜力 "),
+                QStringLiteral("服装版型"),
+                QStringLiteral("电商转化潜力"),
+                QStringLiteral("FASHION FIT"),
+                QStringLiteral("fashion fit"),
+                QString(33, QLatin1Char('x'))
+            });
+            settings.sync();
+        }
+
+        AppSettings restored;
+        QCOMPARE(restored.customAnalysisDimensions(),
+                 QStringList({QStringLiteral("电商转化潜力"),
+                              QStringLiteral("服装版型"),
+                              QStringLiteral("FASHION FIT")}));
+
+        restored.setCustomAnalysisDimensions({});
+        restored.sync();
+        QVERIFY(restored.customAnalysisDimensions().isEmpty());
+    }
+
 private:
     QTemporaryDir m_settingsRoot;
 };

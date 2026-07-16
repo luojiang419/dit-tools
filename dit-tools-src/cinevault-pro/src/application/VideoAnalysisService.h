@@ -76,10 +76,11 @@ private:
 
     bool validateReadyForEnqueue(const QString &videoKey, QString *errorMessage) const;
     bool enqueueJob(const AnalysisJob &job, QString *errorMessage);
+    bool enqueueConfiguredDimensionsIfNeeded(const QString &videoKey, QString *errorMessage = nullptr);
     bool startDimensionAnalysisNow(const QString &videoKey, const QStringList &dimensions, QString *errorMessage);
     void startNextAnalysis();
     void startNextDimensionAnalysis();
-    void finishCurrentAnalysis(const QString &videoKey);
+    void finishCurrentAnalysis(const QString &videoKey, bool succeeded);
     void reportAnalysisProgress(const QString &videoKey,
                                 qint64 progress,
                                 const QString &detail,

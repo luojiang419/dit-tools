@@ -30,6 +30,7 @@ Item {
     property int controlHeight: 42
     property int sectionPadding: 20
     property int formLabelWidth: 116
+    property string customDimensionMessage: ""
 
     readonly property bool opened: visible
 
@@ -72,6 +73,26 @@ Item {
 
     function closePage() {
         visible = false
+    }
+
+    function openCustomDimensionDialog() {
+        customDimensionMessage = ""
+        customDimensionNameField.text = ""
+        customDimensionDialog.open()
+    }
+
+    function submitCustomDimension() {
+        if (!viewModel) {
+            return
+        }
+        var name = customDimensionNameField.text.trim()
+        if (viewModel.addCustomAnalysisDimension(name)) {
+            customDimensionMessage = "已添加“" + name + "”，后续常规解析会自动执行该维度。"
+            customDimensionNameField.text = ""
+            customDimensionNameField.forceActiveFocus()
+        } else {
+            customDimensionMessage = viewModel.lastMessage
+        }
     }
 
     Keys.onEscapePressed: function(event) {
@@ -665,6 +686,53 @@ Item {
                         Rectangle {
                             Layout.fillWidth: true
                             radius: 14
+                            color: Qt.rgba(0.36, 0.56, 0.92, 0.10)
+                            border.width: 1
+                            border.color: Qt.rgba(0.56, 0.72, 1.0, 0.30)
+                            implicitHeight: customDimensionSettingsRow.implicitHeight + 28
+
+                            RowLayout {
+                                id: customDimensionSettingsRow
+                                anchors.fill: parent
+                                anchors.margins: 14
+                                spacing: 14
+
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 5
+
+                                    Text {
+                                        text: "自定义解析维度"
+                                        color: Theme.text
+                                        font.pixelSize: 16
+                                        font.weight: Font.DemiBold
+                                    }
+
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: "内置维度已合并到常规任务；可在此添加行业、项目或品牌专用维度。当前已添加 "
+                                              + (viewModel ? viewModel.customAnalysisDimensions.length : 0) + " 个。"
+                                        color: Theme.muted
+                                        font.pixelSize: 12
+                                        wrapMode: Text.Wrap
+                                    }
+                                }
+
+                                ActionButton {
+                                    objectName: "customAnalysisDimensionButton"
+                                    Layout.preferredWidth: 154
+                                    Layout.preferredHeight: root.controlHeight
+                                    text: "自定义解析维度"
+                                    primary: true
+                                    textPixelSize: 14
+                                    onClicked: root.openCustomDimensionDialog()
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            Layout.fillWidth: true
+                            radius: 14
                             color: Qt.rgba(0.22, 0.48, 0.84, 0.08)
                             border.width: 1
                             border.color: Qt.rgba(0.22, 0.48, 0.84, 0.28)
@@ -925,6 +993,244 @@ Item {
                                 onClicked: if (viewModel) viewModel.refreshCacheInfo()
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    Dialog {
+        id: customDimensionDialog
+        objectName: "customAnalysisDimensionDialog"
+
+        modal: true
+        width: Math.max(1, Math.min(680, root.width - 24))
+        height: Math.max(1, Math.min(580, root.height - 24))
+        x: Math.max(0, Math.round((root.width - width) / 2))
+        y: Math.max(0, Math.round((root.height - height) / 2))
+        padding: 0
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        onOpened: Qt.callLater(function() { customDimensionNameField.forceActiveFocus() })
+
+        background: Rectangle {
+            radius: 22
+            color: Theme.isDark
+                ? Qt.rgba(0.055, 0.070, 0.105, 0.97)
+                : Qt.rgba(0.965, 0.978, 1.0, 0.98)
+            border.width: 1
+            border.color: Qt.rgba(0.58, 0.72, 1.0, 0.34)
+
+            Rectangle {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: 1
+                height: parent.height * 0.42
+                radius: 21
+                color: Qt.rgba(0.30, 0.50, 0.90, 0.055)
+            }
+        }
+
+        ScrollView {
+            id: customDimensionScroll
+            anchors.fill: parent
+            anchors.margins: 22
+            clip: true
+            contentWidth: availableWidth
+            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+
+            MiddleDragScrollHandler {
+                parent: customDimensionScroll.contentItem
+                flickable: customDimensionScroll.contentItem
+            }
+
+            ColumnLayout {
+                width: customDimensionScroll.availableWidth
+                spacing: 16
+
+                Text {
+                    Layout.fillWidth: true
+                    text: "自定义解析维度"
+                    color: Theme.text
+                    font.pixelSize: 22
+                    font.weight: Font.Black
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    text: "添加后，常规解析、补充解析和全部重新解析都会自动处理这些维度，无需在每次任务前重复勾选。"
+                    color: Theme.muted
+                    font.pixelSize: 13
+                    wrapMode: Text.Wrap
+                }
+
+                Text {
+                    text: "已并入常规解析"
+                    color: Theme.text
+                    font.pixelSize: 14
+                    font.weight: Font.DemiBold
+                }
+
+                Flow {
+                    id: builtInDimensionFlow
+                    Layout.fillWidth: true
+                    implicitHeight: childrenRect.height
+                    spacing: 9
+
+                    Repeater {
+                        model: ["色彩风格", "构图与镜头语言", "品牌/文字线索", "适用场景", "情绪氛围"]
+
+                        delegate: Rectangle {
+                            width: builtInDimensionLabel.implicitWidth + 28
+                            height: 36
+                            radius: 18
+                            color: Qt.rgba(0.44, 0.61, 0.94, 0.12)
+                            border.width: 1
+                            border.color: Qt.rgba(0.62, 0.76, 1.0, 0.28)
+
+                            Text {
+                                id: builtInDimensionLabel
+                                anchors.centerIn: parent
+                                text: modelData
+                                color: Theme.muted
+                                font.pixelSize: 13
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    height: 1
+                    color: Qt.rgba(0.62, 0.72, 0.90, 0.16)
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 10
+
+                    ThemedTextField {
+                        id: customDimensionNameField
+                        objectName: "customAnalysisDimensionNameField"
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 42
+                        placeholderText: "例如：电商转化潜力、服装版型、镜头可复用性"
+                        maximumLength: 32
+                        onAccepted: root.submitCustomDimension()
+                    }
+
+                    ActionButton {
+                        Layout.preferredWidth: 88
+                        Layout.preferredHeight: 42
+                        text: "添加维度"
+                        primary: true
+                        onClicked: root.submitCustomDimension()
+                    }
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    visible: root.customDimensionMessage.length > 0
+                    text: root.customDimensionMessage
+                    color: text.indexOf("已添加") === 0 ? Theme.blue : Theme.orange
+                    font.pixelSize: 12
+                    wrapMode: Text.Wrap
+                }
+
+                Text {
+                    text: "我的自定义维度"
+                    color: Theme.text
+                    font.pixelSize: 14
+                    font.weight: Font.DemiBold
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    visible: !viewModel || viewModel.customAnalysisDimensions.length === 0
+                    text: "尚未添加自定义维度。常规解析仍会自动完成上方五项内置维度。"
+                    color: Theme.weak
+                    font.pixelSize: 13
+                    wrapMode: Text.Wrap
+                }
+
+                Flow {
+                    id: customDimensionFlow
+                    objectName: "customAnalysisDimensionGlassFlow"
+                    Layout.fillWidth: true
+                    implicitHeight: childrenRect.height
+                    spacing: 10
+
+                    Repeater {
+                        model: viewModel ? viewModel.customAnalysisDimensions : []
+
+                        delegate: Rectangle {
+                            id: customDimensionChip
+                            width: Math.min(customDimensionFlow.width, customDimensionChipLabel.implicitWidth + 58)
+                            height: 40
+                            radius: 20
+                            color: chipMouse.containsMouse
+                                ? Qt.rgba(0.36, 0.61, 1.0, 0.24)
+                                : Qt.rgba(0.36, 0.61, 1.0, 0.15)
+                            border.width: 1
+                            border.color: chipMouse.containsMouse
+                                ? Qt.rgba(0.74, 0.84, 1.0, 0.72)
+                                : Qt.rgba(0.67, 0.79, 1.0, 0.42)
+
+                            Rectangle {
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.top: parent.top
+                                anchors.leftMargin: 10
+                                anchors.rightMargin: 10
+                                height: 1
+                                color: Qt.rgba(1, 1, 1, 0.28)
+                            }
+
+                            Row {
+                                anchors.centerIn: parent
+                                spacing: 10
+
+                                Text {
+                                    id: customDimensionChipLabel
+                                    text: modelData
+                                    color: Theme.text
+                                    font.pixelSize: 13
+                                    font.weight: Font.DemiBold
+                                }
+
+                                Text {
+                                    text: "×"
+                                    color: chipMouse.containsMouse ? Theme.text : Theme.muted
+                                    font.pixelSize: 18
+                                    font.weight: Font.DemiBold
+                                }
+                            }
+
+                            MouseArea {
+                                id: chipMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (viewModel && viewModel.removeCustomAnalysisDimension(modelData)) {
+                                        root.customDimensionMessage = "已移除“" + modelData + "”。"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    Item { Layout.fillWidth: true }
+
+                    ActionButton {
+                        Layout.preferredWidth: 88
+                        Layout.preferredHeight: 38
+                        text: "完成"
+                        primary: true
+                        onClicked: customDimensionDialog.close()
                     }
                 }
             }

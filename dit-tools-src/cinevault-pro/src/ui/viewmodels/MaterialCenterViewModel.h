@@ -99,8 +99,6 @@ class MaterialCenterViewModel : public QObject {
     Q_PROPERTY(bool selectedDimensionAnalysisBusy READ selectedDimensionAnalysisBusy NOTIFY dimensionAnalysisChanged)
     Q_PROPERTY(QString selectedDimensionAnalysisText READ selectedDimensionAnalysisText NOTIFY dimensionAnalysisChanged)
     Q_PROPERTY(QString selectedDimensionAnalysisError READ selectedDimensionAnalysisError NOTIFY dimensionAnalysisChanged)
-    Q_PROPERTY(bool canAnalyzeSelectedDimensions READ canAnalyzeSelectedDimensions NOTIFY dimensionAnalysisChanged)
-    Q_PROPERTY(bool canAnalyzeVisibleDimensions READ canAnalyzeVisibleDimensions NOTIFY dimensionAnalysisChanged)
     Q_PROPERTY(bool selectedIsVideo READ selectedIsVideo NOTIFY selectionChanged)
     Q_PROPERTY(int queuedAnalysisCount READ queuedAnalysisCount NOTIFY analysisProgressChanged)
     Q_PROPERTY(bool hasAnalyzedVisible READ hasAnalyzedVisible NOTIFY statusChanged)
@@ -189,8 +187,6 @@ public:
     bool selectedDimensionAnalysisBusy() const;
     QString selectedDimensionAnalysisText() const;
     QString selectedDimensionAnalysisError() const;
-    bool canAnalyzeSelectedDimensions() const;
-    bool canAnalyzeVisibleDimensions() const;
     bool selectedIsVideo() const;
     int queuedAnalysisCount() const;
     bool hasAnalyzedVisible() const;
@@ -209,9 +205,6 @@ public:
     Q_INVOKABLE void syncCurrentProject();
     Q_INVOKABLE void rebuildGlobalIndex();
     Q_INVOKABLE void analyzeSelected();
-    Q_INVOKABLE void analyzeSelectedDimensions(const QVariantList &dimensions);
-    Q_INVOKABLE void analyzeVisibleDimensions(const QVariantList &dimensions);
-    Q_INVOKABLE void analyzeVisiblePending();
     Q_INVOKABLE void analyzeVisibleSupplement();
     Q_INVOKABLE void analyzeVisibleAll();
     Q_INVOKABLE bool openSelectedProject();

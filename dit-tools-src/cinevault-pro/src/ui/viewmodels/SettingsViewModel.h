@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QObject>
+#include <QStringList>
 
 class AppSettings;
 class QuickSearchController;
@@ -15,6 +16,7 @@ class SettingsViewModel : public QObject {
     Q_PROPERTY(QString visionBaseUrl READ visionBaseUrl WRITE setVisionBaseUrl NOTIFY settingsChanged)
     Q_PROPERTY(QString visionApiKey READ visionApiKey WRITE setVisionApiKey NOTIFY settingsChanged)
     Q_PROPERTY(QString visionModel READ visionModel WRITE setVisionModel NOTIFY settingsChanged)
+    Q_PROPERTY(QStringList customAnalysisDimensions READ customAnalysisDimensions NOTIFY settingsChanged)
     Q_PROPERTY(bool searchAssistantEnabled READ searchAssistantEnabled WRITE setSearchAssistantEnabled NOTIFY settingsChanged)
     Q_PROPERTY(int searchAssistantAutoUnloadMinutes READ searchAssistantAutoUnloadMinutes WRITE setSearchAssistantAutoUnloadMinutes NOTIFY settingsChanged)
     Q_PROPERTY(QString localSearchAssistantStatusText READ localSearchAssistantStatusText NOTIFY settingsChanged)
@@ -54,6 +56,7 @@ public:
     void setVisionApiKey(const QString &value);
     QString visionModel() const;
     void setVisionModel(const QString &value);
+    QStringList customAnalysisDimensions() const;
     bool searchAssistantEnabled() const;
     void setSearchAssistantEnabled(bool enabled);
     int searchAssistantAutoUnloadMinutes() const;
@@ -99,6 +102,8 @@ public:
                                         const QString &visionApiKey,
                                         const QString &visionModel,
                                         int analysisTimeoutSec);
+    Q_INVOKABLE bool addCustomAnalysisDimension(const QString &name);
+    Q_INVOKABLE bool removeCustomAnalysisDimension(const QString &name);
     Q_INVOKABLE QString shortcutFromKeyEvent(int key, int modifiers) const;
     Q_INVOKABLE void saveAndApply(const QString &visionBaseUrl,
                                   const QString &visionApiKey,

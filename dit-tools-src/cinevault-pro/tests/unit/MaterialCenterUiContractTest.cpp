@@ -337,18 +337,26 @@ private slots:
                      && !serviceHeader.isEmpty() && !service.isEmpty(),
                  "无法读取批量解析策略契约源码");
 
-        QVERIFY(qml.contains(QStringLiteral("选择批量解析方式")));
+        QVERIFY(qml.contains(QStringLiteral("text: \"多维度解析\"")));
+        QVERIFY(qml.contains(QStringLiteral("选择多维度解析方式")));
         QVERIFY(qml.contains(QStringLiteral("补充解析（推荐）")));
         QVERIFY(qml.contains(QStringLiteral("完整帧直接跳过")));
+        QVERIFY(qml.contains(QStringLiteral("设置中的自定义维度也会自动加入任务")));
         QVERIFY(qml.contains(QStringLiteral("viewModel.analyzeVisibleSupplement()")));
         QVERIFY(qml.contains(QStringLiteral("viewModel.analyzeVisibleAll()")));
         QVERIFY(qml.contains(QStringLiteral("Math.max(1, Math.min(620, root.width - 24))")));
         QVERIFY(qml.contains(QStringLiteral("Math.max(1, Math.min(430, root.height - 24))")));
-        QVERIFY(qml.contains(QStringLiteral("id: batchAnalyzeScroll")));
+        QVERIFY(qml.contains(QStringLiteral("id: multiDimensionAnalyzeScroll")));
         QVERIFY(qml.contains(QStringLiteral("implicitHeight: supplementOptionContent.implicitHeight + 28")));
+        QVERIFY(!qml.contains(QStringLiteral("text: \"批量解析\"")));
+        QVERIFY(!qml.contains(QStringLiteral("dimensionAnalyzeDialog")));
+        QVERIFY(!qml.contains(QStringLiteral("dimensionDraftModel")));
+        QVERIFY(!qml.contains(QStringLiteral("viewModel.analyzeVisiblePending()")));
         QVERIFY(!qml.contains(QStringLiteral("解析未完成素材")));
 
         QVERIFY(viewModelHeader.contains(QStringLiteral("Q_INVOKABLE void analyzeVisibleSupplement()")));
+        QVERIFY(!viewModelHeader.contains(QStringLiteral("analyzeVisibleDimensions")));
+        QVERIFY(!viewModelHeader.contains(QStringLiteral("canAnalyzeVisibleDimensions")));
         QVERIFY(viewModel.contains(QStringLiteral("asset.analysisStatus == VideoAnalysisStatus::Failed")));
         QVERIFY(viewModel.contains(QStringLiteral("asset.analysisStatus == VideoAnalysisStatus::Running")));
         QVERIFY(viewModel.contains(QStringLiteral("enqueueVideosForSupplement(videoKeys, &message)")));
@@ -361,6 +369,7 @@ private slots:
             QStringLiteral("int VideoAnalysisService::enqueueVideosForSupplement"),
             QStringLiteral("int VideoAnalysisService::enqueueVideosForRebuild"));
         QVERIFY(supplement.contains(QStringLiteral("hasIncompleteVisualFrames")));
+        QVERIFY(supplement.contains(QStringLiteral("enqueueConfiguredDimensionsIfNeeded")));
         QVERIFY(supplement.contains(QStringLiteral("AnalysisRunMode::Resume")));
         QVERIFY(supplement.contains(QStringLiteral("if (!hasVisualGap)")));
         QVERIFY(!supplement.contains(QStringLiteral("AnalysisRunMode::Rebuild")));
@@ -371,6 +380,48 @@ private slots:
             QStringLiteral("int VideoAnalysisService::enqueueVideosForRebuild"),
             QStringLiteral("bool VideoAnalysisService::retryFrame"));
         QVERIFY(rebuild.contains(QStringLiteral("AnalysisRunMode::Rebuild")));
+    }
+
+    void customAnalysisDimensionsAreManagedInSettingsAndJoinedToRegularTasks()
+    {
+        const auto settingsHeader = sourceFile(QStringLiteral("src/infrastructure/config/AppSettings.h"));
+        const auto settingsSource = sourceFile(QStringLiteral("src/infrastructure/config/AppSettings.cpp"));
+        const auto viewModelHeader = sourceFile(QStringLiteral("src/ui/viewmodels/SettingsViewModel.h"));
+        const auto viewModelSource = sourceFile(QStringLiteral("src/ui/viewmodels/SettingsViewModel.cpp"));
+        const auto qml = sourceFile(QStringLiteral("src/ui/qml/components/SettingsPage.qml"));
+        const auto serviceHeader = sourceFile(QStringLiteral("src/application/VideoAnalysisService.h"));
+        const auto serviceSource = sourceFile(QStringLiteral("src/application/VideoAnalysisService.cpp"));
+        QVERIFY2(!settingsHeader.isEmpty() && !settingsSource.isEmpty()
+                     && !viewModelHeader.isEmpty() && !viewModelSource.isEmpty()
+                     && !qml.isEmpty() && !serviceHeader.isEmpty() && !serviceSource.isEmpty(),
+                 "无法读取自定义解析维度契约源码");
+
+        QVERIFY(settingsHeader.contains(QStringLiteral("QStringList customAnalysisDimensions() const")));
+        QVERIFY(settingsSource.contains(QStringLiteral("materialCenter/customAnalysisDimensions")));
+        QVERIFY(settingsSource.contains(QStringLiteral("Qt::CaseInsensitive")));
+        QVERIFY(viewModelHeader.contains(QStringLiteral("Q_PROPERTY(QStringList customAnalysisDimensions")));
+        QVERIFY(viewModelHeader.contains(QStringLiteral("addCustomAnalysisDimension")));
+        QVERIFY(viewModelHeader.contains(QStringLiteral("removeCustomAnalysisDimension")));
+        QVERIFY(viewModelSource.contains(QStringLiteral("已包含在常规解析任务中")));
+
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"customAnalysisDimensionButton\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"customAnalysisDimensionDialog\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"customAnalysisDimensionGlassFlow\"")));
+        QVERIFY(qml.contains(QStringLiteral("Qt.rgba(0.36, 0.61, 1.0, 0.15)")));
+        QVERIFY(qml.contains(QStringLiteral("已并入常规解析")));
+        QVERIFY(qml.contains(QStringLiteral("色彩风格")));
+        QVERIFY(qml.contains(QStringLiteral("构图与镜头语言")));
+        QVERIFY(qml.contains(QStringLiteral("品牌/文字线索")));
+        QVERIFY(qml.contains(QStringLiteral("适用场景")));
+        QVERIFY(qml.contains(QStringLiteral("情绪氛围")));
+
+        QVERIFY(serviceHeader.contains(QStringLiteral("enqueueConfiguredDimensionsIfNeeded")));
+        const auto finishSection = sourceSection(
+            serviceSource,
+            QStringLiteral("void VideoAnalysisService::finishCurrentAnalysis"),
+            QStringLiteral("void VideoAnalysisService::reportAnalysisProgress"));
+        QVERIFY(finishSection.contains(QStringLiteral("completedJob.mode != AnalysisRunMode::SingleFrame")));
+        QVERIFY(finishSection.contains(QStringLiteral("enqueueConfiguredDimensionsIfNeeded(videoKey")));
     }
 
     void searchSettingsExposeLocalTextAssistantAndQuickSearchContracts()

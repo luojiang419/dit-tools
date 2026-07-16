@@ -1725,6 +1725,14 @@ int VideoAnalysisService::enqueueVideosForSupplement(const QStringList &videoKey
             const bool supportsStructuredFacts = asset.assetType == AssetType::Video
                 || asset.assetType == AssetType::Image;
             if (!supportsStructuredFacts) {
+                if (enqueueConfiguredDimensionsIfNeeded(normalizedKey, &rejection)) {
+                    ++accepted;
+                    continue;
+                }
+                if (!rejection.trimmed().isEmpty()) {
+                    rejectedMessages.append(rejection);
+                    continue;
+                }
                 ++alreadyComplete;
                 continue;
             }
@@ -1736,6 +1744,14 @@ int VideoAnalysisService::enqueueVideosForSupplement(const QStringList &videoKey
                 continue;
             }
             if (!hasVisualGap) {
+                if (enqueueConfiguredDimensionsIfNeeded(normalizedKey, &rejection)) {
+                    ++accepted;
+                    continue;
+                }
+                if (!rejection.trimmed().isEmpty()) {
+                    rejectedMessages.append(rejection);
+                    continue;
+                }
                 ++alreadyComplete;
                 continue;
             }
@@ -1770,6 +1786,31 @@ int VideoAnalysisService::enqueueVideosForSupplement(const QStringList &videoKey
         }
     }
     return accepted;
+}
+
+bool VideoAnalysisService::enqueueConfiguredDimensionsIfNeeded(const QString &videoKey,
+                                                                QString *errorMessage)
+{
+    if (errorMessage) {
+        errorMessage->clear();
+    }
+    const auto dimensions = m_settings ? m_settings->customAnalysisDimensions() : QStringList{};
+    if (dimensions.isEmpty()) {
+        return false;
+    }
+
+    QString pendingError;
+    const auto pending = pendingDimensionCount(videoKey, dimensions, &pendingError);
+    if (pending < 0) {
+        if (errorMessage) {
+            *errorMessage = pendingError;
+        }
+        return false;
+    }
+    if (pending == 0) {
+        return false;
+    }
+    return analyzeDimensions(videoKey, dimensions, errorMessage);
 }
 
 int VideoAnalysisService::enqueueVideosForRebuild(const QStringList &videoKeys, QString *message)
@@ -2312,7 +2353,7 @@ void VideoAnalysisService::startNextAnalysis()
     if (config.baseUrl.isEmpty() || config.apiKey.isEmpty() || config.model.isEmpty()) {
         const auto errorMessage = QStringLiteral("视觉接口参数不完整，请在设置中保存并应用后重试。");
         reportAnalysisProgress(job.videoKey, 0, errorMessage, JobState::Failed, errorMessage);
-        finishCurrentAnalysis(job.videoKey);
+        finishCurrentAnalysis(job.videoKey, false);
         return;
     }
 
@@ -2353,7 +2394,7 @@ void VideoAnalysisService::startNextAnalysis()
             notifyCatalogChanged();
             m_globalDatabaseManager->closeThreadConnection(connectionName);
             QMetaObject::invokeMethod(this, [this, videoKey = job.videoKey]() {
-                finishCurrentAnalysis(videoKey);
+                finishCurrentAnalysis(videoKey, false);
             }, Qt::QueuedConnection);
         };
 
@@ -2369,7 +2410,7 @@ void VideoAnalysisService::startNextAnalysis()
             notifyCatalogChanged();
             m_globalDatabaseManager->closeThreadConnection(connectionName);
             QMetaObject::invokeMethod(this, [this, videoKey = job.videoKey]() {
-                finishCurrentAnalysis(videoKey);
+                finishCurrentAnalysis(videoKey, true);
             }, Qt::QueuedConnection);
         };
 
@@ -3142,17 +3183,18 @@ void VideoAnalysisService::startNextAnalysis()
         notifyCatalogChanged();
         m_globalDatabaseManager->closeThreadConnection(connectionName);
         QMetaObject::invokeMethod(this, [this, videoKey = job.videoKey]() {
-            finishCurrentAnalysis(videoKey);
+            finishCurrentAnalysis(videoKey, true);
         }, Qt::QueuedConnection);
     });
     Q_UNUSED(future);
 }
 
-void VideoAnalysisService::finishCurrentAnalysis(const QString &videoKey)
+void VideoAnalysisService::finishCurrentAnalysis(const QString &videoKey, bool succeeded)
 {
     if (m_currentVideoKey != videoKey) {
         return;
     }
+    const auto completedJob = m_currentJob;
     m_currentJob = {};
     m_currentVideoKey.clear();
     m_analysisRunning = false;
@@ -3160,6 +3202,10 @@ void VideoAnalysisService::finishCurrentAnalysis(const QString &videoKey)
     m_batchCurrentDetail.clear();
     emit analysisQueueChanged(m_currentVideoKey, m_analysisQueue.size());
     notifyBatchChanged();
+    if (succeeded && completedJob.mode != AnalysisRunMode::SingleFrame) {
+        QString ignoredError;
+        enqueueConfiguredDimensionsIfNeeded(videoKey, &ignoredError);
+    }
     startNextAnalysis();
 }
 

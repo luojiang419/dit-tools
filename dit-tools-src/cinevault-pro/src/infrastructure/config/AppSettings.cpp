@@ -3,12 +3,15 @@
 #include <QFileInfo>
 #include <QSettings>
 
+#include <utility>
+
 namespace {
 constexpr auto kRecentProjectsKey = "recentProjects";
 constexpr auto kKnownProjectsKey = "knownProjects";
 constexpr auto kVisionBaseUrlKey = "materialCenter/visionBaseUrl";
 constexpr auto kVisionApiKeyKey = "materialCenter/visionApiKey";
 constexpr auto kVisionModelKey = "materialCenter/visionModel";
+constexpr auto kCustomAnalysisDimensionsKey = "materialCenter/customAnalysisDimensions";
 constexpr auto kSearchAssistantEnabledKey = "materialCenter/searchAssistantEnabled";
 constexpr auto kSearchAssistantAutoUnloadMinutesKey = "materialCenter/searchAssistantAutoUnloadMinutes";
 constexpr auto kQuickSearchEnabledKey = "quickSearch/enabled";
@@ -56,6 +59,34 @@ QString normalizedProjectPath(const QString &projectPath)
 {
     const auto trimmed = projectPath.trimmed();
     return trimmed.isEmpty() ? QString() : QFileInfo(trimmed).absoluteFilePath();
+}
+
+QStringList normalizedCustomAnalysisDimensions(const QStringList &values)
+{
+    constexpr qsizetype kMaximumDimensionCount = 20;
+    constexpr qsizetype kMaximumDimensionLength = 32;
+    QStringList normalized;
+    for (const auto &value : values) {
+        const auto name = value.trimmed();
+        if (name.isEmpty() || name.size() > kMaximumDimensionLength) {
+            continue;
+        }
+
+        bool duplicate = false;
+        for (const auto &existing : std::as_const(normalized)) {
+            if (existing.compare(name, Qt::CaseInsensitive) == 0) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate) {
+            normalized.append(name);
+        }
+        if (normalized.size() >= kMaximumDimensionCount) {
+            break;
+        }
+    }
+    return normalized;
 }
 
 QStringList replacedProjectList(const QStringList &projects, const QString &oldProjectPath, const QString &newProjectPath)
@@ -179,6 +210,22 @@ void AppSettings::setVisionModel(const QString &value)
 {
     const auto normalized = value.trimmed();
     m_settings->setValue(QLatin1String(kVisionModelKey), normalized.isEmpty() ? QStringLiteral("gpt-4.1-mini") : normalized);
+}
+
+QStringList AppSettings::customAnalysisDimensions() const
+{
+    return normalizedCustomAnalysisDimensions(
+        m_settings->value(QLatin1String(kCustomAnalysisDimensionsKey)).toStringList());
+}
+
+void AppSettings::setCustomAnalysisDimensions(const QStringList &values)
+{
+    const auto normalized = normalizedCustomAnalysisDimensions(values);
+    if (normalized.isEmpty()) {
+        m_settings->remove(QLatin1String(kCustomAnalysisDimensionsKey));
+    } else {
+        m_settings->setValue(QLatin1String(kCustomAnalysisDimensionsKey), normalized);
+    }
 }
 
 bool AppSettings::searchAssistantEnabled() const

@@ -28,6 +28,9 @@ public:
     QString visionModel() const;
     void setVisionModel(const QString &value);
 
+    QStringList customAnalysisDimensions() const;
+    void setCustomAnalysisDimensions(const QStringList &values);
+
     bool searchAssistantEnabled() const;
     void setSearchAssistantEnabled(bool enabled);
 
