@@ -50,7 +50,9 @@ double evidenceWeight(const QStringList &reasons, bool baseline)
     if (semanticOnly) {
         return baseline ? 0.90 : 0.75;
     }
-    return baseline ? 1.0 : 0.95;
+    // 普通命中保持两路同权，让模型增强结果在同分时按既有规则优先；
+    // 只有具备明确证据的本地结果才额外提高排序权重。
+    return 0.95;
 }
 
 void appendUniqueReasons(QStringList *target, const QStringList &source)

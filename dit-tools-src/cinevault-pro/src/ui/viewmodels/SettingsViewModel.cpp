@@ -245,7 +245,7 @@ void SettingsViewModel::setSearchAssistantEnabled(bool enabled)
 
 int SettingsViewModel::searchAssistantAutoUnloadMinutes() const
 {
-    return m_settings ? m_settings->searchAssistantAutoUnloadMinutes() : 60;
+    return m_settings ? m_settings->searchAssistantAutoUnloadMinutes() : 30;
 }
 
 void SettingsViewModel::setSearchAssistantAutoUnloadMinutes(int minutes)
