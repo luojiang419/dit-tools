@@ -1253,6 +1253,13 @@ Rectangle {
                     anchors.fill: parent
                     anchors.margins: 14
                     clip: true
+                    contentWidth: availableWidth
+                    contentHeight: detailColumn.implicitHeight
+                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+
+                    ScrollBar.vertical: ThemedScrollBar {
+                        policy: ScrollBar.AsNeeded
+                    }
 
                     MiddleDragScrollHandler {
                         parent: detailScroll.contentItem
@@ -1260,6 +1267,8 @@ Rectangle {
                     }
 
                     ColumnLayout {
+                        id: detailColumn
+
                         width: detailScroll.availableWidth
                         spacing: 12
 

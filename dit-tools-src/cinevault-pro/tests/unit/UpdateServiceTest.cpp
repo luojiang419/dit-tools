@@ -322,6 +322,14 @@ void UpdateServiceTest::updaterProgressContract_usesDeterminateInstallerSignal()
 
     QVERIFY(installerScript.contains("CurInstallProgressChanged"));
     QVERIFY(installerScript.contains("UPDATEPROGRESSFILE"));
+    QVERIFY(installerScript.contains("CloseApplications=no"));
+    QVERIFY(installerScript.contains("StopCineVaultProcesses"));
+    QVERIFY(installerScript.contains("ShouldForceStopCineVaultProcesses"));
+    QVERIFY(installerScript.contains("/F /T /IM CineVault.exe"));
+    QVERIFY(installerScript.contains("PrepareToInstall"));
+    QVERIFY(installerScript.contains("NextButtonClick"));
+    QVERIFY(installerScript.contains("InitializeUninstall"));
+    QVERIFY(installerScript.contains("Result := UpdateProgressFilePath = ''"));
     QVERIFY(updaterSource.contains("/UPDATEPROGRESSFILE="));
     QVERIFY(updaterSource.contains("pollInstallerProgress"));
     QVERIFY(windowSource.contains("setRange(0, 100)"));

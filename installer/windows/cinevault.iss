@@ -34,7 +34,7 @@ ArchitecturesInstallIn64BitMode=x64
 UninstallDisplayIcon={app}\CineVault.exe
 SetupLogging=yes
 PrivilegesRequired=admin
-CloseApplications=yes
+CloseApplications=no
 RestartApplications=no
 
 [Tasks]
@@ -57,11 +57,85 @@ var
   UpdateProgressFilePath: String;
   LastReportedInstallProgress: Integer;
 
+function IsCineVaultRunning(): Boolean;
+var
+  ResultCode: Integer;
+begin
+  Exec(ExpandConstant('{cmd}'),
+    '/C tasklist /FI "IMAGENAME eq CineVault.exe" /NH | find /I "CineVault.exe" >NUL 2>NUL',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Result := ResultCode = 0;
+end;
+
+function StopCineVaultProcesses(const Phase: String): Boolean;
+var
+  Attempt: Integer;
+  ResultCode: Integer;
+begin
+  Result := True;
+
+  if not IsCineVaultRunning() then
+    Exit;
+
+  Log('CineVault process detected during ' + Phase + '; forcing shutdown before installation continues.');
+
+  for Attempt := 1 to 3 do
+  begin
+    Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM CineVault.exe',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Sleep(500);
+
+    if not IsCineVaultRunning() then
+      Exit;
+  end;
+
+  MsgBox('检测到旧版影资管家仍在运行，安装程序无法自动结束进程。请手动退出影资管家后重新运行安装包。',
+    mbError, MB_OK);
+  Result := False;
+end;
+
+function ShouldForceStopCineVaultProcesses(): Boolean;
+begin
+  { The independent updater is also a copied CineVault.exe. Its progress-file
+    argument identifies that path so the installer does not kill its host tree. }
+  Result := UpdateProgressFilePath = '';
+end;
+
 function InitializeSetup(): Boolean;
 begin
   UpdateProgressFilePath := ExpandConstant('{param:UPDATEPROGRESSFILE|}');
   LastReportedInstallProgress := -1;
+
+  if ShouldForceStopCineVaultProcesses() then
+    Result := StopCineVaultProcesses('setup initialization')
+  else
+    Result := True;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := '';
+  if ShouldForceStopCineVaultProcesses() then
+  begin
+    if not StopCineVaultProcesses('file installation') then
+      Result := '旧版影资管家进程仍在运行，安装已取消。';
+  end;
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
   Result := True;
+
+  if CurPageID = wpReady then
+  begin
+    if ShouldForceStopCineVaultProcesses() then
+      Result := StopCineVaultProcesses('ready page');
+  end;
+end;
+
+function InitializeUninstall(): Boolean;
+begin
+  Result := StopCineVaultProcesses('uninstall initialization');
 end;
 
 procedure CurInstallProgressChanged(CurProgress, MaxProgress: Integer);
