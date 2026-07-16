@@ -534,7 +534,9 @@ private slots:
     {
         const auto mainSource = sourceFile(QStringLiteral("src/app/main.cpp"));
         const auto bootstrapSource = sourceFile(QStringLiteral("src/app/AppBootstrap.cpp"));
-        QVERIFY2(!mainSource.isEmpty() && !bootstrapSource.isEmpty(),
+        const auto settingsSource = sourceFile(
+            QStringLiteral("src/ui/viewmodels/SettingsViewModel.cpp"));
+        QVERIFY2(!mainSource.isEmpty() && !bootstrapSource.isEmpty() && !settingsSource.isEmpty(),
                  "无法读取打包后启动探针源码");
 
         QVERIFY(mainSource.contains(QStringLiteral("--qml-startup-probe")));
@@ -543,6 +545,15 @@ private slots:
         QVERIFY(bootstrapSource.contains(QStringLiteral("m_engine->loadFromModule(\"CineVault\", \"Main\")")));
         QVERIFY(bootstrapSource.contains(QStringLiteral("QML root object load failed.")));
         QVERIFY(bootstrapSource.contains(QStringLiteral("QCoreApplication::exit(0)")));
+
+        const auto startupUpdateSection = sourceSection(
+            settingsSource,
+            QStringLiteral("void SettingsViewModel::beginStartupUpdateFlow()"),
+            QStringLiteral("void SettingsViewModel::checkForUpdates()"));
+        verifyOrdered(startupUpdateSection,
+                      {QStringLiteral("--qml-startup-probe"),
+                       QStringLiteral("return;"),
+                       QStringLiteral("m_updateService->beginStartupFlow()")});
     }
 
     void sourceImportAcceptsTypedNetworkPaths()
@@ -1034,7 +1045,6 @@ private slots:
             QStringLiteral("src/ui/qml/components/SourceRail.qml"),
             QStringLiteral("src/ui/qml/components/InspectorPane.qml"),
             QStringLiteral("src/ui/qml/components/JobProgressInspectorPane.qml"),
-            QStringLiteral("src/ui/qml/components/JobTimelineBar.qml"),
             QStringLiteral("src/ui/qml/components/AssetPreviewOverlay.qml"),
             QStringLiteral("src/ui/qml/components/ThemedComboBox.qml"),
             QStringLiteral("src/ui/qml/workspaces/ProjectLibraryWorkspace.qml"),

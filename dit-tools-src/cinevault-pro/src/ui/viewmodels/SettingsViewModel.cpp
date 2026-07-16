@@ -13,6 +13,7 @@
 #include <QtConcurrent>
 
 #include <QApplication>
+#include <QCoreApplication>
 #include <QDirIterator>
 #include <QMessageBox>
 #include <QMetaObject>
@@ -501,6 +502,10 @@ QString SettingsViewModel::lastMessage() const
 void SettingsViewModel::beginStartupUpdateFlow()
 {
     if (!m_updateService) {
+        return;
+    }
+    if (QCoreApplication::arguments().contains(QStringLiteral("--qml-startup-probe"),
+                                               Qt::CaseInsensitive)) {
         return;
     }
 

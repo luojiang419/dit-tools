@@ -181,8 +181,9 @@ private slots:
                                                     QStringLiteral("建立原子扫描基线"),
                                                     sourceRootId);
         scanEngine.startScan(sourceRootById(databaseManager.database(), sourceRootId), firstJobId);
-        QVERIFY(scanFinished.wait(10000));
         scanEngine.waitForIdle();
+        QCoreApplication::processEvents();
+        QCOMPARE(scanFinished.count(), 1);
         QCOMPARE(countAssets(databaseManager.database(), &errorMessage), qint64{2});
 
         QSqlQuery readIdentity(databaseManager.database());
@@ -213,8 +214,9 @@ private slots:
                                                      QStringLiteral("验证旧目录保护"),
                                                      sourceRootId);
         scanEngine.startScan(sourceRootById(databaseManager.database(), sourceRootId), failedJobId);
-        QVERIFY(scanFailed.wait(10000));
         scanEngine.waitForIdle();
+        QCoreApplication::processEvents();
+        QCOMPARE(scanFailed.count(), 1);
 
         QCOMPARE(countAssets(databaseManager.database(), &errorMessage), qint64{2});
         QSqlQuery preserved(databaseManager.database());
@@ -236,8 +238,9 @@ private slots:
                                                     QStringLiteral("验证原子切换"),
                                                     sourceRootId);
         scanEngine.startScan(sourceRootById(databaseManager.database(), sourceRootId), retryJobId);
-        QVERIFY(scanFinished.wait(10000));
         scanEngine.waitForIdle();
+        QCoreApplication::processEvents();
+        QCOMPARE(scanFinished.count(), 1);
 
         const auto retryNames = assetNames(databaseManager.database());
         QCOMPARE(retryNames.join(QLatin1Char(',')),
@@ -293,9 +296,9 @@ private slots:
 
         importService.rescanLegacySourceRoots();
 
-        QVERIFY(scanFinished.wait(10000));
         scanEngine.waitForIdle();
         QCoreApplication::processEvents();
+        QCOMPARE(scanFinished.count(), 1);
         QCOMPARE(countAssets(databaseManager.database(), &errorMessage), qint64{4});
         QCOMPARE(scanVersion(databaseManager.database(), &errorMessage), ScanEngine::CurrentScanVersion);
 
