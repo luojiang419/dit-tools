@@ -31,12 +31,67 @@ QJsonObject validPayload()
         {QStringLiteral("explanation"), QStringLiteral("用户在描述画面内容")}
     };
 }
+
+QJsonObject validV2Payload()
+{
+    const auto group = [](const QString &mode, const QStringList &alternatives) {
+        QJsonArray values;
+        for (const auto &value : alternatives) values.append(value);
+        return QJsonObject{
+            {QStringLiteral("mode"), mode},
+            {QStringLiteral("alternatives"), values}
+        };
+    };
+    return QJsonObject{
+        {QStringLiteral("version"), 2},
+        {QStringLiteral("result_target"), QStringLiteral("frames")},
+        {QStringLiteral("semantic_variants"), QJsonArray{QJsonObject{
+            {QStringLiteral("text"), QStringLiteral("女人穿红色牛仔裤")},
+            {QStringLiteral("weight"), 0.9}
+        }}},
+        {QStringLiteral("lexical_groups"), QJsonArray{
+            group(QStringLiteral("required"), {QStringLiteral("女人"), QStringLiteral("女性")}),
+            group(QStringLiteral("required"), {QStringLiteral("牛仔裤"), QStringLiteral("丹宁裤")}),
+            group(QStringLiteral("excluded"), {QStringLiteral("汽车")})
+        }},
+        {QStringLiteral("asset_types"), QJsonArray{}},
+        {QStringLiteral("folder_by_asset_criteria"), false},
+        {QStringLiteral("ocr_text"), QString()},
+        {QStringLiteral("entities"), QJsonArray{
+            QJsonObject{{QStringLiteral("label"), QStringLiteral("女人")},
+                        {QStringLiteral("colors"), QJsonArray{}},
+                        {QStringLiteral("materials"), QJsonArray{}},
+                        {QStringLiteral("attributes"), QJsonArray{}}},
+            QJsonObject{{QStringLiteral("label"), QStringLiteral("牛仔裤")},
+                        {QStringLiteral("colors"), QJsonArray{QStringLiteral("红色")}},
+                        {QStringLiteral("materials"), QJsonArray{}},
+                        {QStringLiteral("attributes"), QJsonArray{}}}
+        }},
+        {QStringLiteral("cooccurrence"), QStringLiteral("same_frame")},
+        {QStringLiteral("confidence"), 0.93},
+        {QStringLiteral("ambiguities"), QJsonArray{}},
+        {QStringLiteral("explanation"), QStringLiteral("拆分同帧实体和同义词")}
+    };
+}
 }
 
 class SearchQueryUnderstandingTest : public QObject {
     Q_OBJECT
 
 private slots:
+    void versionTwoSchemaFocusesOnLanguageUnderstanding()
+    {
+        const auto schema = SearchQueryUnderstanding::responseSchema();
+        const auto properties = schema.value(QStringLiteral("properties")).toObject();
+        QCOMPARE(properties.value(QStringLiteral("version")).toObject()
+                     .value(QStringLiteral("const")).toInt(),
+                 2);
+        QVERIFY(properties.contains(QStringLiteral("semantic_variants")));
+        QVERIFY(properties.contains(QStringLiteral("lexical_groups")));
+        QVERIFY(properties.contains(QStringLiteral("cooccurrence")));
+        QVERIFY(!properties.contains(QStringLiteral("date")));
+    }
+
     void parsesStrictWhitelistedPayload()
     {
         QString error;
@@ -46,6 +101,33 @@ private slots:
         QCOMPARE(parsed->assetTypeFilters, QVector<int>{static_cast<int>(AssetType::Video)});
         QCOMPARE(parsed->strictEntities.size(), 1);
         QCOMPARE(parsed->strictEntities.first().colors, QStringList{QStringLiteral("蓝色")});
+    }
+
+    void parsesAndSafelyMergesVersionTwoPlan()
+    {
+        QString error;
+        const auto parsed = SearchQueryUnderstanding::parseModelPayload(
+            validV2Payload(),
+            &error);
+        QVERIFY2(parsed.has_value(), qPrintable(error));
+        QCOMPARE(parsed->semanticVariants.size(), 1);
+        QCOMPARE(parsed->lexicalGroups.size(), 3);
+        QCOMPARE(parsed->cooccurrence, SearchCooccurrenceScope::SameFrame);
+
+        NaturalLanguageQueryParser parser;
+        const auto local = parser.parse(
+            QStringLiteral("穿红色牛仔裤的女人画面，但不要汽车"));
+        bool applied = false;
+        const auto merged = SearchQueryUnderstanding::merge(local, *parsed, &applied);
+
+        QVERIFY(applied);
+        QCOMPARE(merged.semanticVariants.size(), 1);
+        QCOMPARE(merged.lexicalGroups.size(), 3);
+        QVERIFY(merged.lexicalTerms.contains(QStringLiteral("丹宁裤")));
+        QVERIFY(merged.excludedTerms.contains(QStringLiteral("汽车")));
+        QCOMPARE(merged.cooccurrence, SearchCooccurrenceScope::SameFrame);
+        QCOMPARE(merged.dateConstraint.startDate, local.dateConstraint.startDate);
+        QCOMPARE(merged.dateConstraint.endDate, local.dateConstraint.endDate);
     }
 
     void localExplicitDateTypeAndTargetAlwaysWin()

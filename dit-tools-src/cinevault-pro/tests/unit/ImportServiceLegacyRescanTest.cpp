@@ -62,6 +62,30 @@ int scanVersion(QSqlDatabase db, QString *errorMessage)
     return query.value(0).toInt();
 }
 
+qint64 scanSessionCount(QSqlDatabase db, QString *errorMessage)
+{
+    QSqlQuery query(db);
+    if (!query.exec(QStringLiteral("SELECT COUNT(*) FROM scan_session")) || !query.next()) {
+        if (errorMessage) {
+            *errorMessage = query.lastError().text();
+        }
+        return -1;
+    }
+    return query.value(0).toLongLong();
+}
+
+qint64 completedScanWorkItemCount(QSqlDatabase db, QString *errorMessage)
+{
+    QSqlQuery query(db);
+    if (!query.exec(QStringLiteral("SELECT COUNT(*) FROM scan_work_item WHERE state = 'completed'")) || !query.next()) {
+        if (errorMessage) {
+            *errorMessage = query.lastError().text();
+        }
+        return -1;
+    }
+    return query.value(0).toLongLong();
+}
+
 QVariantList folderRow(QSqlDatabase db, const QString &relativePath, QString *errorMessage)
 {
     QSqlQuery query(db);
@@ -299,6 +323,61 @@ private slots:
         QCOMPARE(cameraFolder.at(3).toLongLong(), qint64{1});
         QCOMPARE(cameraFolder.at(4).toString(), QStringLiteral("2026-07-14"));
         QCOMPARE(cameraFolder.at(5).toString(), QStringLiteral("2026-07-14"));
+    }
+
+    void interruptedScan_resumesFromPersistedDirectoryCheckpointAfterProjectReopen()
+    {
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        const auto projectDb = QDir(temp.path()).filePath(QStringLiteral("resume.cvdb"));
+        const auto sourcePath = QDir(temp.path()).filePath(QStringLiteral("CardB"));
+        writeFile(QDir(sourcePath).filePath(QStringLiteral("A/clip-a.mov")), "a");
+        writeFile(QDir(sourcePath).filePath(QStringLiteral("B/clip-b.mov")), "b");
+        writeFile(QDir(sourcePath).filePath(QStringLiteral("B/notes.txt")), "notes");
+
+        DatabaseManager databaseManager;
+        QString errorMessage;
+        QVERIFY2(databaseManager.openProjectDatabase(projectDb, &errorMessage), qPrintable(errorMessage));
+        const auto sourceRootId = insertSourceRoot(databaseManager.database(), QStringLiteral("CardB"), sourcePath);
+        QVERIFY(sourceRootId > 0);
+
+        {
+            JobEngine initialJobs(&databaseManager);
+            ScanEngine initialScan(&databaseManager, &initialJobs, nullptr, nullptr);
+            QSignalSpy scanFailed(&initialScan, &ScanEngine::scanFailed);
+            // 根目录先提交 A/B 两个子目录检查点，随后在 A 目录中断，
+            // 以验证重启后不会从已完成的根目录检查点重新开始。
+            initialScan.setFailureAfterEntriesForTesting(3);
+            const auto jobId = initialJobs.createJob(JobType::Scan,
+                                                     QStringLiteral("中断扫描"),
+                                                     QStringLiteral("模拟异常退出前的检查点"),
+                                                     sourceRootId);
+            initialScan.startScan(sourceRootById(databaseManager.database(), sourceRootId), jobId);
+            QVERIFY(scanFailed.wait(10000));
+            initialScan.waitForIdle();
+        }
+
+        QCOMPARE(countAssets(databaseManager.database(), &errorMessage), qint64{0});
+        QCOMPARE(scanSessionCount(databaseManager.database(), &errorMessage), qint64{1});
+        QCOMPARE(completedScanWorkItemCount(databaseManager.database(), &errorMessage), qint64{1});
+
+        databaseManager.closeProjectDatabase();
+        QVERIFY2(databaseManager.openProjectDatabase(projectDb, &errorMessage), qPrintable(errorMessage));
+
+        JobEngine resumedJobs(&databaseManager);
+        JobService jobService(&resumedJobs);
+        ScanEngine resumedScan(&databaseManager, &resumedJobs, nullptr, nullptr);
+        ImportService importService(&databaseManager, &jobService, &resumedScan);
+        QSignalSpy scanFinished(&resumedScan, &ScanEngine::scanFinished);
+
+        importService.resumeInterruptedScans();
+
+        QVERIFY(scanFinished.wait(10000));
+        resumedScan.waitForIdle();
+        QCoreApplication::processEvents();
+        QCOMPARE(assetNames(databaseManager.database()).join(QLatin1Char(',')),
+                 QStringLiteral("clip-a.mov,clip-b.mov,notes.txt"));
+        QCOMPARE(scanSessionCount(databaseManager.database(), &errorMessage), qint64{0});
     }
 };
 

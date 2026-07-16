@@ -20,6 +20,7 @@ public:
     void start();
     void applySettings();
     void recordUserActivity();
+    void recordSearchIntent();
 
     [[nodiscard]] bool isStarted() const;
     [[nodiscard]] bool isIdleUnloaded() const;
@@ -40,4 +41,5 @@ private:
     QTimer m_preloadTimer;
     bool m_started = false;
     bool m_idleUnloaded = false;
+    bool m_searchIntentActive = false;
 };

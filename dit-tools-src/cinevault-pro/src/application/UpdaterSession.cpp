@@ -358,18 +358,37 @@ void UpdaterSessionRunner::waitForOldProcess()
                  5,
                  QStringLiteral("关闭旧版本"),
                  QStringLiteral("正在等待旧版本退出..."),
-                 QStringLiteral("主程序即将关闭，更新窗口会继续完成安装。"));
+                 QStringLiteral("正在确认主程序 PID %1 的退出状态，更新窗口会继续运行。")
+                     .arg(m_session.oldProcessId));
     m_waitStartedAtMs = QDateTime::currentMSecsSinceEpoch();
+    m_lastWaitDetailSecond = -1;
 
     m_waitTimer = new QTimer(this);
     m_waitTimer->setInterval(500);
     connect(m_waitTimer, &QTimer::timeout, this, [this]() {
         if (!processExists(m_session.oldProcessId)) {
             m_waitTimer->stop();
+            emitProgress(1,
+                         8,
+                         QStringLiteral("关闭旧版本"),
+                         QStringLiteral("旧版本已退出。"),
+                         QStringLiteral("正在启动独立安装程序..."));
             QTimer::singleShot(600, this, &UpdaterSessionRunner::startSilentInstaller);
             return;
         }
-        if (QDateTime::currentMSecsSinceEpoch() - m_waitStartedAtMs >= kOldProcessWaitTimeoutMs) {
+        const auto elapsedMs = QDateTime::currentMSecsSinceEpoch() - m_waitStartedAtMs;
+        const auto elapsedSecond = elapsedMs / 1000;
+        if (elapsedSecond != m_lastWaitDetailSecond) {
+            m_lastWaitDetailSecond = elapsedSecond;
+            emitProgress(1,
+                         5,
+                         QStringLiteral("关闭旧版本"),
+                         QStringLiteral("正在等待旧版本安全退出..."),
+                         QStringLiteral("已等待 %1 秒 · 正在检查 PID %2")
+                             .arg(elapsedSecond)
+                             .arg(m_session.oldProcessId));
+        }
+        if (elapsedMs >= kOldProcessWaitTimeoutMs) {
             m_waitTimer->stop();
             completeFailure(QStringLiteral("等待旧版本退出超时。"),
                             QStringLiteral("请关闭影资管家后重新运行更新。"));
@@ -384,11 +403,16 @@ void UpdaterSessionRunner::startSilentInstaller()
         return;
     }
 
+    const QFileInfo installerInfo(m_session.installerPath);
+    const auto installerSizeMiB = static_cast<double>(installerInfo.size()) / (1024.0 * 1024.0);
     emitProgress(2,
                  kInstallProgressStart,
                  QStringLiteral("安装新版本"),
                  QStringLiteral("正在启动静默安装程序..."),
-                 QStringLiteral("系统可能会请求管理员权限确认。"));
+                 QStringLiteral("安装包：%1（%2 MiB） · 目标：%3 · 系统可能请求管理员权限")
+                     .arg(installerInfo.fileName())
+                     .arg(installerSizeMiB, 0, 'f', 1)
+                     .arg(QDir::toNativeSeparators(m_session.installRoot)));
 
     const auto root = sessionRoot(safeSessionId(m_session.sessionId));
     if (!QDir().mkpath(root)) {
@@ -504,7 +528,9 @@ void UpdaterSessionRunner::pollInstallerProgress()
                  overallProgress,
                  QStringLiteral("安装新版本"),
                  QStringLiteral("正在写入程序文件并配置组件..."),
-                 QStringLiteral("安装程序实际进度：%1%").arg(installerProgress));
+                 QStringLiteral("安装器实际进度 %1% · 总进度目标 %2%")
+                     .arg(installerProgress)
+                     .arg(overallProgress));
 }
 
 void UpdaterSessionRunner::handleInstallerFinished(int exitCode)

@@ -6,6 +6,8 @@
 
 class QLabel;
 class QProgressBar;
+class QPlainTextEdit;
+class QVariantAnimation;
 class QVBoxLayout;
 class QCloseEvent;
 
@@ -21,6 +23,9 @@ protected:
 private:
     QLabel *createStepChip(int index, const QString &label);
     void applyProgress(const UpdaterProgressEvent &event);
+    void animatePercentageTo(int percentage, bool immediate = false);
+    void setDisplayedPercentage(int percentage);
+    void appendUpdateDetail(const UpdaterProgressEvent &event);
     void updateStepChips(int currentStep, const QString &accentColor);
 
     UpdaterInstallSession m_session;
@@ -32,6 +37,10 @@ private:
     QLabel *m_percentageLabel = nullptr;
     QLabel *m_footerLabel = nullptr;
     QProgressBar *m_progressBar = nullptr;
+    QPlainTextEdit *m_detailView = nullptr;
+    QVariantAnimation *m_progressAnimation = nullptr;
     QList<QLabel *> m_stepChips;
+    QString m_lastDetailText;
+    int m_displayedPercentage = 0;
     bool m_canClose = false;
 };

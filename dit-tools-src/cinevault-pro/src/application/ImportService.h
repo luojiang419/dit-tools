@@ -22,6 +22,7 @@ public:
     QString lastMessage() const;
 
 public slots:
+    void resumeInterruptedScans();
     void rescanLegacySourceRoots();
 
 signals:

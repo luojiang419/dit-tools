@@ -49,6 +49,8 @@ ShellViewModel::ShellViewModel(ProjectService *projectService,
         m_lastMessage = m_importService->lastMessage();
         emit stateChanged();
     });
+    connect(m_importService, &ImportService::catalogChanged, this, &ShellViewModel::stateChanged);
+    connect(m_importService, &ImportService::sourceRootsChanged, this, &ShellViewModel::stateChanged);
     if (m_feedbackService) {
         connect(m_feedbackService, &FeedbackService::unreadCountChanged, this, &ShellViewModel::stateChanged);
     }
@@ -99,6 +101,24 @@ QString ShellViewModel::statusSummary() const
 QString ShellViewModel::lastMessage() const
 {
     return m_lastMessage;
+}
+
+int ShellViewModel::sourceRootCount() const
+{
+    return m_importService ? m_importService->sourceRoots().size() : 0;
+}
+
+bool ShellViewModel::sourceScanInProgress() const
+{
+    if (!m_importService) {
+        return false;
+    }
+    for (const auto &sourceRoot : m_importService->sourceRoots()) {
+        if (sourceRoot.status == QStringLiteral("scanning")) {
+            return true;
+        }
+    }
+    return false;
 }
 
 QVariantList ShellViewModel::workspaceTabs() const

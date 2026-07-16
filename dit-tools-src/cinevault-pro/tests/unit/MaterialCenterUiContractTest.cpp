@@ -604,7 +604,8 @@ private slots:
         QVERIFY2(!understanding.isEmpty(), "无法定位查询理解门禁");
         verifyOrdered(understanding, {
             QStringLiteral("!m_settings->searchAssistantEnabled()"),
-            QStringLiteral("m_searchUnderstandingCache.constFind(cacheKey)"),
+            QStringLiteral("SearchAssistantRouter::decide"),
+            QStringLiteral("m_searchUnderstandingCache.find(cacheKey)"),
             QStringLiteral("m_localSearchAssistantRuntime->start()"),
             QStringLiteral("client->understandQuery")
         });
@@ -892,12 +893,12 @@ private slots:
             QStringLiteral("Q_PROPERTY(int searchAssistantAutoUnloadMinutes")));
         QVERIFY(appSettings.contains(
             QStringLiteral("materialCenter/searchAssistantAutoUnloadMinutes")));
-        QVERIFY(appSettings.contains(QStringLiteral(", 60).toInt()")));
+        QVERIFY(appSettings.contains(QStringLiteral(", 30).toInt()")));
         QVERIFY(settingsQml.contains(
             QStringLiteral("searchAssistantAutoUnloadMinutesInput")));
         QVERIFY(settingsQml.contains(
             QStringLiteral("searchAssistantAutoUnloadPreset")));
-        QVERIFY(settingsQml.contains(QStringLiteral("1 小时（默认）")));
+        QVERIFY(settingsQml.contains(QStringLiteral("30 分钟（默认）")));
         QVERIFY(settingsQml.contains(QStringLiteral("可直接输入 5–1440 分钟")));
         QVERIFY(appBootstrap.contains(
             QStringLiteral("m_context->startInteractiveServices()")));
@@ -911,7 +912,7 @@ private slots:
         QVERIFY(idleMonitor.contains(QStringLiteral("QEvent::KeyPress")));
         QVERIFY(idleMonitor.contains(QStringLiteral("QEvent::MouseMove")));
         QVERIFY(idleMonitor.contains(QStringLiteral("QEvent::TouchBegin")));
-        QVERIFY(settingsSource.contains(QStringLiteral("软件启动后自动加载")));
+        QVERIFY(settingsSource.contains(QStringLiteral("打开搜索或输入查询时智能加载")));
     }
 
     void localSearchAssistantUsesLockedVulkanGpuRuntime()

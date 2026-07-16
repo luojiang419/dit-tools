@@ -9,7 +9,10 @@
 namespace {
 constexpr int kMaxTextLength = 240;
 constexpr int kMaxTermCount = 24;
-constexpr int kMaxEntityCount = 8;
+constexpr int kMaxEntityCount = 4;
+constexpr int kMaxSemanticVariantCount = 2;
+constexpr int kMaxLexicalGroupCount = 6;
+constexpr int kMaxGroupAlternativeCount = 6;
 constexpr double kMinimumConfidence = 0.55;
 
 QString boundedText(const QJsonValue &value, int maxLength = kMaxTextLength)
@@ -183,6 +186,50 @@ StrictEntityConstraint groundedModelEntity(const StrictEntityConstraint &entity,
     return grounded;
 }
 
+bool lexicalGroupIsGrounded(const SearchLexicalGroup &group,
+                            const ParsedMaterialQuery &localQuery)
+{
+    return std::any_of(
+        group.alternatives.cbegin(), group.alternatives.cend(), [&](const QString &term) {
+        if (queryExplicitlyContains(localQuery.originalText, term)) {
+            return true;
+        }
+        return std::any_of(
+            localQuery.explicitEntityLabels.cbegin(),
+            localQuery.explicitEntityLabels.cend(),
+            [&](const QString &label) { return labelsDescribeSameEntity(label, term); });
+    });
+}
+
+bool appendLexicalGroup(QVector<SearchLexicalGroup> *groups,
+                        const SearchLexicalGroup &incoming)
+{
+    const auto normalizedIncoming = uniqueTerms(incoming.alternatives,
+                                                kMaxGroupAlternativeCount);
+    if (normalizedIncoming.isEmpty()) {
+        return false;
+    }
+    const auto duplicate = std::any_of(
+        groups->cbegin(), groups->cend(), [&](const SearchLexicalGroup &existing) {
+        if (existing.mode != incoming.mode) {
+            return false;
+        }
+        const auto existingTerms = uniqueTerms(existing.alternatives,
+                                               kMaxGroupAlternativeCount);
+        return std::any_of(
+            normalizedIncoming.cbegin(), normalizedIncoming.cend(), [&](const QString &term) {
+            return existingTerms.contains(term, Qt::CaseInsensitive);
+        });
+    });
+    if (duplicate || groups->size() >= kMaxLexicalGroupCount) {
+        return false;
+    }
+    auto grounded = incoming;
+    grounded.alternatives = normalizedIncoming;
+    groups->append(std::move(grounded));
+    return true;
+}
+
 QStringList stringArray(const QJsonValue &value, int limit = kMaxTermCount)
 {
     if (!value.isArray()) {
@@ -335,6 +382,35 @@ QJsonObject SearchQueryUnderstanding::responseSchema()
         {QStringLiteral("items"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}}},
         {QStringLiteral("maxItems"), kMaxTermCount}
     };
+    const auto shortStringArraySchema = QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("array")},
+        {QStringLiteral("items"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}}},
+        {QStringLiteral("maxItems"), kMaxGroupAlternativeCount}
+    };
+    const auto semanticVariantSchema = QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("object")},
+        {QStringLiteral("additionalProperties"), false},
+        {QStringLiteral("properties"), QJsonObject{
+            {QStringLiteral("text"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}}},
+            {QStringLiteral("weight"), QJsonObject{{QStringLiteral("type"), QStringLiteral("number")},
+                                                   {QStringLiteral("minimum"), 0.1},
+                                                   {QStringLiteral("maximum"), 1.0}}}
+        }},
+        {QStringLiteral("required"), QJsonArray{QStringLiteral("text"), QStringLiteral("weight")}}
+    };
+    const auto lexicalGroupSchema = QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("object")},
+        {QStringLiteral("additionalProperties"), false},
+        {QStringLiteral("properties"), QJsonObject{
+            {QStringLiteral("mode"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")},
+                                                 {QStringLiteral("enum"), QJsonArray{
+                                                     QStringLiteral("required"),
+                                                     QStringLiteral("optional"),
+                                                     QStringLiteral("excluded")}}}},
+            {QStringLiteral("alternatives"), shortStringArraySchema}
+        }},
+        {QStringLiteral("required"), QJsonArray{QStringLiteral("mode"), QStringLiteral("alternatives")}}
+    };
     const auto entitySchema = QJsonObject{
         {QStringLiteral("type"), QStringLiteral("object")},
         {QStringLiteral("additionalProperties"), false},
@@ -350,28 +426,25 @@ QJsonObject SearchQueryUnderstanding::responseSchema()
         {QStringLiteral("type"), QStringLiteral("object")},
         {QStringLiteral("additionalProperties"), false},
         {QStringLiteral("properties"), QJsonObject{
-            {QStringLiteral("version"), QJsonObject{{QStringLiteral("type"), QStringLiteral("integer")}, {QStringLiteral("const"), 1}}},
+            {QStringLiteral("version"), QJsonObject{{QStringLiteral("type"), QStringLiteral("integer")}, {QStringLiteral("const"), 2}}},
             {QStringLiteral("result_target"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}, {QStringLiteral("enum"), QJsonArray{QStringLiteral("unspecified"), QStringLiteral("assets"), QStringLiteral("folders"), QStringLiteral("frames")}}}},
-            {QStringLiteral("semantic_text"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}}},
-            {QStringLiteral("lexical_terms"), stringArraySchema},
+            {QStringLiteral("semantic_variants"), QJsonObject{{QStringLiteral("type"), QStringLiteral("array")}, {QStringLiteral("items"), semanticVariantSchema}, {QStringLiteral("maxItems"), kMaxSemanticVariantCount}}},
+            {QStringLiteral("lexical_groups"), QJsonObject{{QStringLiteral("type"), QStringLiteral("array")}, {QStringLiteral("items"), lexicalGroupSchema}, {QStringLiteral("maxItems"), kMaxLexicalGroupCount}}},
             {QStringLiteral("asset_types"), QJsonObject{{QStringLiteral("type"), QStringLiteral("array")}, {QStringLiteral("items"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}, {QStringLiteral("enum"), QJsonArray{QStringLiteral("video"), QStringLiteral("audio"), QStringLiteral("image"), QStringLiteral("document"), QStringLiteral("subtitle"), QStringLiteral("archive"), QStringLiteral("project_file")}}}}}},
-            {QStringLiteral("date"), QJsonObject{{QStringLiteral("type"), QStringLiteral("object")}, {QStringLiteral("additionalProperties"), false}, {QStringLiteral("properties"), QJsonObject{
-                {QStringLiteral("start"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}}},
-                {QStringLiteral("end"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}}},
-                {QStringLiteral("matched_text"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}}},
-                {QStringLiteral("preferred_field"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}, {QStringLiteral("enum"), QJsonArray{QStringLiteral("any"), QStringLiteral("captured"), QStringLiteral("folder"), QStringLiteral("modified")}}}}
-            }}, {QStringLiteral("required"), QJsonArray{QStringLiteral("start"), QStringLiteral("end"), QStringLiteral("matched_text"), QStringLiteral("preferred_field")}}}},
             {QStringLiteral("folder_by_asset_criteria"), QJsonObject{{QStringLiteral("type"), QStringLiteral("boolean")}}},
             {QStringLiteral("ocr_text"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}}},
             {QStringLiteral("entities"), QJsonObject{{QStringLiteral("type"), QStringLiteral("array")}, {QStringLiteral("items"), entitySchema}, {QStringLiteral("maxItems"), kMaxEntityCount}}},
+            {QStringLiteral("cooccurrence"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}, {QStringLiteral("enum"), QJsonArray{QStringLiteral("none"), QStringLiteral("same_asset"), QStringLiteral("same_frame")}}}},
             {QStringLiteral("confidence"), QJsonObject{{QStringLiteral("type"), QStringLiteral("number")}, {QStringLiteral("minimum"), 0.0}, {QStringLiteral("maximum"), 1.0}}},
+            {QStringLiteral("ambiguities"), stringArraySchema},
             {QStringLiteral("explanation"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}}}
         }},
         {QStringLiteral("required"), QJsonArray{
-            QStringLiteral("version"), QStringLiteral("result_target"), QStringLiteral("semantic_text"),
-            QStringLiteral("lexical_terms"), QStringLiteral("asset_types"), QStringLiteral("date"),
+            QStringLiteral("version"), QStringLiteral("result_target"), QStringLiteral("semantic_variants"),
+            QStringLiteral("lexical_groups"), QStringLiteral("asset_types"),
             QStringLiteral("folder_by_asset_criteria"), QStringLiteral("ocr_text"), QStringLiteral("entities"),
-            QStringLiteral("confidence"), QStringLiteral("explanation")
+            QStringLiteral("cooccurrence"), QStringLiteral("confidence"),
+            QStringLiteral("ambiguities"), QStringLiteral("explanation")
         }}
     };
 }
@@ -380,7 +453,8 @@ std::optional<ModelSearchUnderstanding> SearchQueryUnderstanding::parseModelPayl
     const QJsonObject &payload,
     QString *errorMessage)
 {
-    if (payload.value(QStringLiteral("version")).toInt(-1) != 1) {
+    const auto version = payload.value(QStringLiteral("version")).toInt(-1);
+    if (version != 1 && version != 2) {
         if (errorMessage) *errorMessage = QStringLiteral("模型查询理解协议版本不受支持");
         return std::nullopt;
     }
@@ -391,13 +465,75 @@ std::optional<ModelSearchUnderstanding> SearchQueryUnderstanding::parseModelPayl
     }
 
     ModelSearchUnderstanding result;
+    result.protocolVersion = version;
     result.confidence = confidenceValue.toDouble();
     if (result.confidence < 0.0 || result.confidence > 1.0) {
         if (errorMessage) *errorMessage = QStringLiteral("模型查询理解置信度越界");
         return std::nullopt;
     }
-    result.semanticText = boundedText(payload.value(QStringLiteral("semantic_text")));
-    result.lexicalTerms = stringArray(payload.value(QStringLiteral("lexical_terms")));
+    if (version == 1) {
+        result.semanticText = boundedText(payload.value(QStringLiteral("semantic_text")));
+        result.lexicalTerms = stringArray(payload.value(QStringLiteral("lexical_terms")));
+    } else {
+        const auto semanticArray = payload.value(QStringLiteral("semantic_variants")).toArray();
+        for (const auto &value : semanticArray) {
+            const auto object = value.toObject();
+            SearchSemanticVariant variant;
+            variant.text = boundedText(object.value(QStringLiteral("text")));
+            variant.weight = object.value(QStringLiteral("weight")).toDouble(0.75);
+            if (!variant.isEmpty() && variant.weight >= 0.1 && variant.weight <= 1.0) {
+                result.semanticVariants.append(std::move(variant));
+            }
+            if (result.semanticVariants.size() >= kMaxSemanticVariantCount) {
+                break;
+            }
+        }
+        if (!result.semanticVariants.isEmpty()) {
+            result.semanticText = result.semanticVariants.first().text;
+        }
+
+        const auto groupArray = payload.value(QStringLiteral("lexical_groups")).toArray();
+        for (const auto &value : groupArray) {
+            const auto object = value.toObject();
+            SearchLexicalGroup group;
+            const auto mode = object.value(QStringLiteral("mode")).toString().trimmed().toLower();
+            if (mode == QStringLiteral("required")) {
+                group.mode = SearchLexicalGroupMode::Required;
+            } else if (mode == QStringLiteral("excluded")) {
+                group.mode = SearchLexicalGroupMode::Excluded;
+            } else if (mode == QStringLiteral("optional")) {
+                group.mode = SearchLexicalGroupMode::Optional;
+            } else {
+                continue;
+            }
+            group.alternatives = stringArray(
+                object.value(QStringLiteral("alternatives")),
+                kMaxGroupAlternativeCount);
+            if (group.isEmpty()) {
+                continue;
+            }
+            if (group.mode == SearchLexicalGroupMode::Excluded) {
+                result.excludedTerms.append(group.alternatives);
+            } else {
+                result.lexicalTerms.append(group.alternatives);
+            }
+            result.lexicalGroups.append(std::move(group));
+            if (result.lexicalGroups.size() >= kMaxLexicalGroupCount) {
+                break;
+            }
+        }
+        result.lexicalTerms = uniqueTerms(result.lexicalTerms);
+        result.excludedTerms = uniqueTerms(result.excludedTerms);
+
+        const auto cooccurrence = payload.value(QStringLiteral("cooccurrence"))
+                                      .toString().trimmed().toLower();
+        if (cooccurrence == QStringLiteral("same_frame")) {
+            result.cooccurrence = SearchCooccurrenceScope::SameFrame;
+        } else if (cooccurrence == QStringLiteral("same_asset")) {
+            result.cooccurrence = SearchCooccurrenceScope::SameAsset;
+        }
+        result.ambiguities = stringArray(payload.value(QStringLiteral("ambiguities")), 8);
+    }
     result.ocrText = boundedText(payload.value(QStringLiteral("ocr_text")), 160);
     result.explanation = boundedText(payload.value(QStringLiteral("explanation")), 200);
     result.folderByAssetCriteria = payload.value(QStringLiteral("folder_by_asset_criteria")).toBool(false);
@@ -429,20 +565,22 @@ std::optional<ModelSearchUnderstanding> SearchQueryUnderstanding::parseModelPayl
         }
     }
 
-    const auto dateObject = payload.value(QStringLiteral("date")).toObject();
-    const auto startText = boundedText(dateObject.value(QStringLiteral("start")), 10);
-    const auto endText = boundedText(dateObject.value(QStringLiteral("end")), 10);
-    if (!startText.isEmpty() || !endText.isEmpty()) {
-        const auto start = QDate::fromString(startText, Qt::ISODate);
-        const auto end = QDate::fromString(endText, Qt::ISODate);
-        if (!start.isValid() || !end.isValid() || start > end || start.daysTo(end) > 3660) {
-            if (errorMessage) *errorMessage = QStringLiteral("模型返回了无效或过宽的日期范围");
-            return std::nullopt;
+    if (version == 1) {
+        const auto dateObject = payload.value(QStringLiteral("date")).toObject();
+        const auto startText = boundedText(dateObject.value(QStringLiteral("start")), 10);
+        const auto endText = boundedText(dateObject.value(QStringLiteral("end")), 10);
+        if (!startText.isEmpty() || !endText.isEmpty()) {
+            const auto start = QDate::fromString(startText, Qt::ISODate);
+            const auto end = QDate::fromString(endText, Qt::ISODate);
+            if (!start.isValid() || !end.isValid() || start > end || start.daysTo(end) > 3660) {
+                if (errorMessage) *errorMessage = QStringLiteral("模型返回了无效或过宽的日期范围");
+                return std::nullopt;
+            }
+            result.dateConstraint.startDate = start.toString(Qt::ISODate);
+            result.dateConstraint.endDate = end.toString(Qt::ISODate);
+            result.dateConstraint.matchedText = boundedText(dateObject.value(QStringLiteral("matched_text")), 80);
+            result.dateConstraint.preferredField = dateFieldFromName(dateObject.value(QStringLiteral("preferred_field")).toString());
         }
-        result.dateConstraint.startDate = start.toString(Qt::ISODate);
-        result.dateConstraint.endDate = end.toString(Qt::ISODate);
-        result.dateConstraint.matchedText = boundedText(dateObject.value(QStringLiteral("matched_text")), 80);
-        result.dateConstraint.preferredField = dateFieldFromName(dateObject.value(QStringLiteral("preferred_field")).toString());
     }
 
     const auto entityArray = payload.value(QStringLiteral("entities")).toArray();
@@ -480,6 +618,24 @@ ParsedMaterialQuery SearchQueryUnderstanding::merge(
     }
 
     bool changed = false;
+    for (auto variant : modelUnderstanding.semanticVariants) {
+        variant.text = variant.text.simplified();
+        variant.weight = std::clamp(variant.weight, 0.1, 0.85);
+        if (variant.text.isEmpty()
+            || variant.text.compare(merged.semanticText.simplified(), Qt::CaseInsensitive) == 0
+            || std::any_of(merged.semanticVariants.cbegin(),
+                           merged.semanticVariants.cend(),
+                           [&variant](const SearchSemanticVariant &existing) {
+            return existing.text.compare(variant.text, Qt::CaseInsensitive) == 0;
+        })) {
+            continue;
+        }
+        merged.semanticVariants.append(std::move(variant));
+        changed = true;
+        if (merged.semanticVariants.size() >= kMaxSemanticVariantCount) {
+            break;
+        }
+    }
     if (!modelUnderstanding.semanticText.isEmpty()) {
         const auto localSemantic = merged.semanticText.simplified();
         const auto modelSemantic = modelUnderstanding.semanticText.simplified();
@@ -564,9 +720,48 @@ ParsedMaterialQuery SearchQueryUnderstanding::merge(
         }
     }
     normalizeEntityConstraints(&merged.strictEntities);
+
+    QStringList groundedModelLexicalTerms;
+    for (auto group : modelUnderstanding.lexicalGroups) {
+        if (!lexicalGroupIsGrounded(group, localQuery)) {
+            continue;
+        }
+        if (group.mode == SearchLexicalGroupMode::Excluded) {
+            const auto groundedExcluded = groundedModelProperties(
+                group.alternatives,
+                localQuery.originalText);
+            const auto previousExcluded = merged.excludedTerms;
+            merged.excludedTerms = uniqueTerms(merged.excludedTerms + groundedExcluded);
+            changed = merged.excludedTerms != previousExcluded || changed;
+            group.alternatives = groundedExcluded;
+            if (group.alternatives.isEmpty()) {
+                continue;
+            }
+        } else {
+            groundedModelLexicalTerms.append(group.alternatives);
+        }
+        changed = appendLexicalGroup(&merged.lexicalGroups, group) || changed;
+    }
+
+    const auto entityCount = std::max(merged.explicitEntityLabels.size(),
+                                      merged.strictEntities.size());
+    if (entityCount >= 2
+        && modelUnderstanding.cooccurrence != SearchCooccurrenceScope::None) {
+        auto cooccurrence = modelUnderstanding.cooccurrence;
+        if (merged.resultTarget == SearchResultTarget::Frames) {
+            cooccurrence = SearchCooccurrenceScope::SameFrame;
+        }
+        if (merged.cooccurrence != cooccurrence) {
+            merged.cooccurrence = cooccurrence;
+            changed = true;
+        }
+    }
+
     const auto previousLexicalTerms = merged.lexicalTerms;
     QStringList lexical = previousLexicalTerms;
-    lexical.append(modelUnderstanding.lexicalTerms);
+    lexical.append(modelUnderstanding.protocolVersion >= 2
+                       ? uniqueTerms(groundedModelLexicalTerms)
+                       : modelUnderstanding.lexicalTerms);
     for (const auto &entity : modelUnderstanding.strictEntities) {
         lexical.append(entity.allTerms());
     }
@@ -587,6 +782,11 @@ ParsedMaterialQuery SearchQueryUnderstanding::merge(
         replaceInterpretationLabel(&merged.interpretationLabels,
                                    {QStringLiteral("同一对象：")},
                                    QStringLiteral("同一对象：%1").arg(entityLabels.join(QStringLiteral("；"))));
+    }
+    if (merged.cooccurrence == SearchCooccurrenceScope::SameFrame) {
+        merged.interpretationLabels.append(QStringLiteral("约束：多个实体需在同一帧出现"));
+    } else if (merged.cooccurrence == SearchCooccurrenceScope::SameAsset) {
+        merged.interpretationLabels.append(QStringLiteral("约束：多个实体需在同一素材出现"));
     }
     if (!merged.semanticText.isEmpty()) {
         replaceInterpretationLabel(&merged.interpretationLabels,

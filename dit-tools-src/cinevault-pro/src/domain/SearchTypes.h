@@ -87,10 +87,41 @@ struct SearchDateConstraint {
     }
 };
 
+enum class SearchLexicalGroupMode : int {
+    Required = 0,
+    Optional = 1,
+    Excluded = 2
+};
+
+struct SearchLexicalGroup {
+    SearchLexicalGroupMode mode = SearchLexicalGroupMode::Optional;
+    QStringList alternatives;
+
+    [[nodiscard]] bool isEmpty() const { return alternatives.isEmpty(); }
+    bool operator==(const SearchLexicalGroup &) const = default;
+};
+
+struct SearchSemanticVariant {
+    QString text;
+    double weight = 0.75;
+
+    [[nodiscard]] bool isEmpty() const { return text.trimmed().isEmpty(); }
+    bool operator==(const SearchSemanticVariant &) const = default;
+};
+
+enum class SearchCooccurrenceScope : int {
+    None = 0,
+    SameAsset = 1,
+    SameFrame = 2
+};
+
 struct ParsedMaterialQuery {
     QString originalText;
     QString semanticText;
+    QVector<SearchSemanticVariant> semanticVariants;
     QStringList lexicalTerms;
+    QVector<SearchLexicalGroup> lexicalGroups;
+    QStringList excludedTerms;
     SearchDateConstraint dateConstraint;
     // Kept for callers that only understand an exact date. Range-aware search uses dateConstraint.
     QString normalizedDate;
@@ -107,6 +138,7 @@ struct ParsedMaterialQuery {
     // the text model to resolve a multi-entity relation.
     QStringList explicitEntityLabels;
     QVector<StrictEntityConstraint> strictEntities;
+    SearchCooccurrenceScope cooccurrence = SearchCooccurrenceScope::None;
     QStringList interpretationLabels;
     QStringList ignoredIntentTerms;
 
@@ -114,8 +146,12 @@ struct ParsedMaterialQuery {
 };
 
 struct ModelSearchUnderstanding {
+    int protocolVersion = 1;
     QString semanticText;
+    QVector<SearchSemanticVariant> semanticVariants;
     QStringList lexicalTerms;
+    QVector<SearchLexicalGroup> lexicalGroups;
+    QStringList excludedTerms;
     SearchDateConstraint dateConstraint;
     QVector<int> assetTypeFilters;
     SearchResultTarget resultTarget = SearchResultTarget::Assets;
@@ -123,8 +159,10 @@ struct ModelSearchUnderstanding {
     bool folderByAssetCriteria = false;
     QString ocrText;
     QVector<StrictEntityConstraint> strictEntities;
+    SearchCooccurrenceScope cooccurrence = SearchCooccurrenceScope::None;
     double confidence = 0.0;
     QString explanation;
+    QStringList ambiguities;
 };
 
 struct SearchReliabilityAssessment {
@@ -134,6 +172,28 @@ struct SearchReliabilityAssessment {
     double bestResultScore = 0.0;
     double bestResultConfidence = 0.0;
     QStringList reasons;
+};
+
+enum class SearchAssistantRoute : int {
+    Skip = 0,
+    ReadyOnly = 1,
+    Required = 2
+};
+
+struct SearchAssistantRoutingDecision {
+    SearchAssistantRoute route = SearchAssistantRoute::Skip;
+    QStringList reasons;
+
+    [[nodiscard]] bool shouldInvoke(bool assistantReady) const
+    {
+        return route == SearchAssistantRoute::Required
+            || (route == SearchAssistantRoute::ReadyOnly && assistantReady);
+    }
+
+    [[nodiscard]] bool shouldStartRuntime() const
+    {
+        return route == SearchAssistantRoute::Required;
+    }
 };
 
 struct FolderSearchHit {
@@ -218,6 +278,7 @@ struct HybridSearchHit {
     double dateScore = 0.0;
     double typeScore = 0.0;
     double semanticScore = 0.0;
+    double excludedScore = 0.0;
     double score = 0.0;
     double confidence = 0.0;
     QString dateValue;

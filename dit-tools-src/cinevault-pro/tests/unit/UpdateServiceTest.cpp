@@ -334,6 +334,15 @@ void UpdateServiceTest::updaterProgressContract_usesDeterminateInstallerSignal()
     QVERIFY(updaterSource.contains("pollInstallerProgress"));
     QVERIFY(windowSource.contains("setRange(0, 100)"));
     QVERIFY(windowSource.contains(QStringLiteral("总进度").toUtf8()));
+    QVERIFY(windowSource.contains("QVariantAnimation"));
+    QVERIFY(windowSource.contains("setStartValue(m_displayedPercentage)"));
+    QVERIFY(windowSource.contains("setEndValue(target)"));
+    QVERIFY(windowSource.contains("QPlainTextEdit"));
+    QVERIFY(windowSource.contains(QStringLiteral("更新详情").toUtf8()));
+    QVERIFY(windowSource.contains("appendUpdateDetail(event)"));
+    QVERIFY(updaterSource.contains(QStringLiteral("已等待 %1 秒").toUtf8()));
+    QVERIFY(updaterSource.contains(QStringLiteral("安装器实际进度 %1%").toUtf8()));
+    QVERIFY(!windowSource.contains("setValue(event.percentage)"));
     QVERIFY(!windowSource.contains("setRange(0, 0)"));
 }
 

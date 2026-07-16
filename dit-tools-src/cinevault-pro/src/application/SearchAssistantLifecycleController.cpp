@@ -4,7 +4,6 @@
 #include "infrastructure/search/LocalSearchAssistantRuntime.h"
 
 namespace {
-constexpr int kStartupPreloadDelayMs = 250;
 constexpr int kMillisecondsPerMinute = 60 * 1000;
 }
 
@@ -58,6 +57,7 @@ void SearchAssistantLifecycleController::applySettings()
     if (!m_settings->searchAssistantEnabled()) {
         m_idleMonitor.stop();
         m_idleUnloaded = false;
+        m_searchIntentActive = false;
         m_runtime->stop();
         emit lifecycleChanged();
         return;
@@ -71,13 +71,30 @@ void SearchAssistantLifecycleController::applySettings()
     }
 
     m_idleUnloaded = false;
-    schedulePreload(kStartupPreloadDelayMs);
+    if (m_searchIntentActive) {
+        schedulePreload(0);
+    }
     emit lifecycleChanged();
 }
 
 void SearchAssistantLifecycleController::recordUserActivity()
 {
     m_idleMonitor.recordActivity();
+}
+
+void SearchAssistantLifecycleController::recordSearchIntent()
+{
+    if (!m_started || !m_settings || !m_runtime
+        || !m_settings->searchAssistantEnabled()) {
+        return;
+    }
+    m_searchIntentActive = true;
+    m_idleUnloaded = false;
+    m_idleMonitor.recordActivity();
+    if (!m_runtime->isReady() && !m_runtime->isStarting()) {
+        schedulePreload(0);
+    }
+    emit lifecycleChanged();
 }
 
 bool SearchAssistantLifecycleController::isStarted() const
@@ -92,7 +109,7 @@ bool SearchAssistantLifecycleController::isIdleUnloaded() const
 
 int SearchAssistantLifecycleController::autoUnloadMinutes() const
 {
-    return m_settings ? m_settings->searchAssistantAutoUnloadMinutes() : 60;
+    return m_settings ? m_settings->searchAssistantAutoUnloadMinutes() : 30;
 }
 
 void SearchAssistantLifecycleController::schedulePreload(int delayMs)
@@ -125,13 +142,14 @@ void SearchAssistantLifecycleController::unloadForIdle()
     if (m_runtime->isReady() || m_runtime->isStarting()) {
         m_runtime->stop();
         m_idleUnloaded = true;
+        m_searchIntentActive = false;
         emit lifecycleChanged();
     }
 }
 
 void SearchAssistantLifecycleController::resumeFromIdle()
 {
-    if (!m_idleUnloaded || !m_started || !m_settings
+    if (!m_idleUnloaded || !m_searchIntentActive || !m_started || !m_settings
         || !m_settings->searchAssistantEnabled()) {
         return;
     }

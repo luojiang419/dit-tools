@@ -20,6 +20,8 @@ class ShellViewModel : public QObject {
     Q_PROPERTY(int currentWorkspace READ currentWorkspace WRITE setCurrentWorkspace NOTIFY currentWorkspaceChanged)
     Q_PROPERTY(QString statusSummary READ statusSummary NOTIFY stateChanged)
     Q_PROPERTY(QString lastMessage READ lastMessage NOTIFY stateChanged)
+    Q_PROPERTY(int sourceRootCount READ sourceRootCount NOTIFY stateChanged)
+    Q_PROPERTY(bool sourceScanInProgress READ sourceScanInProgress NOTIFY stateChanged)
     Q_PROPERTY(QVariantList workspaceTabs READ workspaceTabs NOTIFY stateChanged)
     Q_PROPERTY(int projectLibraryWorkspaceId READ projectLibraryWorkspaceId CONSTANT)
     Q_PROPERTY(int libraryWorkspaceId READ libraryWorkspaceId CONSTANT)
@@ -43,6 +45,8 @@ public:
     int currentWorkspace() const;
     QString statusSummary() const;
     QString lastMessage() const;
+    int sourceRootCount() const;
+    bool sourceScanInProgress() const;
     QVariantList workspaceTabs() const;
     int projectLibraryWorkspaceId() const;
     int libraryWorkspaceId() const;

@@ -259,6 +259,66 @@ QString ImportService::lastMessage() const
     return m_lastMessage;
 }
 
+void ImportService::resumeInterruptedScans()
+{
+    if (!m_databaseManager || !m_databaseManager->hasOpenProject() || !m_jobService || !m_jobService->engine() || !m_scanEngine) {
+        return;
+    }
+
+    QSqlQuery query(m_databaseManager->database());
+    if (!query.exec(QStringLiteral(
+            "SELECT sr.id, sr.name, sr.path, sr.status, sr.total_files, sr.total_folders, sr.total_size_bytes, "
+            "sr.video_count, sr.audio_count, sr.image_count, sr.other_count, sr.warning_count, COALESCE(sr.scan_version, 0) "
+            "FROM source_root sr JOIN scan_session ss ON ss.source_root_id = sr.id "
+            "WHERE ss.state <> 'completed' ORDER BY sr.id"))) {
+        m_lastMessage = QStringLiteral("检查可恢复扫描任务失败：%1").arg(query.lastError().text());
+        emit importStateChanged();
+        return;
+    }
+
+    QVector<SourceRoot> resumableRoots;
+    QVector<SourceRoot> waitingRoots;
+    while (query.next()) {
+        const auto sourceRoot = readSourceRoot(query);
+        const QFileInfo info(sourceRoot.path);
+        if (info.exists() && info.isDir() && info.isReadable()) {
+            resumableRoots.append(sourceRoot);
+        } else {
+            waitingRoots.append(sourceRoot);
+        }
+    }
+
+    const auto now = QDateTime::currentDateTime().toString(Qt::ISODate);
+    for (const auto &sourceRoot : waitingRoots) {
+        QSqlQuery markWaiting(m_databaseManager->database());
+        markWaiting.prepare(QStringLiteral("UPDATE source_root SET status = 'warning', updated_at = ? WHERE id = ?"));
+        markWaiting.addBindValue(now);
+        markWaiting.addBindValue(sourceRoot.id);
+        markWaiting.exec();
+    }
+
+    int resumed = 0;
+    for (const auto &sourceRoot : resumableRoots) {
+        QString errorMessage;
+        if (startSourceScan(sourceRoot,
+                            QStringLiteral("恢复扫描"),
+                            QStringLiteral("从上次保存的目录检查点继续建立索引"),
+                            &errorMessage)) {
+            ++resumed;
+        }
+    }
+
+    if (resumed > 0) {
+        m_lastMessage = QStringLiteral("已恢复 %1 个中断的素材扫描任务，将从最近目录检查点继续。").arg(resumed);
+    } else if (!waitingRoots.isEmpty()) {
+        m_lastMessage = QStringLiteral("有 %1 个中断扫描等待素材盘或网络目录重新接入。").arg(waitingRoots.size());
+    } else {
+        return;
+    }
+    emit importStateChanged();
+    emit catalogChanged();
+}
+
 void ImportService::rescanLegacySourceRoots()
 {
     if (!m_databaseManager || !m_databaseManager->hasOpenProject() || !m_jobService || !m_jobService->engine() || !m_scanEngine) {
@@ -268,7 +328,9 @@ void ImportService::rescanLegacySourceRoots()
     QSqlQuery query(m_databaseManager->database());
     query.prepare(QStringLiteral(
         "SELECT id, name, path, status, total_files, total_folders, total_size_bytes, video_count, audio_count, image_count, other_count, warning_count, COALESCE(scan_version, 0) "
-        "FROM source_root WHERE COALESCE(scan_version, 0) < ? ORDER BY id"));
+        "FROM source_root WHERE COALESCE(scan_version, 0) < ? "
+        "AND NOT EXISTS (SELECT 1 FROM scan_session ss WHERE ss.source_root_id = source_root.id AND ss.state <> 'completed') "
+        "ORDER BY id"));
     query.addBindValue(ScanEngine::CurrentScanVersion);
     if (!query.exec()) {
         m_lastMessage = QStringLiteral("检查历史素材源失败：%1").arg(query.lastError().text());

@@ -32,13 +32,15 @@ bool execute(QSqlDatabase db, const QString &statement, QString *errorMessage)
 class FakeSemanticSearchProvider final : public SemanticSearchProvider {
 public:
     QVector<SemanticSearchHit> hits;
+    QStringList queries;
     QString error;
     bool ready = true;
 
-    QVector<SemanticSearchHit> search(const QString &,
+    QVector<SemanticSearchHit> search(const QString &queryText,
                                       qsizetype limit,
                                       QString *errorMessage) override
     {
+        queries.append(queryText);
         if (errorMessage) {
             *errorMessage = error;
         }
@@ -318,6 +320,63 @@ private slots:
         QVERIFY(hit);
         QVERIFY(hit->semanticScore > 0.9);
         QCOMPARE(result.hits.first().entityKey, QStringLiteral("asset-semantic"));
+    }
+
+    void modelSemanticVariantsCreateAdditionalRecallChannels()
+    {
+        Fixture fixture;
+        QVERIFY2(fixture.valid, qPrintable(fixture.errorMessage));
+        FakeSemanticSearchProvider semantic;
+        semantic.hits = {{QStringLiteral("asset:asset-semantic"), 0.98}};
+        SearchEngine engine(&fixture.manager, &semantic);
+        ModelSearchUnderstanding model;
+        model.confidence = 0.92;
+        model.semanticVariants = {
+            {QStringLiteral("海岸晨雾日出"), 0.80}
+        };
+
+        const auto result = engine.searchMaterials(
+            QStringLiteral("海边晨雾"),
+            {},
+            QDate(2026, 7, 15),
+            &model);
+
+        QCOMPARE(semantic.queries.size(), 2);
+        QCOMPARE(semantic.queries.first(), QStringLiteral("海边晨雾"));
+        QCOMPARE(semantic.queries.last(), QStringLiteral("海岸晨雾日出"));
+        QVERIFY(findHit(result, SearchDocumentType::Asset, QStringLiteral("asset-semantic")));
+    }
+
+    void requiredLexicalGroupsUseOrWithinGroupAndAndAcrossGroups()
+    {
+        Fixture fixture;
+        QVERIFY2(fixture.valid, qPrintable(fixture.errorMessage));
+        SearchEngine engine(&fixture.manager);
+        ModelSearchUnderstanding model;
+        model.confidence = 0.94;
+        model.lexicalTerms = {
+            QStringLiteral("模特"), QStringLiteral("人物"),
+            QStringLiteral("牛仔裤"), QStringLiteral("丹宁裤")
+        };
+        model.lexicalGroups = {
+            {SearchLexicalGroupMode::Required,
+             {QStringLiteral("模特"), QStringLiteral("人物")}},
+            {SearchLexicalGroupMode::Required,
+             {QStringLiteral("牛仔裤"), QStringLiteral("丹宁裤")}}
+        };
+
+        const auto result = engine.searchMaterials(
+            QStringLiteral("模特穿牛仔裤"),
+            {},
+            QDate(2026, 7, 15),
+            &model);
+
+        QVERIFY(findHit(result,
+                        SearchDocumentType::Asset,
+                        QStringLiteral("asset-night-video")));
+        QVERIFY(!findHit(result,
+                         SearchDocumentType::Asset,
+                         QStringLiteral("asset-night-image")));
     }
 
     void semanticCandidatesRespectExplicitScope()

@@ -11,7 +11,7 @@ Item {
     property string draftVisionApiKey: ""
     property string draftVisionModel: ""
     property bool draftSearchAssistantEnabled: true
-    property int draftSearchAssistantAutoUnloadMinutes: 60
+    property int draftSearchAssistantAutoUnloadMinutes: 30
     property bool draftQuickSearchEnabled: true
     property string draftQuickSearchShortcut: "Alt+Space"
     property bool draftStartAtLogin: false
@@ -798,8 +798,8 @@ Item {
                                         font.pixelSize: root.bodyFontSize
                                         model: [
                                             { label: "15 分钟", value: 15 },
-                                            { label: "30 分钟", value: 30 },
-                                            { label: "1 小时（默认）", value: 60 },
+                                            { label: "30 分钟（默认）", value: 30 },
+                                            { label: "1 小时", value: 60 },
                                             { label: "2 小时", value: 120 },
                                             { label: "4 小时", value: 240 },
                                             { label: "8 小时", value: 480 }

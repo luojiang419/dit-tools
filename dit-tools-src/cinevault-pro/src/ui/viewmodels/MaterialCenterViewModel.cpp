@@ -8,6 +8,7 @@
 #include "application/SearchDocumentSyncService.h"
 #include "application/VideoAnalysisService.h"
 #include "core/search/SearchQueryUnderstanding.h"
+#include "core/search/SearchAssistantRouter.h"
 #include "core/search/SearchResultFusion.h"
 #include "core/thumbnail/ContactSheetBuilder.h"
 #include "infrastructure/config/AppSettings.h"
@@ -933,6 +934,7 @@ void MaterialCenterViewModel::reload()
 
 void MaterialCenterViewModel::prepareGlobalQuickSearch()
 {
+    emit searchAssistantWarmupRequested();
     m_searchRefreshTimer->stop();
     ++m_searchGeneration;
     m_searchText.clear();
@@ -998,7 +1000,9 @@ void MaterialCenterViewModel::executeSearch(const ModelSearchUnderstanding *mode
         case SearchRecallProtection::BaselineHitsAdded:
             m_searchAssistantUsed = true;
             m_searchAssistantStatusText = QStringLiteral(
-                "内置文本模型已辅助排序，并保留 %1 条原向量/本地召回结果")
+                "模型增强：新增 %1 条、双路共同命中 %2 条，并保留 %3 条原本地召回")
+                                              .arg(outcome.enhancedOnlyHitCount)
+                                              .arg(outcome.sharedHitCount)
                                               .arg(outcome.preservedHitCount);
             break;
         case SearchRecallProtection::None:
@@ -1078,7 +1082,7 @@ QString MaterialCenterViewModel::searchUnderstandingCacheKey(const QString &quer
     const auto modelIdentity = m_localSearchAssistantRuntime
         ? m_localSearchAssistantRuntime->modelName().toCaseFolded()
         : QStringLiteral("builtin-unavailable");
-    return QStringLiteral("v4|%1|%2|%3")
+    return QStringLiteral("v6|%1|%2|%3")
         .arg(referenceDate.toString(Qt::ISODate),
              modelIdentity,
              queryText.simplified().toCaseFolded());
@@ -1104,12 +1108,31 @@ void MaterialCenterViewModel::startSearchUnderstanding(
     }
     if (localQuery.semanticText.trimmed().isEmpty()
         && localQuery.strictEntities.isEmpty()
+        && localQuery.explicitEntityLabels.isEmpty()
         && localQuery.ocrText.trimmed().isEmpty()) {
         m_searchAssistantStatusText = QStringLiteral("本地规则已完整理解日期、类型与目标，无需调用查询助手");
         m_searchAssistantBusy = false;
         m_searchAssistantUsed = false;
         emit searchStateChanged();
         return;
+    }
+
+    const bool assistantReady = m_localSearchAssistantRuntime
+        && m_localSearchAssistantRuntime->isReady();
+    if (m_lastBaselineSearchGeneration == m_searchGeneration
+        && m_lastBaselineSearchResult.parsedQuery.originalText.simplified() == queryText) {
+        const auto routing = SearchAssistantRouter::decide(
+            m_lastBaselineSearchResult,
+            assistantReady);
+        if (!routing.shouldInvoke(assistantReady)) {
+            m_searchAssistantStatusText = routing.reasons.isEmpty()
+                ? QStringLiteral("本地搜索结果可靠，无需调用查询助手")
+                : routing.reasons.join(QStringLiteral("；"));
+            m_searchAssistantBusy = false;
+            m_searchAssistantUsed = false;
+            emit searchStateChanged();
+            return;
+        }
     }
     if (!m_localSearchAssistantRuntime || !m_searchAssistantClient) {
         m_searchAssistantStatusText = QStringLiteral("内置查询助手未初始化，已使用本地查询理解");
@@ -1121,14 +1144,22 @@ void MaterialCenterViewModel::startSearchUnderstanding(
 
     const auto referenceDate = QDate::currentDate();
     const auto cacheKey = searchUnderstandingCacheKey(queryText, referenceDate);
-    const auto cached = m_searchUnderstandingCache.constFind(cacheKey);
-    if (cached != m_searchUnderstandingCache.cend()) {
+    const auto now = QDateTime::currentDateTimeUtc();
+    auto cached = m_searchUnderstandingCache.find(cacheKey);
+    if (cached != m_searchUnderstandingCache.end() && cached->expiresAt <= now) {
+        m_searchUnderstandingCacheOrder.removeAll(cacheKey);
+        m_searchUnderstandingCache.erase(cached);
+        cached = m_searchUnderstandingCache.end();
+    }
+    if (cached != m_searchUnderstandingCache.end()) {
+        m_searchUnderstandingCacheOrder.removeAll(cacheKey);
+        m_searchUnderstandingCacheOrder.append(cacheKey);
         bool applied = false;
-        SearchQueryUnderstanding::merge(localQuery, cached.value(), &applied);
+        SearchQueryUnderstanding::merge(localQuery, cached->understanding, &applied);
         if (applied) {
             m_searchAssistantStatusText = QStringLiteral("内置文本模型已辅助理解（缓存）");
             m_searchAssistantUsed = true;
-            executeSearch(&cached.value());
+            executeSearch(&cached->understanding);
         } else {
             m_searchAssistantStatusText = QStringLiteral("模型未发现需要补充的条件，已使用本地理解");
             m_searchAssistantUsed = false;
@@ -1136,6 +1167,18 @@ void MaterialCenterViewModel::startSearchUnderstanding(
         m_searchAssistantBusy = false;
         emit searchStateChanged();
         return;
+    }
+    const auto recentFailure = m_searchUnderstandingFailures.constFind(cacheKey);
+    if (recentFailure != m_searchUnderstandingFailures.cend()) {
+        if (recentFailure.value() > now) {
+            m_searchAssistantStatusText = QStringLiteral(
+                "当前查询近期模型增强失败，暂时保留本地搜索");
+            m_searchAssistantBusy = false;
+            m_searchAssistantUsed = false;
+            emit searchStateChanged();
+            return;
+        }
+        m_searchUnderstandingFailures.remove(cacheKey);
     }
     if (m_searchUnderstandingInFlight.contains(cacheKey)) {
         m_searchAssistantStatusText = QStringLiteral("内置文本模型正在理解当前搜索…");
@@ -1156,7 +1199,7 @@ void MaterialCenterViewModel::startSearchUnderstanding(
     }
     const auto baseUrl = m_localSearchAssistantRuntime->endpoint();
     const auto model = m_localSearchAssistantRuntime->modelName();
-    const auto timeoutSec = 30;
+    const auto timeoutSec = 3;
     const auto generation = m_searchGeneration;
     auto *client = m_searchAssistantClient;
     auto *watcher = new QFutureWatcher<SearchUnderstandingTaskResult>(this);
@@ -1179,6 +1222,12 @@ void MaterialCenterViewModel::startSearchUnderstanding(
         }
         m_searchAssistantBusy = false;
         if (!task.understanding.has_value()) {
+            if (m_searchUnderstandingFailures.size() >= 128) {
+                m_searchUnderstandingFailures.erase(m_searchUnderstandingFailures.begin());
+            }
+            m_searchUnderstandingFailures.insert(
+                task.cacheKey,
+                QDateTime::currentDateTimeUtc().addSecs(120));
             m_searchAssistantUsed = false;
             m_searchAssistantStatusText = QStringLiteral("模型理解失败，已保留本地搜索：%1")
                 .arg(task.errorMessage.isEmpty() ? QStringLiteral("未知错误") : task.errorMessage);
@@ -1199,10 +1248,19 @@ void MaterialCenterViewModel::startSearchUnderstanding(
             emit searchStateChanged();
             return;
         }
-        if (m_searchUnderstandingCache.size() >= 64) {
-            m_searchUnderstandingCache.erase(m_searchUnderstandingCache.begin());
+        while (m_searchUnderstandingCache.size() >= 256
+               && !m_searchUnderstandingCacheOrder.isEmpty()) {
+            m_searchUnderstandingCache.remove(m_searchUnderstandingCacheOrder.takeFirst());
         }
-        m_searchUnderstandingCache.insert(task.cacheKey, *task.understanding);
+        m_searchUnderstandingFailures.remove(task.cacheKey);
+        m_searchUnderstandingCacheOrder.removeAll(task.cacheKey);
+        m_searchUnderstandingCacheOrder.append(task.cacheKey);
+        m_searchUnderstandingCache.insert(
+            task.cacheKey,
+            SearchUnderstandingCacheEntry{
+                *task.understanding,
+                QDateTime::currentDateTimeUtc().addDays(7)
+            });
         m_searchAssistantUsed = true;
         m_searchAssistantStatusText = QStringLiteral("内置文本模型已辅助理解");
         executeSearch(&*task.understanding);
@@ -1244,6 +1302,9 @@ void MaterialCenterViewModel::setSearchText(const QString &searchText)
     m_searchEmptyReason.clear();
     m_lastParsedQuery = {};
     emit searchStateChanged();
+    if (!m_searchText.simplified().isEmpty()) {
+        emit searchAssistantWarmupRequested();
+    }
     m_searchRefreshTimer->start();
 }
 

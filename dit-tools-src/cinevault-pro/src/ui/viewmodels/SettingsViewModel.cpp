@@ -423,7 +423,7 @@ QString SettingsViewModel::localSearchAssistantStatusText() const
         return QStringLiteral("内置文本模型上次启动失败：%1")
             .arg(m_localSearchAssistantRuntime->lastError());
     }
-    return QStringLiteral("Qwen3 0.6B 已内置，将在软件启动后自动加载；无操作 %1 后自动卸载")
+    return QStringLiteral("Qwen3 0.6B 已内置，将在打开搜索或输入查询时智能加载；无搜索操作 %1 后自动卸载")
         .arg(unloadLabel);
 }
 

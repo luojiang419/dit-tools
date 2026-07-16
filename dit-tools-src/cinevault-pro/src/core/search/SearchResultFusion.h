@@ -13,6 +13,8 @@ struct SearchResultFusionOutcome {
     MaterialSearchResult result;
     SearchRecallProtection protection = SearchRecallProtection::None;
     qsizetype preservedHitCount = 0;
+    qsizetype sharedHitCount = 0;
+    qsizetype enhancedOnlyHitCount = 0;
 };
 
 class SearchResultFusion {

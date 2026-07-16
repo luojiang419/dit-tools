@@ -262,6 +262,15 @@ bool DatabaseManager::initializeSchema(QSqlDatabase &db, bool databaseExistedBef
         return rollback();
     }
 
+    if (version < 6) {
+        if (!migrateToVersion6(db, errorMessage)) {
+            return rollback();
+        }
+        version = 6;
+    } else if (!ensureResumableScanSchemaCompatibility(db, errorMessage)) {
+        return rollback();
+    }
+
     if (!db.commit()) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("提交项目数据库迁移失败：%1").arg(db.lastError().text());
@@ -879,6 +888,83 @@ bool DatabaseManager::ensureEmbeddedMetadataSchemaCompatibility(QSqlDatabase &db
         QStringLiteral("CREATE INDEX IF NOT EXISTS idx_embedded_metadata_camera ON embedded_metadata(camera_make, camera_model);")
     };
     return executeBatch(db, statements, errorMessage);
+}
+
+bool DatabaseManager::migrateToVersion6(QSqlDatabase &db, QString *errorMessage) const
+{
+    if (!ensureResumableScanSchemaCompatibility(db, errorMessage)) {
+        return false;
+    }
+    return setSchemaVersion(db, 6, errorMessage);
+}
+
+bool DatabaseManager::ensureResumableScanSchemaCompatibility(QSqlDatabase &db,
+                                                              QString *errorMessage) const
+{
+    return executeBatch(db,
+                        {
+                            QStringLiteral("CREATE TABLE IF NOT EXISTS scan_session ("
+                                           "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                                           "source_root_id INTEGER NOT NULL UNIQUE,"
+                                           "state TEXT NOT NULL,"
+                                           "last_error TEXT NOT NULL DEFAULT '',"
+                                           "created_at TEXT NOT NULL,"
+                                           "updated_at TEXT NOT NULL,"
+                                           "FOREIGN KEY(source_root_id) REFERENCES source_root(id) ON DELETE CASCADE"
+                                           ");"),
+                            QStringLiteral("CREATE TABLE IF NOT EXISTS scan_work_item ("
+                                           "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                                           "session_id INTEGER NOT NULL,"
+                                           "absolute_path TEXT NOT NULL,"
+                                           "relative_path TEXT NOT NULL,"
+                                           "path_key TEXT NOT NULL,"
+                                           "depth INTEGER NOT NULL DEFAULT 0,"
+                                           "state TEXT NOT NULL,"
+                                           "created_at TEXT NOT NULL,"
+                                           "updated_at TEXT NOT NULL,"
+                                           "UNIQUE(session_id, path_key),"
+                                           "FOREIGN KEY(session_id) REFERENCES scan_session(id) ON DELETE CASCADE"
+                                           ");"),
+                            QStringLiteral("CREATE TABLE IF NOT EXISTS scan_stage_asset ("
+                                           "session_id INTEGER NOT NULL,"
+                                           "path_key TEXT NOT NULL,"
+                                           "name TEXT NOT NULL,"
+                                           "extension TEXT,"
+                                           "absolute_path TEXT NOT NULL,"
+                                           "relative_path TEXT NOT NULL,"
+                                           "parent_path TEXT NOT NULL,"
+                                           "parent_relative_path TEXT NOT NULL,"
+                                           "asset_type INTEGER NOT NULL,"
+                                           "size_bytes INTEGER NOT NULL,"
+                                           "modified_at TEXT NOT NULL,"
+                                           "is_readable INTEGER NOT NULL,"
+                                           "created_at TEXT NOT NULL,"
+                                           "PRIMARY KEY(session_id, path_key),"
+                                           "FOREIGN KEY(session_id) REFERENCES scan_session(id) ON DELETE CASCADE"
+                                           ");"),
+                            QStringLiteral("CREATE TABLE IF NOT EXISTS scan_stage_folder ("
+                                           "session_id INTEGER NOT NULL,"
+                                           "path_key TEXT NOT NULL,"
+                                           "name TEXT NOT NULL,"
+                                           "absolute_path TEXT NOT NULL,"
+                                           "relative_path TEXT NOT NULL,"
+                                           "parent_relative_path TEXT NOT NULL,"
+                                           "depth INTEGER NOT NULL,"
+                                           "file_count INTEGER NOT NULL DEFAULT 0,"
+                                           "direct_file_count INTEGER NOT NULL DEFAULT 0,"
+                                           "recursive_file_count INTEGER NOT NULL DEFAULT 0,"
+                                           "normalized_date TEXT NOT NULL DEFAULT '',"
+                                           "date_anchor TEXT NOT NULL DEFAULT '',"
+                                           "created_at TEXT NOT NULL,"
+                                           "updated_at TEXT NOT NULL,"
+                                           "PRIMARY KEY(session_id, path_key),"
+                                           "FOREIGN KEY(session_id) REFERENCES scan_session(id) ON DELETE CASCADE"
+                                           ");"),
+                            QStringLiteral("CREATE INDEX IF NOT EXISTS idx_scan_work_session_state ON scan_work_item(session_id, state, depth, id);"),
+                            QStringLiteral("CREATE INDEX IF NOT EXISTS idx_scan_stage_asset_parent ON scan_stage_asset(session_id, parent_relative_path);"),
+                            QStringLiteral("CREATE INDEX IF NOT EXISTS idx_scan_stage_folder_parent ON scan_stage_folder(session_id, parent_relative_path, depth);")
+                        },
+                        errorMessage);
 }
 
 int DatabaseManager::currentSchemaVersion(QSqlDatabase &db) const

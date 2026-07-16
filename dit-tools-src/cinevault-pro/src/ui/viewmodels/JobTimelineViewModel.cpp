@@ -6,6 +6,8 @@
 #include "shared/Formatters.h"
 #include "ui/models/JobListModel.h"
 
+#include <QTimer>
+
 namespace {
 bool hasAnalysisBatchSummary(const VideoAnalysisService *service)
 {
@@ -95,6 +97,28 @@ QString jobSummaryText(const QVector<Job> &jobs)
     return QStringLiteral("任务已全部处理完成。");
 }
 
+bool isBatchOwnedJob(const Job &job)
+{
+    return job.type == JobType::ContentAnalysis;
+}
+
+bool includeInFooter(const Job &job, bool hasAnalysisBatch)
+{
+    return !hasAnalysisBatch || !isBatchOwnedJob(job);
+}
+
+int activeJobCount(const QVector<Job> &jobs, bool hasAnalysisBatch)
+{
+    int count = 0;
+    for (const auto &job : jobs) {
+        if (includeInFooter(job, hasAnalysisBatch)
+            && (job.state == JobState::Running || job.state == JobState::Pending)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 QString thumbnailStatusLabel(ThumbnailStatus status)
 {
     switch (status) {
@@ -113,9 +137,9 @@ JobTimelineViewModel::JobTimelineViewModel(JobService *jobService, VideoAnalysis
     , m_videoAnalysisService(videoAnalysisService)
     , m_model(new JobListModel(this))
 {
-    connect(m_jobService->engine(), &JobEngine::jobsChanged, this, &JobTimelineViewModel::reload);
+    connect(m_jobService->engine(), &JobEngine::jobsChanged, this, &JobTimelineViewModel::scheduleReload);
     if (m_videoAnalysisService) {
-        connect(m_videoAnalysisService, &VideoAnalysisService::analysisBatchChanged, this, &JobTimelineViewModel::stateChanged);
+        connect(m_videoAnalysisService, &VideoAnalysisService::analysisBatchChanged, this, &JobTimelineViewModel::scheduleReload);
     }
 }
 
@@ -127,6 +151,122 @@ JobListModel *JobTimelineViewModel::model() const
 QVariantList JobTimelineViewModel::timelineItems() const
 {
     return m_timelineItems;
+}
+
+bool JobTimelineViewModel::footerHasTasks() const
+{
+    return hasAnalysisBatchSummary(m_videoAnalysisService) || !m_jobs.isEmpty();
+}
+
+int JobTimelineViewModel::footerProgress() const
+{
+    const auto hasAnalysisBatch = hasAnalysisBatchSummary(m_videoAnalysisService);
+    qint64 progressSum = 0;
+    qint64 taskCount = 0;
+    if (hasAnalysisBatch) {
+        const auto batchTotal = m_videoAnalysisService->batchTotalCount();
+        if (batchTotal > 0) {
+            progressSum += batchTotal * m_videoAnalysisService->batchProgressPercent();
+            taskCount += batchTotal;
+        }
+    }
+    for (const auto &job : m_jobs) {
+        if (!includeInFooter(job, hasAnalysisBatch)
+            || (job.state != JobState::Running && job.state != JobState::Pending)) {
+            continue;
+        }
+        progressSum += qBound<qint64>(qint64{0}, job.progress, qint64{100});
+        ++taskCount;
+    }
+    if (taskCount > 0) {
+        return static_cast<int>(progressSum / taskCount);
+    }
+    if (hasAnalysisBatch) {
+        return static_cast<int>(m_videoAnalysisService->batchProgressPercent());
+    }
+    return m_jobs.isEmpty() ? 0 : aggregateJobProgress(m_jobs);
+}
+
+QString JobTimelineViewModel::footerProgressText() const
+{
+    if (!footerHasTasks()) {
+        return QStringLiteral("暂无后台任务");
+    }
+    const auto active = activeJobCount(m_jobs, hasAnalysisBatchSummary(m_videoAnalysisService));
+    const auto batchTasks = hasAnalysisBatchSummary(m_videoAnalysisService)
+        ? m_videoAnalysisService->batchTotalCount()
+        : 0;
+    const auto total = active + batchTasks;
+    return total > 0
+        ? QStringLiteral("%1 项任务 · %2%").arg(total).arg(footerProgress())
+        : QStringLiteral("最近任务 · %1%").arg(footerProgress());
+}
+
+QString JobTimelineViewModel::footerSummary() const
+{
+    if (!footerHasTasks()) {
+        return QStringLiteral("当前没有后台任务。添加素材源后会在此显示索引与解析进度。");
+    }
+    const auto running = footerRunningCount();
+    const auto pending = footerPendingCount();
+    if (running > 0) {
+        const auto label = hasAnalysisBatchSummary(m_videoAnalysisService)
+            ? m_videoAnalysisService->batchCurrentLabel()
+            : batchCurrentLabel();
+        return QStringLiteral("正在处理：%1 · 运行 %2 项，等待 %3 项")
+            .arg(label.trimmed().isEmpty() ? QStringLiteral("后台任务") : label)
+            .arg(running)
+            .arg(pending);
+    }
+    if (pending > 0) {
+        return QStringLiteral("当前没有运行中的任务，%1 项任务正在等待处理。").arg(pending);
+    }
+    if (footerFailedCount() > 0) {
+        return QStringLiteral("任务已停止，%1 项需要在任务页查看原因。").arg(footerFailedCount());
+    }
+    return QStringLiteral("所有任务已完成，可继续添加素材或发起解析。");
+}
+
+int JobTimelineViewModel::footerRunningCount() const
+{
+    const auto hasAnalysisBatch = hasAnalysisBatchSummary(m_videoAnalysisService);
+    int running = 0;
+    for (const auto &job : m_jobs) {
+        if (includeInFooter(job, hasAnalysisBatch) && job.state == JobState::Running) {
+            ++running;
+        }
+    }
+    if (hasAnalysisBatch) {
+        running += qMax(0,
+                         m_videoAnalysisService->batchTotalCount()
+                             - m_videoAnalysisService->batchFinishedCount()
+                             - m_videoAnalysisService->batchQueuedCount());
+    }
+    return running;
+}
+
+int JobTimelineViewModel::footerPendingCount() const
+{
+    const auto hasAnalysisBatch = hasAnalysisBatchSummary(m_videoAnalysisService);
+    int pending = 0;
+    for (const auto &job : m_jobs) {
+        if (includeInFooter(job, hasAnalysisBatch) && job.state == JobState::Pending) {
+            ++pending;
+        }
+    }
+    return pending + (hasAnalysisBatch ? m_videoAnalysisService->batchQueuedCount() : 0);
+}
+
+int JobTimelineViewModel::footerFailedCount() const
+{
+    const auto hasAnalysisBatch = hasAnalysisBatchSummary(m_videoAnalysisService);
+    int failed = 0;
+    for (const auto &job : m_jobs) {
+        if (includeInFooter(job, hasAnalysisBatch) && job.state == JobState::Failed) {
+            ++failed;
+        }
+    }
+    return failed + (hasAnalysisBatch ? m_videoAnalysisService->batchFailedCount() : 0);
 }
 
 bool JobTimelineViewModel::hasBatchSummary() const
@@ -403,6 +543,18 @@ void JobTimelineViewModel::reload()
     }
     emit timelineChanged();
     emit stateChanged();
+}
+
+void JobTimelineViewModel::scheduleReload()
+{
+    if (m_reloadScheduled) {
+        return;
+    }
+    m_reloadScheduled = true;
+    QTimer::singleShot(120, this, [this]() {
+        m_reloadScheduled = false;
+        reload();
+    });
 }
 
 void JobTimelineViewModel::selectJob(qint64 jobId)

@@ -86,6 +86,7 @@ private:
     QProcess *m_installerProcess = nullptr;
     QString m_installProgressFilePath;
     qint64 m_waitStartedAtMs = 0;
+    qint64 m_lastWaitDetailSecond = -1;
     int m_lastPercentage = 0;
     bool m_started = false;
     bool m_finished = false;

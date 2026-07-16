@@ -88,6 +88,50 @@ private slots:
         QCOMPARE(outcome.protection, SearchRecallProtection::None);
         QCOMPARE(outcome.result.assets.size(), 1);
     }
+
+    void strongBaselineEvidenceOutranksWeakEnhancedOnlyHit()
+    {
+        MaterialSearchResult baseline;
+        baseline.parsedQuery.originalText = QStringLiteral("城市夜景");
+        auto direct = asset(QStringLiteral("direct"));
+        direct.searchReasons = {QStringLiteral("查询关键词完整覆盖")};
+        baseline.assets = {direct};
+
+        MaterialSearchResult enhanced = baseline;
+        auto semanticOnly = asset(QStringLiteral("semantic-only"));
+        semanticOnly.searchReasons = {QStringLiteral("本地语义命中")};
+        enhanced.assets = {semanticOnly};
+
+        const auto outcome = SearchResultFusion::preserveBaselineRecall(baseline, enhanced);
+
+        QCOMPARE(outcome.result.assets.first().videoKey, QStringLiteral("direct"));
+        QCOMPARE(outcome.protection, SearchRecallProtection::BaselineHitsAdded);
+    }
+
+    void candidateFoundByBothPassesKeepsAllEvidence()
+    {
+        MaterialSearchResult baseline;
+        baseline.parsedQuery.originalText = QStringLiteral("红色牛仔裤");
+        auto local = asset(QStringLiteral("shared"));
+        local.searchReasons = {QStringLiteral("关键词或视觉文本命中")};
+        baseline.assets = {local};
+
+        MaterialSearchResult enhanced = baseline;
+        auto model = asset(QStringLiteral("shared"));
+        model.searchReasons = {QStringLiteral("同一视觉对象属性已验证")};
+        enhanced.assets = {model};
+
+        const auto outcome = SearchResultFusion::preserveBaselineRecall(baseline, enhanced);
+
+        QCOMPARE(outcome.preservedHitCount, qsizetype{0});
+        QCOMPARE(outcome.sharedHitCount, qsizetype{1});
+        QCOMPARE(outcome.enhancedOnlyHitCount, qsizetype{0});
+        QCOMPARE(outcome.result.assets.size(), 1);
+        QVERIFY(outcome.result.assets.first().searchReasons.contains(
+            QStringLiteral("关键词或视觉文本命中")));
+        QVERIFY(outcome.result.assets.first().searchReasons.contains(
+            QStringLiteral("同一视觉对象属性已验证")));
+    }
 };
 
 QTEST_GUILESS_MAIN(SearchResultFusionTest)

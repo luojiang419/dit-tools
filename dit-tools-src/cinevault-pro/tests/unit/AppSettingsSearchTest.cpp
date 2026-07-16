@@ -32,7 +32,7 @@ private slots:
         AppSettings settings;
 
         QVERIFY(settings.searchAssistantEnabled());
-        QCOMPARE(settings.searchAssistantAutoUnloadMinutes(), 60);
+        QCOMPARE(settings.searchAssistantAutoUnloadMinutes(), 30);
         QVERIFY(settings.quickSearchEnabled());
         QCOMPARE(settings.quickSearchShortcut(), QStringLiteral("Alt+Space"));
         QVERIFY(!settings.hasQuickSearchWindowPosition());

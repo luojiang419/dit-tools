@@ -169,6 +169,57 @@ double termCoverageScore(const QStringList &terms, const QString &text)
         : static_cast<double>(matched) / static_cast<double>(uniqueTerms.size());
 }
 
+QVector<SearchLexicalGroup> requiredLexicalGroups(const ParsedMaterialQuery &query)
+{
+    QVector<SearchLexicalGroup> groups;
+    for (const auto &group : query.lexicalGroups) {
+        if (group.mode == SearchLexicalGroupMode::Required && !group.alternatives.isEmpty()) {
+            groups.append(group);
+        }
+    }
+    return groups;
+}
+
+QString groupedFtsQuery(const ParsedMaterialQuery &query,
+                        const SearchEngine &engine)
+{
+    const auto groups = requiredLexicalGroups(query);
+    if (groups.isEmpty()) {
+        return engine.buildFtsQuery(query.lexicalTerms.join(QLatin1Char(' ')));
+    }
+    QStringList predicates;
+    for (const auto &group : groups) {
+        const auto groupQuery = engine.buildFtsQuery(
+            group.alternatives.join(QLatin1Char(' ')));
+        if (!groupQuery.isEmpty()) {
+            predicates.append(QStringLiteral("(%1)").arg(groupQuery));
+        }
+    }
+    return predicates.join(QStringLiteral(" AND "));
+}
+
+double lexicalGroupCoverageScore(const QVector<SearchLexicalGroup> &groups,
+                                 const QString &text)
+{
+    const auto normalizedText = text.toCaseFolded();
+    int considered = 0;
+    int matched = 0;
+    for (const auto &group : groups) {
+        if (group.mode == SearchLexicalGroupMode::Excluded || group.alternatives.isEmpty()) {
+            continue;
+        }
+        ++considered;
+        if (std::any_of(group.alternatives.cbegin(),
+                        group.alternatives.cend(),
+                        [&normalizedText](const QString &term) {
+            return normalizedText.contains(term.simplified().toCaseFolded());
+        })) {
+            ++matched;
+        }
+    }
+    return considered <= 0 ? 0.0 : static_cast<double>(matched) / considered;
+}
+
 void mergeHit(QHash<QString, HybridSearchHit> *hits, HybridSearchHit hit)
 {
     const auto key = candidateId(hit.documentType, hit.entityKey);
@@ -185,6 +236,7 @@ void mergeHit(QHash<QString, HybridSearchHit> *hits, HybridSearchHit hit)
     existing->dateScore = std::max(existing->dateScore, hit.dateScore);
     existing->typeScore = std::max(existing->typeScore, hit.typeScore);
     existing->semanticScore = std::max(existing->semanticScore, hit.semanticScore);
+    existing->excludedScore = std::max(existing->excludedScore, hit.excludedScore);
     if (hit.dateConfidence > existing->dateConfidence) {
         existing->dateConfidence = hit.dateConfidence;
         existing->dateValue = hit.dateValue;
@@ -495,10 +547,10 @@ void appendFolderAssetCriteria(QString *sql,
 
 void appendAssetLexicalPredicate(QString *sql,
                                  QVariantList *binds,
-                                 const QStringList &terms,
+                                 const ParsedMaterialQuery &parsed,
                                  const SearchEngine &engine)
 {
-    if (terms.isEmpty()) {
+    if (parsed.lexicalTerms.isEmpty()) {
         return;
     }
     const QStringList directExpressions{
@@ -513,8 +565,7 @@ void appendAssetLexicalPredicate(QString *sql,
         QStringLiteral("g.project_name"),
         QStringLiteral("g.source_root_name")
     };
-    QStringList termPredicates;
-    for (const auto &term : terms) {
+    const auto predicateForTerm = [&](const QString &term) {
         const auto pattern = engine.buildLikePattern(term);
         QStringList predicates;
         for (const auto &expression : directExpressions) {
@@ -539,17 +590,34 @@ void appendAssetLexicalPredicate(QString *sql,
         for (int index = 0; index < 7; ++index) {
             binds->append(pattern);
         }
-        termPredicates.append(QStringLiteral("(%1)").arg(predicates.join(QStringLiteral(" OR "))));
+        return QStringLiteral("(%1)").arg(predicates.join(QStringLiteral(" OR ")));
+    };
+    const auto requiredGroups = requiredLexicalGroups(parsed);
+    QStringList termPredicates;
+    if (!requiredGroups.isEmpty()) {
+        for (const auto &group : requiredGroups) {
+            QStringList alternatives;
+            for (const auto &term : group.alternatives) {
+                alternatives.append(predicateForTerm(term));
+            }
+            termPredicates.append(QStringLiteral("(%1)")
+                                      .arg(alternatives.join(QStringLiteral(" OR "))));
+        }
+        sql->append(QStringLiteral(" AND (%1)").arg(termPredicates.join(QStringLiteral(" AND "))));
+        return;
+    }
+    for (const auto &term : parsed.lexicalTerms) {
+        termPredicates.append(predicateForTerm(term));
     }
     sql->append(QStringLiteral(" AND (%1)").arg(termPredicates.join(QStringLiteral(" OR "))));
 }
 
 void appendFrameLexicalPredicate(QString *sql,
                                  QVariantList *binds,
-                                 const QStringList &terms,
+                                 const ParsedMaterialQuery &parsed,
                                  const SearchEngine &engine)
 {
-    if (terms.isEmpty()) {
+    if (parsed.lexicalTerms.isEmpty()) {
         return;
     }
     const QStringList expressions{
@@ -561,15 +629,31 @@ void appendFrameLexicalPredicate(QString *sql,
         QStringLiteral("COALESCE(f.entities_json, '')"),
         QStringLiteral("COALESCE(f.ocr_text, '')")
     };
-    QStringList termPredicates;
-    for (const auto &term : terms) {
+    const auto predicateForTerm = [&](const QString &term) {
         const auto pattern = engine.buildLikePattern(term);
         QStringList predicates;
         for (const auto &expression : expressions) {
             predicates.append(QStringLiteral("%1 LIKE ? ESCAPE '\\'").arg(expression));
             binds->append(pattern);
         }
-        termPredicates.append(QStringLiteral("(%1)").arg(predicates.join(QStringLiteral(" OR "))));
+        return QStringLiteral("(%1)").arg(predicates.join(QStringLiteral(" OR ")));
+    };
+    const auto requiredGroups = requiredLexicalGroups(parsed);
+    QStringList termPredicates;
+    if (!requiredGroups.isEmpty()) {
+        for (const auto &group : requiredGroups) {
+            QStringList alternatives;
+            for (const auto &term : group.alternatives) {
+                alternatives.append(predicateForTerm(term));
+            }
+            termPredicates.append(QStringLiteral("(%1)")
+                                      .arg(alternatives.join(QStringLiteral(" OR "))));
+        }
+        sql->append(QStringLiteral(" AND (%1)").arg(termPredicates.join(QStringLiteral(" AND "))));
+        return;
+    }
+    for (const auto &term : parsed.lexicalTerms) {
+        termPredicates.append(predicateForTerm(term));
     }
     sql->append(QStringLiteral(" AND (%1)").arg(termPredicates.join(QStringLiteral(" OR "))));
 }
@@ -588,10 +672,10 @@ void appendFrameOcrConstraint(QString *sql,
 
 void appendFolderLexicalPredicate(QString *sql,
                                   QVariantList *binds,
-                                  const QStringList &terms,
+                                  const ParsedMaterialQuery &parsed,
                                   const SearchEngine &engine)
 {
-    if (terms.isEmpty()) {
+    if (parsed.lexicalTerms.isEmpty()) {
         return;
     }
     const QStringList expressions{
@@ -602,32 +686,46 @@ void appendFolderLexicalPredicate(QString *sql,
         QStringLiteral("f.project_name"),
         QStringLiteral("f.source_root_name")
     };
-    QStringList termPredicates;
-    for (const auto &term : terms) {
+    const auto predicateForTerm = [&](const QString &term) {
         const auto pattern = engine.buildLikePattern(term);
         QStringList predicates;
         for (const auto &expression : expressions) {
             predicates.append(QStringLiteral("%1 LIKE ? ESCAPE '\\'").arg(expression));
             binds->append(pattern);
         }
-        termPredicates.append(QStringLiteral("(%1)").arg(predicates.join(QStringLiteral(" OR "))));
+        return QStringLiteral("(%1)").arg(predicates.join(QStringLiteral(" OR ")));
+    };
+    const auto requiredGroups = requiredLexicalGroups(parsed);
+    QStringList termPredicates;
+    if (!requiredGroups.isEmpty()) {
+        for (const auto &group : requiredGroups) {
+            QStringList alternatives;
+            for (const auto &term : group.alternatives) {
+                alternatives.append(predicateForTerm(term));
+            }
+            termPredicates.append(QStringLiteral("(%1)")
+                                      .arg(alternatives.join(QStringLiteral(" OR "))));
+        }
+        sql->append(QStringLiteral(" AND (%1)").arg(termPredicates.join(QStringLiteral(" AND "))));
+        return;
+    }
+    for (const auto &term : parsed.lexicalTerms) {
+        termPredicates.append(predicateForTerm(term));
     }
     sql->append(QStringLiteral(" AND (%1)").arg(termPredicates.join(QStringLiteral(" OR "))));
 }
 
 void appendFolderAssetLexicalPredicate(QString *sql,
                                        QVariantList *binds,
-                                       const QStringList &terms,
                                        const SearchEngine &engine,
                                        const MaterialSearchScope &scope,
                                        const ParsedMaterialQuery &parsed)
 {
-    if (terms.isEmpty()) {
+    if (parsed.lexicalTerms.isEmpty()) {
         return;
     }
     QVariantList predicateBinds;
-    QStringList termPredicates;
-    for (const auto &term : terms) {
+    const auto predicateForTerm = [&](const QString &term) {
         const auto pattern = engine.buildLikePattern(term);
         const QStringList predicates{
             QStringLiteral("COALESCE(gr.search_text, '') LIKE ? ESCAPE '\\'"),
@@ -647,9 +745,27 @@ void appendFolderAssetLexicalPredicate(QString *sql,
                            "COALESCE(gvfa.entities_json, '') LIKE ? ESCAPE '\\' OR "
                            "COALESCE(gvfa.ocr_text, '') LIKE ? ESCAPE '\\'))")
         };
-        termPredicates.append(QStringLiteral("(%1)").arg(predicates.join(QStringLiteral(" OR "))));
         for (int index = 0; index < 14; ++index) {
             predicateBinds.append(pattern);
+        }
+        return QStringLiteral("(%1)").arg(predicates.join(QStringLiteral(" OR ")));
+    };
+    const auto requiredGroups = requiredLexicalGroups(parsed);
+    QStringList termPredicates;
+    auto joiner = QStringLiteral(" OR ");
+    if (!requiredGroups.isEmpty()) {
+        joiner = QStringLiteral(" AND ");
+        for (const auto &group : requiredGroups) {
+            QStringList alternatives;
+            for (const auto &term : group.alternatives) {
+                alternatives.append(predicateForTerm(term));
+            }
+            termPredicates.append(QStringLiteral("(%1)")
+                                      .arg(alternatives.join(QStringLiteral(" OR "))));
+        }
+    } else {
+        for (const auto &term : parsed.lexicalTerms) {
+            termPredicates.append(predicateForTerm(term));
         }
     }
     QString predicate = QStringLiteral(
@@ -671,7 +787,7 @@ void appendFolderAssetLexicalPredicate(QString *sql,
                              QStringLiteral("ga"),
                              parsed.ocrText);
     predicate += QStringLiteral(" AND (%1))")
-                     .arg(termPredicates.join(QStringLiteral(" OR ")));
+                     .arg(termPredicates.join(joiner));
     sql->append(predicate);
     binds->append(structuralBinds);
     binds->append(predicateBinds);
@@ -744,7 +860,7 @@ HybridSearchResult SearchEngine::searchMaterials(const QString &queryText,
         ftsQuery.prepare(QStringLiteral(
             "SELECT video_key FROM video_search_fts WHERE video_search_fts MATCH ? "
             "ORDER BY bm25(video_search_fts) LIMIT ?"));
-        ftsQuery.addBindValue(buildFtsQuery(result.parsedQuery.lexicalTerms.join(QLatin1Char(' '))));
+        ftsQuery.addBindValue(groupedFtsQuery(result.parsedQuery, *this));
         ftsQuery.addBindValue(lexicalCandidateLimit);
         if (ftsQuery.exec()) {
             qsizetype rank = 0;
@@ -782,7 +898,7 @@ HybridSearchResult SearchEngine::searchMaterials(const QString &queryText,
         if (requireLexical) {
             appendAssetLexicalPredicate(&sql,
                                         &binds,
-                                        result.parsedQuery.lexicalTerms,
+                                        result.parsedQuery,
                                         *this);
         }
         sql += QStringLiteral(" ORDER BY g.video_key LIMIT ?");
@@ -820,13 +936,24 @@ HybridSearchResult SearchEngine::searchMaterials(const QString &queryText,
                 QStringList{query.value(9).toString(),
                             query.value(10).toString(),
                             query.value(11).toString()}.join(QLatin1Char(' ')));
-            if (contentCoverage > 0.0) {
+            const auto assetSearchable = QStringList{
+                query.value(1).toString(), query.value(2).toString(),
+                query.value(3).toString(), query.value(9).toString(),
+                query.value(10).toString(), query.value(11).toString()
+            }.join(QLatin1Char(' '));
+            const auto groupCoverage = lexicalGroupCoverageScore(
+                result.parsedQuery.lexicalGroups,
+                assetSearchable);
+            const auto effectiveCoverage = std::max(contentCoverage, groupCoverage);
+            if (effectiveCoverage > 0.0) {
                 hit.lexicalScore = std::max(hit.lexicalScore,
-                                            0.4 + (0.6 * contentCoverage));
-                if (contentCoverage >= 0.999) {
+                                            0.4 + (0.6 * effectiveCoverage));
+                if (effectiveCoverage >= 0.999) {
                     hit.reasons.append(QStringLiteral("查询关键词完整覆盖"));
                 }
             }
+            hit.excludedScore = termCoverageScore(result.parsedQuery.excludedTerms,
+                                                  assetSearchable);
             hit.lexicalScore = std::max(hit.lexicalScore, ftsScores.value(hit.entityKey));
             if (requireLexical && !result.parsedQuery.lexicalTerms.isEmpty()) {
                 hit.reasons.append(QStringLiteral("关键词或视觉文本命中"));
@@ -888,14 +1015,13 @@ HybridSearchResult SearchEngine::searchMaterials(const QString &queryText,
             if (result.parsedQuery.folderByAssetCriteria) {
                 appendFolderAssetLexicalPredicate(&sql,
                                                   &binds,
-                                                  result.parsedQuery.lexicalTerms,
                                                   *this,
                                                   scope,
                                                   result.parsedQuery);
             } else {
                 appendFolderLexicalPredicate(&sql,
                                              &binds,
-                                             result.parsedQuery.lexicalTerms,
+                                             result.parsedQuery,
                                              *this);
             }
         }
@@ -925,6 +1051,19 @@ HybridSearchResult SearchEngine::searchMaterials(const QString &queryText,
                                               query.value(2).toString() + QLatin1Char(' ')
                                                   + query.value(3).toString(),
                                               &pathScore);
+            const auto folderSearchable = QStringList{
+                query.value(1).toString(), query.value(2).toString(),
+                query.value(3).toString()
+            }.join(QLatin1Char(' '));
+            const auto groupCoverage = lexicalGroupCoverageScore(
+                result.parsedQuery.lexicalGroups,
+                folderSearchable);
+            if (groupCoverage > 0.0) {
+                hit.lexicalScore = std::max(hit.lexicalScore,
+                                            0.4 + (0.6 * groupCoverage));
+            }
+            hit.excludedScore = termCoverageScore(result.parsedQuery.excludedTerms,
+                                                  folderSearchable);
             if (requireLexical && !result.parsedQuery.lexicalTerms.isEmpty()) {
                 hit.lexicalScore = std::max(hit.lexicalScore, 0.6);
                 hit.reasons.append(result.parsedQuery.folderByAssetCriteria
@@ -989,7 +1128,7 @@ HybridSearchResult SearchEngine::searchMaterials(const QString &queryText,
         if (requireLexical) {
             appendFrameLexicalPredicate(&sql,
                                         &binds,
-                                        result.parsedQuery.lexicalTerms,
+                                        result.parsedQuery,
                                         *this);
         }
         sql += QStringLiteral(" ORDER BY g.video_key, f.frame_number LIMIT ?");
@@ -1034,6 +1173,15 @@ HybridSearchResult SearchEngine::searchMaterials(const QString &queryText,
                                                   + query.value(12).toString() + QLatin1Char(' ')
                                                   + query.value(13).toString(),
                                               &pathScore);
+            const auto groupCoverage = lexicalGroupCoverageScore(
+                result.parsedQuery.lexicalGroups,
+                frameText);
+            if (groupCoverage > 0.0) {
+                hit.lexicalScore = std::max(hit.lexicalScore,
+                                            0.4 + (0.6 * groupCoverage));
+            }
+            hit.excludedScore = termCoverageScore(result.parsedQuery.excludedTerms,
+                                                  frameText);
             if (requireLexical && !result.parsedQuery.lexicalTerms.isEmpty()) {
                 hit.lexicalScore = std::max(hit.lexicalScore, 0.68);
                 hit.reasons.append(QStringLiteral("帧视觉事实或文字命中"));
@@ -1087,26 +1235,44 @@ HybridSearchResult SearchEngine::searchMaterials(const QString &queryText,
         appendFrames({}, hasLexicalTerms, {});
     }
 
-    if (m_semanticSearchProvider && !result.parsedQuery.semanticText.trimmed().isEmpty()) {
-        QString semanticError;
-        const auto semanticHits = m_semanticSearchProvider->search(
-            result.parsedQuery.semanticText,
-            std::min<qsizetype>(kSemanticCandidateLimit, lexicalCandidateLimit),
-            &semanticError);
-        result.semanticSearchAvailable = semanticError.isEmpty()
-            && m_semanticSearchProvider->isReady();
-        if (!semanticError.isEmpty()) {
-            appendWarning(&result.warningMessage,
-                          QStringLiteral("语义搜索不可用：%1").arg(semanticError));
-        } else if (!semanticHits.isEmpty()) {
-            QStringList documentKeys;
-            documentKeys.reserve(semanticHits.size());
-            QHash<QString, double> similarities;
-            for (const auto &hit : semanticHits) {
-                documentKeys.append(hit.documentKey);
-                similarities.insert(hit.documentKey,
-                                    std::clamp((hit.similarity + 1.0) / 2.0, 0.0, 1.0));
+    if (m_semanticSearchProvider
+        && (!result.parsedQuery.semanticText.trimmed().isEmpty()
+            || !result.parsedQuery.semanticVariants.isEmpty())) {
+        QHash<QString, double> similarities;
+        bool semanticRequestSucceeded = false;
+        const auto collectSemanticHits = [&](const QString &text, double weight) {
+            if (text.trimmed().isEmpty()) {
+                return;
             }
+            QString semanticError;
+            const auto hits = m_semanticSearchProvider->search(
+                text,
+                std::min<qsizetype>(kSemanticCandidateLimit, lexicalCandidateLimit),
+                &semanticError);
+            if (!semanticError.isEmpty()) {
+                appendWarning(&result.warningMessage,
+                              QStringLiteral("语义搜索不可用：%1").arg(semanticError));
+                return;
+            }
+            semanticRequestSucceeded = true;
+            for (const auto &hit : hits) {
+                const auto score = std::clamp((hit.similarity + 1.0) / 2.0,
+                                              0.0,
+                                              1.0)
+                    * std::clamp(weight, 0.1, 1.0);
+                similarities[hit.documentKey] = std::max(
+                    similarities.value(hit.documentKey),
+                    score);
+            }
+        };
+        collectSemanticHits(result.parsedQuery.semanticText, 1.0);
+        for (const auto &variant : result.parsedQuery.semanticVariants) {
+            collectSemanticHits(variant.text, std::min(variant.weight, 0.85));
+        }
+        result.semanticSearchAvailable = semanticRequestSucceeded
+            && m_semanticSearchProvider->isReady();
+        if (!similarities.isEmpty()) {
+            QStringList documentKeys = similarities.keys();
 
             QHash<QString, SemanticDocumentMetadata> metadata;
             QSqlQuery metadataQuery(db);
@@ -1260,7 +1426,8 @@ HybridSearchResult SearchEngine::searchMaterials(const QString &queryText,
             + (0.16 * hit.pathScore)
             + (0.30 * hit.semanticScore)
             + (0.07 * hit.dateScore)
-            + (0.05 * hit.typeScore);
+            + (0.05 * hit.typeScore)
+            - (0.20 * hit.excludedScore);
         if (result.parsedQuery.folderIntent
             && hit.documentType == SearchDocumentType::Folder) {
             hit.score += 0.08;
@@ -1272,6 +1439,9 @@ HybridSearchResult SearchEngine::searchMaterials(const QString &queryText,
             if (!hit.reasons.contains(reason)) {
                 hit.reasons.append(reason);
             }
+        }
+        if (hit.excludedScore > 0.0) {
+            hit.reasons.append(QStringLiteral("命中用户明确排除项，已降低排序"));
         }
         hit.confidence = searchConfidence(hit, result.parsedQuery, scope);
         hit.score = std::clamp(hit.score, 0.0, 1.0);

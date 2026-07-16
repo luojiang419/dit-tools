@@ -58,6 +58,7 @@
 
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QCoreApplication>
 
 AppContext::AppContext(QObject *parent)
     : QObject(parent)
@@ -157,6 +158,7 @@ AppContext::AppContext(QObject *parent)
     connect(m_projectService, &ProjectService::projectChanged, m_inspectorViewModel, &InspectorViewModel::clear);
     connect(m_projectService, &ProjectService::projectChanged, m_materialCatalogSyncService, &MaterialCatalogSyncService::syncCurrentProject);
     connect(m_projectService, &ProjectService::projectChanged, m_mediaTaskService, &MediaTaskService::recoverStaleThumbnails);
+    connect(m_projectService, &ProjectService::projectChanged, m_importService, &ImportService::resumeInterruptedScans);
     connect(m_projectService, &ProjectService::projectChanged, m_importService, &ImportService::rescanLegacySourceRoots);
     connect(m_importService, &ImportService::catalogChanged, m_sourceRailViewModel, &SourceRailViewModel::reload);
     connect(m_importService, &ImportService::catalogChanged, m_libraryWorkspaceViewModel, &LibraryWorkspaceViewModel::reload);
@@ -195,10 +197,14 @@ AppContext::AppContext(QObject *parent)
             &MaterialCenterViewModel::quickSearchNavigationRequested,
             m_shellViewModel,
             &ShellViewModel::enterMaterialCenterFromQuickSearch);
+    connect(m_materialCenterViewModel,
+            &MaterialCenterViewModel::searchAssistantWarmupRequested,
+            m_searchAssistantLifecycleController,
+            &SearchAssistantLifecycleController::recordSearchIntent);
     connect(m_quickSearchController,
             &QuickSearchController::quickSearchRequested,
             m_searchAssistantLifecycleController,
-            &SearchAssistantLifecycleController::recordUserActivity);
+            &SearchAssistantLifecycleController::recordSearchIntent);
     connect(m_quickSearchController,
             &QuickSearchController::showMainWindowRequested,
             m_searchAssistantLifecycleController,
@@ -258,6 +264,11 @@ void AppContext::startInteractiveServices()
 #if !CINEVAULT_BUILD_MINIMAL_GUI
     if (m_searchAssistantLifecycleController) {
         m_searchAssistantLifecycleController->start();
+        if (QCoreApplication::arguments().contains(
+                QStringLiteral("--search-assistant-startup-probe"),
+                Qt::CaseInsensitive)) {
+            m_searchAssistantLifecycleController->recordSearchIntent();
+        }
     }
     if (m_backgroundMaintenanceCoordinator) {
         m_backgroundMaintenanceCoordinator->start();

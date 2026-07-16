@@ -2,13 +2,19 @@
 
 #include <QApplication>
 #include <QCloseEvent>
+#include <QDateTime>
+#include <QEasingCurve>
 #include <QFrame>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QProgressBar>
+#include <QPlainTextEdit>
 #include <QScreen>
+#include <QScrollBar>
+#include <QTextDocument>
 #include <QTimer>
+#include <QVariantAnimation>
 #include <QVBoxLayout>
 
 namespace {
@@ -36,14 +42,16 @@ UpdaterWindow::UpdaterWindow(const UpdaterInstallSession &session, QWidget *pare
 {
     setWindowTitle(QStringLiteral("影资管家正在更新"));
     setWindowIcon(QApplication::windowIcon());
-    resize(760, 500);
-    setMinimumSize(640, 460);
+    resize(760, 610);
+    setMinimumSize(640, 560);
     setAttribute(Qt::WA_DeleteOnClose, false);
     setStyleSheet(QStringLiteral(
         "QWidget { background: #101418; color: #ffffff; font-family: 'Microsoft YaHei UI'; }"
         "QFrame#panel { background: #171b20; border: 1px solid #30343a; border-radius: 10px; }"
         "QProgressBar { background: #20242a; border: 1px solid #30343a; border-radius: 4px; height: 8px; }"
-        "QProgressBar::chunk { background: #c5cbd3; border-radius: 3px; }"));
+        "QProgressBar::chunk { background: #c5cbd3; border-radius: 3px; }"
+        "QPlainTextEdit { background: #11151a; color: #b8c0ca; border: 1px solid #30343a; "
+        "border-radius: 6px; padding: 8px; font-family: 'Consolas', 'Microsoft YaHei UI'; font-size: 12px; }"));
 
     auto *outerLayout = new QVBoxLayout(this);
     outerLayout->setContentsMargins(24, 24, 24, 24);
@@ -124,6 +132,20 @@ UpdaterWindow::UpdaterWindow(const UpdaterInstallSession &session, QWidget *pare
     m_progressBar->setTextVisible(false);
     panelLayout->addWidget(m_progressBar);
 
+    auto *detailTitleLabel = new QLabel(QStringLiteral("更新详情"), panel);
+    detailTitleLabel->setStyleSheet(QStringLiteral(
+        "color: #b4bac2; font-size: 13px; font-weight: 700;"));
+    panelLayout->addWidget(detailTitleLabel);
+
+    m_detailView = new QPlainTextEdit(panel);
+    m_detailView->setObjectName(QStringLiteral("updateDetailView"));
+    m_detailView->setReadOnly(true);
+    m_detailView->setUndoRedoEnabled(false);
+    m_detailView->document()->setMaximumBlockCount(120);
+    m_detailView->setMinimumHeight(120);
+    m_detailView->setPlaceholderText(QStringLiteral("更新步骤和安装器实际进度会显示在这里。"));
+    panelLayout->addWidget(m_detailView);
+
     panelLayout->addStretch(1);
     m_footerLabel = new QLabel(
         QStringLiteral("请勿关闭该窗口，安装过程会自动完成并重新打开影资管家。"), panel);
@@ -132,6 +154,13 @@ UpdaterWindow::UpdaterWindow(const UpdaterInstallSession &session, QWidget *pare
     panelLayout->addWidget(m_footerLabel);
 
     updateStepChips(0, QString::fromLatin1(kNeutralAccent));
+
+    m_progressAnimation = new QVariantAnimation(this);
+    m_progressAnimation->setEasingCurve(QEasingCurve::OutCubic);
+    connect(m_progressAnimation, &QVariantAnimation::valueChanged, this,
+            [this](const QVariant &value) {
+        setDisplayedPercentage(value.toInt());
+    });
 
     connect(m_runner, &UpdaterSessionRunner::progressChanged,
             this, &UpdaterWindow::applyProgress);
@@ -176,21 +205,20 @@ void UpdaterWindow::applyProgress(const UpdaterProgressEvent &event)
     m_messageLabel->setText(event.message);
     m_substepLabel->setText(event.substep);
     m_substepLabel->setVisible(!event.substep.trimmed().isEmpty());
-    m_progressBar->setValue(event.percentage);
-    m_percentageLabel->setText(QStringLiteral("%1%").arg(event.percentage));
+    appendUpdateDetail(event);
+    animatePercentageTo(event.percentage, event.isError);
     updateStepChips(event.stepIndex, accent);
 
     if (event.isError) {
         m_titleLabel->setText(QStringLiteral("更新失败"));
         m_iconLabel->setText(QStringLiteral("!"));
         m_footerLabel->setText(QStringLiteral("本次自动更新已停止，安装包和会话日志仍保留在更新目录中。"));
-        m_percentageLabel->setText(QStringLiteral("%1% · 已停止").arg(event.percentage));
+        m_percentageLabel->setText(QStringLiteral("%1% · 已停止").arg(m_displayedPercentage));
     } else if (event.isSuccess) {
         m_titleLabel->setText(QStringLiteral("更新完成"));
         m_iconLabel->setText(QStringLiteral("✓"));
         m_footerLabel->setText(QStringLiteral("新版本已启动，更新窗口即将自动关闭。"));
-        m_progressBar->setValue(100);
-        m_percentageLabel->setText(QStringLiteral("100%"));
+        animatePercentageTo(100);
     }
 
     m_iconLabel->setStyleSheet(QStringLiteral(
@@ -200,6 +228,53 @@ void UpdaterWindow::applyProgress(const UpdaterProgressEvent &event)
     m_progressBar->setStyleSheet(QStringLiteral(
         "QProgressBar { background: #20242a; border: 1px solid #30343a; border-radius: 4px; height: 8px; }"
         "QProgressBar::chunk { background: %1; border-radius: 3px; }").arg(accent));
+}
+
+void UpdaterWindow::animatePercentageTo(int percentage, bool immediate)
+{
+    const auto target = qBound(m_displayedPercentage, percentage, 100);
+    if (!m_progressAnimation || immediate || target == m_displayedPercentage) {
+        if (m_progressAnimation) {
+            m_progressAnimation->stop();
+        }
+        setDisplayedPercentage(target);
+        return;
+    }
+
+    m_progressAnimation->stop();
+    m_progressAnimation->setStartValue(m_displayedPercentage);
+    m_progressAnimation->setEndValue(target);
+    const auto distance = target - m_displayedPercentage;
+    m_progressAnimation->setDuration(qBound(140, distance * 38, 900));
+    m_progressAnimation->start();
+}
+
+void UpdaterWindow::setDisplayedPercentage(int percentage)
+{
+    m_displayedPercentage = qBound(m_displayedPercentage, percentage, 100);
+    m_progressBar->setValue(m_displayedPercentage);
+    m_percentageLabel->setText(QStringLiteral("%1%").arg(m_displayedPercentage));
+}
+
+void UpdaterWindow::appendUpdateDetail(const UpdaterProgressEvent &event)
+{
+    if (!m_detailView) {
+        return;
+    }
+    auto detail = QStringLiteral("%1：%2").arg(event.stepLabel, event.message);
+    if (!event.substep.trimmed().isEmpty()) {
+        detail += QStringLiteral(" · %1").arg(event.substep.trimmed());
+    }
+    if (detail == m_lastDetailText) {
+        return;
+    }
+    m_lastDetailText = detail;
+    m_detailView->appendPlainText(
+        QStringLiteral("[%1] %2")
+            .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss")), detail));
+    if (auto *scrollBar = m_detailView->verticalScrollBar()) {
+        scrollBar->setValue(scrollBar->maximum());
+    }
 }
 
 void UpdaterWindow::updateStepChips(int currentStep, const QString &accentColor)

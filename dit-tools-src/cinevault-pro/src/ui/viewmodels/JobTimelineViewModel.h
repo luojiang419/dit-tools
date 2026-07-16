@@ -13,6 +13,13 @@ class JobTimelineViewModel : public QObject {
     Q_OBJECT
     Q_PROPERTY(JobListModel* model READ model CONSTANT)
     Q_PROPERTY(QVariantList timelineItems READ timelineItems NOTIFY timelineChanged)
+    Q_PROPERTY(bool footerHasTasks READ footerHasTasks NOTIFY stateChanged)
+    Q_PROPERTY(int footerProgress READ footerProgress NOTIFY stateChanged)
+    Q_PROPERTY(QString footerProgressText READ footerProgressText NOTIFY stateChanged)
+    Q_PROPERTY(QString footerSummary READ footerSummary NOTIFY stateChanged)
+    Q_PROPERTY(int footerRunningCount READ footerRunningCount NOTIFY stateChanged)
+    Q_PROPERTY(int footerPendingCount READ footerPendingCount NOTIFY stateChanged)
+    Q_PROPERTY(int footerFailedCount READ footerFailedCount NOTIFY stateChanged)
     Q_PROPERTY(bool hasBatchSummary READ hasBatchSummary NOTIFY stateChanged)
     Q_PROPERTY(QString batchTitle READ batchTitle NOTIFY stateChanged)
     Q_PROPERTY(QString batchProgressText READ batchProgressText NOTIFY stateChanged)
@@ -52,6 +59,13 @@ public:
 
     JobListModel *model() const;
     QVariantList timelineItems() const;
+    bool footerHasTasks() const;
+    int footerProgress() const;
+    QString footerProgressText() const;
+    QString footerSummary() const;
+    int footerRunningCount() const;
+    int footerPendingCount() const;
+    int footerFailedCount() const;
     bool hasBatchSummary() const;
     QString batchTitle() const;
     QString batchProgressText() const;
@@ -96,6 +110,7 @@ signals:
     void stateChanged();
 
 private:
+    void scheduleReload();
     const Job *selectedJob() const;
 
     JobService *m_jobService = nullptr;
@@ -104,4 +119,5 @@ private:
     QVariantList m_timelineItems;
     QVector<Job> m_jobs;
     qint64 m_selectedJobId = 0;
+    bool m_reloadScheduled = false;
 };

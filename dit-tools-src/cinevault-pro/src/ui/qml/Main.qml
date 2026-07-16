@@ -429,6 +429,13 @@ ApplicationWindow {
         viewModel: root.settingsViewModel
     }
 
+    OnboardingWizard {
+        id: onboardingWizard
+        shellVm: root.shellViewModel
+        settingsVm: root.settingsViewModel
+        z: 850
+    }
+
     Item {
         id: appContentLayer
 
@@ -443,6 +450,7 @@ ApplicationWindow {
                 id: topCommandBar
                 Layout.fillWidth: true
                 shellVm: root.shellViewModel
+                onGuideRequested: onboardingWizard.restart()
             }
 
             RowLayout {

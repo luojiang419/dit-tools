@@ -411,6 +411,8 @@ else()
     src/core/search/NaturalLanguageQueryParser.cpp
     src/core/search/SearchReliabilityEvaluator.h
     src/core/search/SearchReliabilityEvaluator.cpp
+    src/core/search/SearchAssistantRouter.h
+    src/core/search/SearchAssistantRouter.cpp
     src/core/search/SearchResultFusion.h
     src/core/search/SearchResultFusion.cpp
     src/core/search/SearchQueryUnderstanding.h
@@ -545,6 +547,7 @@ qt_add_qml_module(CineVault
         src/ui/qml/components/InspectorPane.qml
         src/ui/qml/components/JobProgressInspectorPane.qml
         src/ui/qml/components/JobTimelineBar.qml
+        src/ui/qml/components/OnboardingWizard.qml
         src/ui/qml/components/ActionButton.qml
         src/ui/qml/components/AssetPreviewOverlay.qml
         src/ui/qml/components/ThemedTextField.qml
@@ -813,6 +816,16 @@ if(BUILD_TESTING)
     target_include_directories(SearchReliabilityEvaluatorTest PRIVATE src)
     target_link_libraries(SearchReliabilityEvaluatorTest PRIVATE Qt6::Core Qt6::Test)
     add_test(NAME SearchReliabilityEvaluatorTest COMMAND SearchReliabilityEvaluatorTest)
+
+    qt_add_executable(SearchAssistantRouterTest
+        tests/unit/SearchAssistantRouterTest.cpp
+        src/core/search/NaturalLanguageQueryParser.cpp
+        src/core/search/SearchReliabilityEvaluator.cpp
+        src/core/search/SearchAssistantRouter.cpp
+    )
+    target_include_directories(SearchAssistantRouterTest PRIVATE src)
+    target_link_libraries(SearchAssistantRouterTest PRIVATE Qt6::Core Qt6::Test)
+    add_test(NAME SearchAssistantRouterTest COMMAND SearchAssistantRouterTest)
 
     qt_add_executable(SearchResultFusionTest
         tests/unit/SearchResultFusionTest.cpp
@@ -1176,6 +1189,7 @@ if(BUILD_TESTING)
             VisualAnalysisMetadataTest
             NaturalLanguageQueryParserTest
             SearchReliabilityEvaluatorTest
+            SearchAssistantRouterTest
             SearchResultFusionTest
             SearchQueryUnderstandingTest
             CaptureTimeResolverTest

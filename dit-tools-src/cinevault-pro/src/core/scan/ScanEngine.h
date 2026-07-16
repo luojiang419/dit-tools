@@ -13,6 +13,7 @@ class DatabaseManager;
 class JobEngine;
 class MediaProbeEngine;
 class ThumbnailEngine;
+class QSqlDatabase;
 
 class ScanEngine : public QObject {
     Q_OBJECT
@@ -39,7 +40,14 @@ private:
     void runScan(SourceRoot sourceRoot,
                  qint64 jobId,
                  const QString &projectDatabasePath,
-                 const QString &activeScanKey);
+                 const QString &activeScanKey,
+                 qint64 sessionId);
+    void runResumableScan(SourceRoot sourceRoot,
+                          qint64 jobId,
+                          const QString &projectDatabasePath,
+                          qint64 sessionId,
+                          QSqlDatabase &database);
+    qint64 prepareSession(const SourceRoot &sourceRoot, QString *errorMessage);
     void releaseActiveScan(const QString &activeScanKey);
 
     DatabaseManager *m_databaseManager = nullptr;

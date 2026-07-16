@@ -5,6 +5,7 @@
 
 #include <QHash>
 #include <QDate>
+#include <QDateTime>
 #include <QObject>
 #include <QSet>
 #include <QTimer>
@@ -230,6 +231,7 @@ signals:
     void selectionChanged();
     void quickSearchRevealChanged();
     void quickSearchNavigationRequested(const QString &searchText);
+    void searchAssistantWarmupRequested();
     void analysisProgressChanged();
     void dimensionAnalysisChanged();
 
@@ -245,6 +247,11 @@ private:
         bool running = false;
         QString detail;
         QString errorMessage;
+    };
+
+    struct SearchUnderstandingCacheEntry {
+        ModelSearchUnderstanding understanding;
+        QDateTime expiresAt;
     };
 
     GlobalVideoAsset assetByVideoKey(const QString &videoKey) const;
@@ -310,7 +317,9 @@ private:
     QString m_quickSearchRevealVideoKey;
     int m_quickSearchRevealFrameNumber = -1;
     int m_quickSearchRevealRevision = 0;
-    QHash<QString, ModelSearchUnderstanding> m_searchUnderstandingCache;
+    QHash<QString, SearchUnderstandingCacheEntry> m_searchUnderstandingCache;
+    QStringList m_searchUnderstandingCacheOrder;
+    QHash<QString, QDateTime> m_searchUnderstandingFailures;
     QSet<QString> m_searchUnderstandingInFlight;
     QHash<QString, AnalysisProgressState> m_analysisProgressByVideoKey;
     QHash<QString, DimensionProgressState> m_dimensionProgressByVideoKey;

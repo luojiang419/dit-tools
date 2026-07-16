@@ -5,6 +5,7 @@ import CineVault
 
 Rectangle {
     property var shellVm
+    signal guideRequested()
 
     function focusSearch() {
         if (globalSearchField.visible) {
@@ -124,6 +125,13 @@ Rectangle {
             placeholderText: shellVm && shellVm.currentWorkspace === shellVm.projectLibraryWorkspaceId ? "搜索项目..." : "搜索素材..."
             text: shellVm.globalSearchText
             onTextChanged: shellVm.globalSearchText = text
+        }
+
+        ActionButton {
+            Layout.preferredWidth: 64
+            Layout.preferredHeight: 36
+            text: "向导"
+            onClicked: guideRequested()
         }
 
         ActionButton {

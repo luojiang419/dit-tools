@@ -12,196 +12,127 @@ Rectangle {
     border.color: Theme.line
     implicitHeight: 62
 
-    component StatusLamp: Item {
-        property string label
-        property int count: 0
-        property color tint: Theme.blue
-
-        Layout.preferredWidth: 90
-        Layout.fillHeight: true
-
-        RowLayout {
-            anchors.fill: parent
-            spacing: 7
-
-            Item {
-                Layout.preferredWidth: 24
-                Layout.preferredHeight: 24
-
-                Rectangle {
-                    anchors.centerIn: parent
-                    width: 24
-                    height: 24
-                    radius: 12
-                    color: Qt.rgba(tint.r, tint.g, tint.b, count > 0 ? 0.36 : 0.24)
-                    opacity: count > 0 ? 0.95 : 0.82
-
-                    SequentialAnimation on opacity {
-                        running: count > 0
-                        loops: Animation.Infinite
-                        NumberAnimation { to: 0.58; duration: 900; easing.type: Easing.InOutSine }
-                        NumberAnimation { to: 0.95; duration: 900; easing.type: Easing.InOutSine }
-                    }
-                }
-
-                Rectangle {
-                    anchors.centerIn: parent
-                    width: 15
-                    height: 15
-                    radius: 8
-                    color: Qt.rgba(tint.r, tint.g, tint.b, 0.30)
-                    border.width: 1
-                    border.color: Qt.rgba(tint.r, tint.g, tint.b, 0.95)
-                }
-
-                Rectangle {
-                    anchors.centerIn: parent
-                    width: 7
-                    height: 7
-                    radius: 4
-                    color: tint
-                    opacity: 1.0
-                }
-            }
-
-            ColumnLayout {
-                Layout.fillWidth: true
-                spacing: 0
-
-                Text {
-                    Layout.fillWidth: true
-                    text: label
-                    color: Theme.muted
-                    font.pixelSize: 10
-                    elide: Text.ElideRight
-                }
-
-                Text {
-                    Layout.fillWidth: true
-                    text: count
-                    color: Theme.text
-                    font.pixelSize: 14
-                    font.weight: Font.Black
-                    elide: Text.ElideRight
-                }
-            }
-        }
-    }
-
     RowLayout {
         anchors.fill: parent
-        anchors.margins: 10
-        spacing: 12
+        anchors.leftMargin: 18
+        anchors.rightMargin: 18
+        spacing: 14
 
-        StatusLamp {
-            label: "总量"
-            count: libraryViewModel ? libraryViewModel.totalAssetCount : 0
-            tint: Theme.blue
-        }
+        ColumnLayout {
+            Layout.preferredWidth: 118
+            Layout.fillHeight: true
+            spacing: 1
 
-        StatusLamp {
-            label: "就绪"
-            count: libraryViewModel ? libraryViewModel.readyAssetCount : 0
-            tint: Theme.green
-        }
+            Text {
+                text: "任务中心"
+                color: Theme.text
+                font.pixelSize: 14
+                font.weight: Font.Black
+            }
 
-        StatusLamp {
-            label: "待解析"
-            count: libraryViewModel ? libraryViewModel.pendingAssetCount : 0
-            tint: Theme.blue
-        }
-
-        StatusLamp {
-            label: "需关注"
-            count: libraryViewModel ? libraryViewModel.issueAssetCount : 0
-            tint: Theme.orange
-        }
-
-        Rectangle {
-            Layout.preferredWidth: 150
-            Layout.preferredHeight: 9
-            radius: 5
-            color: Theme.panel
-            border.width: 1
-            border.color: Theme.line
-            clip: true
-
-            RowLayout {
-                anchors.fill: parent
-                spacing: 0
-
-                Rectangle {
-                    Layout.fillHeight: true
-                    Layout.preferredWidth: (libraryViewModel && libraryViewModel.totalAssetCount > 0) ? parent.width * libraryViewModel.readyAssetCount / libraryViewModel.totalAssetCount : 0
-                    color: Theme.green
-                }
-
-                Rectangle {
-                    Layout.fillHeight: true
-                    Layout.preferredWidth: (libraryViewModel && libraryViewModel.totalAssetCount > 0) ? parent.width * libraryViewModel.pendingAssetCount / libraryViewModel.totalAssetCount : 0
-                    color: Theme.blue
-                }
-
-                Rectangle {
-                    Layout.fillHeight: true
-                    Layout.preferredWidth: (libraryViewModel && libraryViewModel.totalAssetCount > 0) ? parent.width * libraryViewModel.issueAssetCount / libraryViewModel.totalAssetCount : 0
-                    color: Theme.orange
-                }
-
-                Item { Layout.fillWidth: true }
+            Text {
+                text: viewModel ? viewModel.footerProgressText : "暂无后台任务"
+                color: Theme.muted
+                font.pixelSize: 11
+                elide: Text.ElideRight
             }
         }
 
-        Rectangle {
-            Layout.preferredWidth: 1
-            Layout.fillHeight: true
-            color: Theme.line
-        }
-
-        Flickable {
-            id: timelineFlick
+        ColumnLayout {
             Layout.fillWidth: true
+            Layout.maximumWidth: 680
             Layout.fillHeight: true
-            clip: true
-            contentWidth: timelineRow.implicitWidth
-            contentHeight: timelineRow.implicitHeight
-            boundsBehavior: Flickable.StopAtBounds
-            ScrollBar.horizontal: ThemedScrollBar { policy: ScrollBar.AsNeeded }
+            spacing: 5
 
-            MiddleDragScrollHandler {
-                flickable: timelineFlick
-            }
+            ThemedProgressBar {
+                id: totalProgress
+                Layout.fillWidth: true
+                Layout.preferredHeight: 8
+                from: 0
+                to: 100
+                value: viewModel ? viewModel.footerProgress : 0
 
-            Row {
-                id: timelineRow
-                height: parent.height
-                spacing: 10
-
-                Repeater {
-                    model: viewModel ? viewModel.timelineItems : []
-                    delegate: Rectangle {
-                        height: 28
-                        width: Math.min(260, Math.max(160, detailText.implicitWidth + 24))
-                        radius: 14
-                        color: Theme.panel2
-                        border.width: 1
-                        border.color: Theme.line
-
-                        Text {
-                            id: detailText
-                            anchors.fill: parent
-                            anchors.leftMargin: 12
-                            anchors.rightMargin: 12
-                            text: modelData.subjectName + " " + modelData.progress + "% · "
-                                + (modelData.progressLabel && modelData.progressLabel.length > 0 ? modelData.progressLabel : modelData.stateLabel)
-                            color: Theme.text
-                            font.pixelSize: 12
-                            elide: Text.ElideRight
-                            horizontalAlignment: Text.AlignHCenter
-                            verticalAlignment: Text.AlignVCenter
-                        }
+                Behavior on value {
+                    NumberAnimation {
+                        duration: 220
+                        easing.type: Easing.OutCubic
                     }
                 }
+            }
+
+            Text {
+                Layout.fillWidth: true
+                text: viewModel ? viewModel.footerSummary : "任务状态加载中…"
+                color: Theme.muted
+                font.pixelSize: 12
+                elide: Text.ElideRight
+            }
+        }
+
+        RowLayout {
+            Layout.preferredWidth: 220
+            Layout.fillHeight: true
+            spacing: 8
+
+            component TaskCount: Rectangle {
+                id: taskCount
+                required property string label
+                required property int count
+                required property color tint
+
+                Layout.fillWidth: true
+                Layout.preferredHeight: 36
+                radius: 10
+                color: Theme.panel2
+                border.width: 1
+                border.color: Theme.line
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 9
+                    anchors.rightMargin: 9
+                    spacing: 5
+
+                    Rectangle {
+                        Layout.preferredWidth: 7
+                        Layout.preferredHeight: 7
+                        radius: 4
+                        color: taskCount.tint
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        text: taskCount.label
+                        color: Theme.muted
+                        font.pixelSize: 10
+                        elide: Text.ElideRight
+                    }
+
+                    Text {
+                        text: taskCount.count
+                        color: Theme.text
+                        font.pixelSize: 13
+                        font.weight: Font.Black
+                    }
+                }
+            }
+
+            TaskCount {
+                label: "运行"
+                count: viewModel ? viewModel.footerRunningCount : 0
+                tint: Theme.blue
+            }
+
+            TaskCount {
+                label: "等待"
+                count: viewModel ? viewModel.footerPendingCount : 0
+                tint: Theme.orange
+            }
+
+            TaskCount {
+                label: "异常"
+                count: viewModel ? viewModel.footerFailedCount : 0
+                tint: Theme.red
             }
         }
     }

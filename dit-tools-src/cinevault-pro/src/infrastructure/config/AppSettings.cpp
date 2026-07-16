@@ -241,7 +241,7 @@ void AppSettings::setSearchAssistantEnabled(bool enabled)
 int AppSettings::searchAssistantAutoUnloadMinutes() const
 {
     return normalizedSearchAssistantAutoUnloadMinutes(
-        m_settings->value(QLatin1String(kSearchAssistantAutoUnloadMinutesKey), 60).toInt());
+        m_settings->value(QLatin1String(kSearchAssistantAutoUnloadMinutesKey), 30).toInt());
 }
 
 void AppSettings::setSearchAssistantAutoUnloadMinutes(int minutes)
