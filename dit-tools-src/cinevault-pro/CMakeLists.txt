@@ -1070,7 +1070,7 @@ if(BUILD_TESTING)
         )
         target_include_directories(ImportServiceLegacyRescanTest PRIVATE src)
         target_link_libraries(ImportServiceLegacyRescanTest PRIVATE Qt6::Core Qt6::Sql Qt6::Concurrent Qt6::Test)
-        add_test(NAME ImportServiceLegacyRescanTest COMMAND ImportServiceLegacyRescanTest -v2)
+        add_test(NAME ImportServiceLegacyRescanTest COMMAND ImportServiceLegacyRescanTest -v2 -o -,txt)
 
         qt_add_executable(MediaTaskServiceRecoveryTest
             tests/unit/MediaTaskServiceRecoveryTest.cpp
@@ -1111,7 +1111,7 @@ if(BUILD_TESTING)
             CINEVAULT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
         )
         target_link_libraries(MaterialCenterUiContractTest PRIVATE Qt6::Core Qt6::Test)
-        add_test(NAME MaterialCenterUiContractTest COMMAND MaterialCenterUiContractTest -v2)
+        add_test(NAME MaterialCenterUiContractTest COMMAND MaterialCenterUiContractTest -v2 -o -,txt)
 
         qt_add_executable(FeedbackAttachmentCacheTest
             tests/unit/FeedbackAttachmentCacheTest.cpp
