@@ -376,7 +376,7 @@ jobs:
               -f "tag_name=$tag" `
               -f "target_commitish=$env:GITHUB_SHA" `
               -f "name=影资管家 $tag" `
-              -f "body=Windows x64 自动构建安装包；使用与本地一致的未签名构建流程，发布前已通过完整测试、安装启动检查、版本检查和 SHA-256 校验。Windows 可能显示 SmartScreen 提示；客户端不会自动提权执行此未签名安装包，请手动下载安装。" `
+              -f "body=Windows x64 自动构建安装包；使用与本地一致的未签名构建流程，发布前已通过完整测试、安装启动检查、版本检查和 SHA-256 校验。客户端会在精确匹配 GitHub Release 资产并验证大小与 SHA-256 后启动安装；Windows 仍可能显示 SmartScreen 或 UAC 提示。" `
               -F draft=true `
               -F prerelease=false `
               -F generate_release_notes=true | ConvertFrom-Json

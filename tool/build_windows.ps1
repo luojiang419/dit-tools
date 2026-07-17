@@ -140,7 +140,7 @@ try {
         $assistantPrepareScript = Join-Path $projectRoot "cmake\PrepareSearchAssistantDependencies.cmake"
         Invoke-VcVarsCommand "cmake -DOUTPUT_ROOT=`"$assistantCacheRoot`" -P `"$assistantPrepareScript`""
     }
-    Invoke-VcVarsCommand "cmake --preset $configurePreset -DCINEVAULT_UPDATE_SIGNER_SHA256=$normalizedUpdateSignerSha256"
+    Invoke-VcVarsCommand "cmake --preset $configurePreset -DCINEVAULT_APP_VERSION=$appVersion -DCINEVAULT_UPDATE_SIGNER_SHA256=$normalizedUpdateSignerSha256"
     Invoke-VcVarsCommand "cmake --build --preset $buildPreset --config $Configuration"
 } finally {
     Pop-Location

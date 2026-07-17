@@ -30,6 +30,7 @@ private slots:
     void parseLatestRelease_rejectsUntrustedUrl();
     void fileSha256_detectsSingleByteTampering();
     void validateInstallerFile_rejectsTamperingAndExternalPath();
+    void verifyInstallerAuthenticode_allowsUnsignedInstallerWithoutPinnedSigner();
     void latestReleaseStatusMessage_handlesNoRelease();
     void normalizedProxyUrl_addsHttpSchemeForHostPort();
     void normalizedProxyUrl_rejectsInvalidValues();
@@ -372,6 +373,7 @@ void UpdateServiceTest::updaterProgressContract_usesDeterminateInstallerSignal()
     QVERIFY(updaterSource.contains("Get-FileHash"));
     QVERIFY(updaterSource.contains("Get-AuthenticodeSignature"));
     QVERIFY(updaterSource.contains("GetCertHashString('SHA256')"));
+    QVERIFY(updaterSource.contains("if (-not [string]::IsNullOrWhiteSpace($expectedSignerSha256))"));
     QVERIFY(updateServiceSource.contains("--continue-at"));
     QVERIFY(updateServiceSource.contains("--speed-time"));
     QVERIFY(updateServiceSource.contains("QStorageInfo"));
@@ -508,6 +510,24 @@ void UpdateServiceTest::validateInstallerFile_rejectsTamperingAndExternalPath()
     QVERIFY(!UpdateService::validateInstallerFile(versionTag, trustedPath, 14, sha256, &errorMessage));
     QVERIFY(errorMessage.contains(QStringLiteral("SHA-256")));
     QVERIFY(QFile::remove(trustedPath));
+}
+
+void UpdateServiceTest::verifyInstallerAuthenticode_allowsUnsignedInstallerWithoutPinnedSigner()
+{
+    QVERIFY(UpdateService::expectedUpdateSignerSha256().isEmpty());
+
+    QTemporaryDir temp;
+    QVERIFY(temp.isValid());
+    const auto installerPath = temp.filePath(QStringLiteral("unsigned-installer.exe"));
+    QFile installer(installerPath);
+    QVERIFY(installer.open(QIODevice::WriteOnly));
+    QCOMPARE(installer.write("unsigned-installer"), qint64{18});
+    installer.close();
+
+    QString errorMessage;
+    QVERIFY2(UpdateService::verifyInstallerAuthenticode(installerPath, &errorMessage),
+             qPrintable(errorMessage));
+    QVERIFY(errorMessage.isEmpty());
 }
 
 void UpdateServiceTest::updaterSessionRunner_reportsMissingInstaller()
