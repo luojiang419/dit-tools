@@ -473,6 +473,15 @@ Window {
                                 required property var modelData
                                 readonly property bool selected: root.materialCenterViewModel
                                     && root.materialCenterViewModel.searchResultFilter === modelData.value
+                                readonly property color fillColor: filterButton.selected
+                                    ? "#2A3039"
+                                    : (filterButton.hovered ? "#252B35" : "#20242C")
+                                readonly property color outlineColor: filterButton.selected
+                                    ? "#4B5563"
+                                    : "#303640"
+                                readonly property color labelColor: filterButton.selected
+                                    ? "#F4F7FB"
+                                    : "#A0A8B4"
 
                                 objectName: "quickSearchResultFilter" + modelData.value
                                 Layout.preferredWidth: modelData.value === 2 ? 72 : 62
@@ -481,16 +490,14 @@ Window {
 
                                 background: Rectangle {
                                     radius: 9
-                                    color: filterButton.selected
-                                        ? root.quickSelected
-                                        : (filterButton.hovered ? root.quickSurfaceHover : root.quickSurface)
+                                    color: filterButton.fillColor
                                     border.width: 1
-                                    border.color: filterButton.selected ? root.quickSelectedLine : root.quickLine
+                                    border.color: filterButton.outlineColor
                                 }
 
                                 contentItem: Text {
                                     text: modelData.label
-                                    color: filterButton.selected ? root.quickText : root.quickMuted
+                                    color: filterButton.labelColor
                                     font.pixelSize: 12
                                     font.weight: filterButton.selected ? Font.DemiBold : Font.Normal
                                     horizontalAlignment: Text.AlignHCenter
