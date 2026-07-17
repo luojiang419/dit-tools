@@ -321,7 +321,18 @@ jobs:
               --verbose `
               --label-exclude gpu-integration `
               --parallel 1
-          if ($LASTEXITCODE -ne 0) {
+          $ctestExitCode = $LASTEXITCODE
+          if ($ctestExitCode -ne 0) {
+              Get-ChildItem `
+                  -LiteralPath dit-tools-src/cinevault-pro/build/windows-msvc-release-real `
+                  -Filter '*-results.txt' `
+                  -File |
+                  Sort-Object Name |
+                  ForEach-Object {
+                      Write-Host "::group::QtTest 报告 $($_.Name)"
+                      Get-Content -LiteralPath $_.FullName
+                      Write-Host '::endgroup::'
+                  }
               throw "CTest 回归测试失败。"
           }
 

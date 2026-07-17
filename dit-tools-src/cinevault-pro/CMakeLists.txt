@@ -949,7 +949,8 @@ if(BUILD_TESTING)
         CINEVAULT_UPDATE_SIGNER_SHA256="${CINEVAULT_UPDATE_SIGNER_SHA256}"
     )
     target_link_libraries(UpdateServiceTest PRIVATE Qt6::Core Qt6::Network Qt6::Test)
-    add_test(NAME UpdateServiceTest COMMAND UpdateServiceTest)
+    add_test(NAME UpdateServiceTest
+        COMMAND UpdateServiceTest -o UpdateServiceTest-results.txt,txt)
 
     qt_add_executable(LocalImageUrlHelperTest
         tests/unit/LocalImageUrlHelperTest.cpp
@@ -1142,7 +1143,8 @@ if(BUILD_TESTING)
         )
         target_include_directories(MediaTaskServiceRecoveryTest PRIVATE src)
         target_link_libraries(MediaTaskServiceRecoveryTest PRIVATE Qt6::Core Qt6::Sql Qt6::Concurrent Qt6::Test)
-        add_test(NAME MediaTaskServiceRecoveryTest COMMAND MediaTaskServiceRecoveryTest)
+        add_test(NAME MediaTaskServiceRecoveryTest
+            COMMAND MediaTaskServiceRecoveryTest -o MediaTaskServiceRecoveryTest-results.txt,txt)
 
         qt_add_executable(FeedbackMessageListModelTest
             tests/unit/FeedbackMessageListModelTest.cpp
@@ -1165,7 +1167,8 @@ if(BUILD_TESTING)
             CINEVAULT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
         )
         target_link_libraries(MaterialCenterUiContractTest PRIVATE Qt6::Core Qt6::Test)
-        add_test(NAME MaterialCenterUiContractTest COMMAND MaterialCenterUiContractTest -v2 -o -,txt)
+        add_test(NAME MaterialCenterUiContractTest
+            COMMAND MaterialCenterUiContractTest -v2 -o MaterialCenterUiContractTest-results.txt,txt)
 
         qt_add_executable(FeedbackAttachmentCacheTest
             tests/unit/FeedbackAttachmentCacheTest.cpp
