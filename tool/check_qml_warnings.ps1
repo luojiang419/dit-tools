@@ -36,6 +36,9 @@ if (-not $jsonLines) {
 }
 
 $document = (($jsonLines -join "`n") | ConvertFrom-Json)
+if (@($document.files).Count -ne $qmlFiles.Count) {
+    throw "qmllint 返回的文件数不完整：实际 $(@($document.files).Count)，预期 $($qmlFiles.Count)"
+}
 $warnings = @($document.files | ForEach-Object { $_.warnings })
 $errors = @($warnings | Where-Object { $_.type -eq "error" })
 $counts = @{}
@@ -69,3 +72,7 @@ if ($errors.Count -gt 0) {
 if ($warnings.Count -gt $MaxWarnings) {
     throw "QML warning 增加：实际 $($warnings.Count)，允许最多 $MaxWarnings"
 }
+
+# qmllint 在仅包含 warning 时仍会返回非零退出码。诊断已在上方按
+# 完整文件数、错误类别和数量基线统一判定，避免把合格基线误报为步骤失败。
+$global:LASTEXITCODE = 0
