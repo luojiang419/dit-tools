@@ -1306,6 +1306,9 @@ if(BUILD_TESTING)
         if(TARGET VisionApiClientImageTest)
             list(APPEND CINEVAULT_PATH_AWARE_TESTS VisionApiClientImageTest)
         endif()
+        set_target_properties(${CINEVAULT_PATH_AWARE_TESTS} PROPERTIES
+            WIN32_EXECUTABLE FALSE
+        )
         set_tests_properties(${CINEVAULT_PATH_AWARE_TESTS} PROPERTIES
             ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${CINEVAULT_TEST_QT_BIN_DIR}"
         )

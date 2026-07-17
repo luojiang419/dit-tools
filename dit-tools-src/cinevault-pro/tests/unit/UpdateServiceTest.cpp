@@ -176,7 +176,7 @@ void UpdateServiceTest::parseLatestRelease_macosFallsBackToPkgAsset()
     QString errorMessage;
     QVERIFY(UpdateService::parseLatestRelease(payload, &info, &errorMessage, QStringLiteral("macos")));
     QCOMPARE(info.installerName, QStringLiteral("CineVault-macOS-v0.1.75.pkg"));
-    QCOMPARE(info.installerUrl, QStringLiteral("https://example.com/CineVault-macOS-v0.1.75.pkg"));
+    QCOMPARE(info.installerUrl, QStringLiteral("https://github.com/luojiang419/dit-tools/releases/download/v0.1.75/CineVault-macOS-v0.1.75.pkg"));
     QCOMPARE(info.installerSize, 789);
 }
 

@@ -1,6 +1,5 @@
 #include "application/MediaTaskService.h"
 #include "core/jobs/JobEngine.h"
-#include "core/media/MediaProbeEngine.h"
 #include "core/thumbnail/ThumbnailEngine.h"
 #include "infrastructure/db/DatabaseManager.h"
 
@@ -280,9 +279,8 @@ void MediaTaskServiceRecoveryTest::simultaneousRecoveryTriggersCreateOnlyOneWork
     QVERIFY(insertAsset(db, sourceRootId, sourcePath, QStringLiteral("duplicate.mp4")) > 0);
 
     JobEngine jobEngine(&databaseManager);
-    MediaProbeEngine mediaProbeEngine(nullptr);
     BlockingThumbnailEngine thumbnailEngine;
-    MediaTaskService service(&databaseManager, &jobEngine, &mediaProbeEngine, &thumbnailEngine);
+    MediaTaskService service(&databaseManager, &jobEngine, nullptr, &thumbnailEngine);
     service.startForSourceRoot(sourceRootId);
 
     const bool workerStarted = thumbnailEngine.waitUntilStarted(10000);
@@ -327,9 +325,8 @@ void MediaTaskServiceRecoveryTest::newImportsGenerateThumbnailBeforeMetadataProb
     QVERIFY(assetId > 0);
 
     JobEngine jobEngine(&databaseManager);
-    MediaProbeEngine mediaProbeEngine(nullptr);
     BlockingThumbnailEngine thumbnailEngine;
-    MediaTaskService service(&databaseManager, &jobEngine, &mediaProbeEngine, &thumbnailEngine);
+    MediaTaskService service(&databaseManager, &jobEngine, nullptr, &thumbnailEngine);
     service.startForSourceRoot(sourceRootId);
 
     const bool thumbnailStarted = thumbnailEngine.waitUntilStarted(10000);

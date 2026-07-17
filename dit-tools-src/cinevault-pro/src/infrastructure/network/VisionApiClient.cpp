@@ -174,6 +174,15 @@ QString normalizeEndpoint(QString baseUrl)
         const QUrl candidate(QStringLiteral("https://") + url);
         url = (isLoopbackHost(candidate.host()) ? QStringLiteral("http://") : QStringLiteral("https://")) + url;
     }
+
+    const QUrl parsedUrl(url);
+    if (!parsedUrl.isValid() || parsedUrl.host().isEmpty()
+        || (parsedUrl.scheme().compare(QStringLiteral("http"), Qt::CaseInsensitive) != 0
+            && parsedUrl.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) != 0)
+        || (parsedUrl.scheme().compare(QStringLiteral("http"), Qt::CaseInsensitive) == 0
+            && !isLoopbackHost(parsedUrl.host()))) {
+        return {};
+    }
     if (url.endsWith(QLatin1Char('/'))) {
         url.chop(1);
     }
@@ -184,14 +193,6 @@ QString normalizeEndpoint(QString baseUrl)
         return url + QStringLiteral("/chat/completions");
     }
 
-    const QUrl parsedUrl(url);
-    if (!parsedUrl.isValid() || parsedUrl.host().isEmpty()
-        || (parsedUrl.scheme().compare(QStringLiteral("http"), Qt::CaseInsensitive) != 0
-            && parsedUrl.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) != 0)
-        || (parsedUrl.scheme().compare(QStringLiteral("http"), Qt::CaseInsensitive) == 0
-            && !isLoopbackHost(parsedUrl.host()))) {
-        return {};
-    }
     if (parsedUrl.path().isEmpty() || parsedUrl.path() == QStringLiteral("/")) {
         return url + QStringLiteral("/v1/chat/completions");
     }
