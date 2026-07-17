@@ -29,6 +29,18 @@ public:
     void updateJobSubject(qint64 jobId, const JobSubject &subject);
     void completeJob(qint64 jobId, const QString &detail);
     void failJob(qint64 jobId, const QString &errorMessage);
+    QString currentProjectDatabasePath() const;
+    void updateJobForProject(const QString &projectDatabasePath,
+                             qint64 jobId,
+                             qint64 progress,
+                             const QString &detail,
+                             const JobProgressContext &progressContext = JobProgressContext());
+    void updateJobSubjectForProject(const QString &projectDatabasePath,
+                                    qint64 jobId,
+                                    const JobSubject &subject);
+    void completeJobForProject(const QString &projectDatabasePath, qint64 jobId, const QString &detail);
+    void failJobForProject(const QString &projectDatabasePath, qint64 jobId, const QString &errorMessage);
+    void reloadJobs();
     void clearJobs();
     void clearCompletedJobs();
 
@@ -36,10 +48,13 @@ public:
 
 signals:
     void jobsChanged();
+    void persistenceError(const QString &errorMessage);
 
 private:
-    void persistJob(const Job &job);
+    bool persistJob(const Job &job);
+    void reportPersistenceError(const QString &errorMessage);
     Job *findJob(qint64 jobId);
+    bool isCurrentProject(const QString &projectDatabasePath) const;
     qint64 appendJob(JobType type,
                      JobState state,
                      const QString &title,

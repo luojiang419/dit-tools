@@ -233,7 +233,6 @@ QString previewText(QString text)
 struct SearchUnderstandingTaskResult {
     QString cacheKey;
     QString queryText;
-    int generation = 0;
     std::optional<ModelSearchUnderstanding> understanding;
     QString errorMessage;
 };
@@ -1200,7 +1199,6 @@ void MaterialCenterViewModel::startSearchUnderstanding(
     const auto baseUrl = m_localSearchAssistantRuntime->endpoint();
     const auto model = m_localSearchAssistantRuntime->modelName();
     const auto timeoutSec = 3;
-    const auto generation = m_searchGeneration;
     auto *client = m_searchAssistantClient;
     auto *watcher = new QFutureWatcher<SearchUnderstandingTaskResult>(this);
     m_searchUnderstandingInFlight.insert(cacheKey);
@@ -1214,20 +1212,41 @@ void MaterialCenterViewModel::startSearchUnderstanding(
         const auto task = watcher->result();
         watcher->deleteLater();
         m_searchUnderstandingInFlight.remove(task.cacheKey);
-        if (task.generation != m_searchGeneration
-            || task.queryText != m_searchText.simplified()) {
-            m_searchAssistantBusy = !m_searchUnderstandingInFlight.isEmpty();
+
+        const auto now = QDateTime::currentDateTimeUtc();
+        if (task.understanding.has_value() && task.understanding->confidence >= 0.55) {
+            while (m_searchUnderstandingCache.size() >= 256
+                   && !m_searchUnderstandingCacheOrder.isEmpty()) {
+                m_searchUnderstandingCache.remove(m_searchUnderstandingCacheOrder.takeFirst());
+            }
+            m_searchUnderstandingFailures.remove(task.cacheKey);
+            m_searchUnderstandingCacheOrder.removeAll(task.cacheKey);
+            m_searchUnderstandingCacheOrder.append(task.cacheKey);
+            m_searchUnderstandingCache.insert(
+                task.cacheKey,
+                SearchUnderstandingCacheEntry{
+                    *task.understanding,
+                    now.addDays(7)
+                });
+        } else if (!task.understanding.has_value()) {
+            if (m_searchUnderstandingFailures.size() >= 128) {
+                m_searchUnderstandingFailures.erase(m_searchUnderstandingFailures.begin());
+            }
+            m_searchUnderstandingFailures.insert(task.cacheKey, now.addSecs(120));
+        }
+
+        const auto currentQuery = m_searchText.simplified();
+        const auto currentCacheKey = currentQuery.isEmpty()
+            ? QString()
+            : searchUnderstandingCacheKey(currentQuery, QDate::currentDate());
+        if (task.queryText != currentQuery || task.cacheKey != currentCacheKey) {
+            m_searchAssistantBusy = !currentCacheKey.isEmpty()
+                && m_searchUnderstandingInFlight.contains(currentCacheKey);
             emit searchStateChanged();
             return;
         }
         m_searchAssistantBusy = false;
         if (!task.understanding.has_value()) {
-            if (m_searchUnderstandingFailures.size() >= 128) {
-                m_searchUnderstandingFailures.erase(m_searchUnderstandingFailures.begin());
-            }
-            m_searchUnderstandingFailures.insert(
-                task.cacheKey,
-                QDateTime::currentDateTimeUtc().addSecs(120));
             m_searchAssistantUsed = false;
             m_searchAssistantStatusText = QStringLiteral("模型理解失败，已保留本地搜索：%1")
                 .arg(task.errorMessage.isEmpty() ? QStringLiteral("未知错误") : task.errorMessage);
@@ -1248,19 +1267,6 @@ void MaterialCenterViewModel::startSearchUnderstanding(
             emit searchStateChanged();
             return;
         }
-        while (m_searchUnderstandingCache.size() >= 256
-               && !m_searchUnderstandingCacheOrder.isEmpty()) {
-            m_searchUnderstandingCache.remove(m_searchUnderstandingCacheOrder.takeFirst());
-        }
-        m_searchUnderstandingFailures.remove(task.cacheKey);
-        m_searchUnderstandingCacheOrder.removeAll(task.cacheKey);
-        m_searchUnderstandingCacheOrder.append(task.cacheKey);
-        m_searchUnderstandingCache.insert(
-            task.cacheKey,
-            SearchUnderstandingCacheEntry{
-                *task.understanding,
-                QDateTime::currentDateTimeUtc().addDays(7)
-            });
         m_searchAssistantUsed = true;
         m_searchAssistantStatusText = QStringLiteral("内置文本模型已辅助理解");
         executeSearch(&*task.understanding);
@@ -1272,12 +1278,10 @@ void MaterialCenterViewModel::startSearchUnderstanding(
                                           baseUrl,
                                           model,
                                           timeoutSec,
-                                          cacheKey,
-                                          generation]() {
+                                          cacheKey]() {
         SearchUnderstandingTaskResult task;
         task.cacheKey = cacheKey;
         task.queryText = queryText;
-        task.generation = generation;
         task.understanding = client->understandQuery(queryText,
                                                      referenceDate,
                                                      baseUrl,
@@ -1656,6 +1660,28 @@ void MaterialCenterViewModel::locateSelectedSource()
         return;
     }
     setMessage(QStringLiteral("已打开所在目录并选中素材。"));
+}
+
+QString MaterialCenterViewModel::quickSearchFolderKeyAt(int resultIndex) const
+{
+    return resultIndex >= 0 && resultIndex < m_folders.size()
+        ? m_folders.at(resultIndex).folderKey
+        : QString();
+}
+
+QString MaterialCenterViewModel::quickSearchVideoKeyAt(int resultIndex) const
+{
+    if (resultIndex < 0) {
+        return {};
+    }
+    if (frameSearchMode()) {
+        return resultIndex < m_frames.size()
+            ? m_frames.at(resultIndex).videoKey
+            : QString();
+    }
+    return resultIndex < m_assets.size()
+        ? m_assets.at(resultIndex).videoKey
+        : QString();
 }
 
 bool MaterialCenterViewModel::openAssetFolder(const QString &videoKey)

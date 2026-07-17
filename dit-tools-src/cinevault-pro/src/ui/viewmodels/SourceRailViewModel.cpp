@@ -3,6 +3,8 @@
 #include "application/LibraryQueryService.h"
 #include "ui/models/SourceRootListModel.h"
 
+#include <QMetaObject>
+
 SourceRailViewModel::SourceRailViewModel(LibraryQueryService *libraryQueryService, QObject *parent)
     : QObject(parent)
     , m_libraryQueryService(libraryQueryService)
@@ -74,11 +76,15 @@ bool SourceRailViewModel::removeSource(qint64 sourceRootId)
         return false;
     }
 
-    reload();
-    if (removedSelection && m_selectedSourceId != 0) {
+    if (removedSelection) {
         m_selectedSourceId = 0;
         emit selectionChanged();
     }
-    emit sourceSelected(removedSelection ? qint64{0} : m_selectedSourceId);
+    QMetaObject::invokeMethod(this, [this, removedSelection]() {
+        if (removedSelection) {
+            emit sourceSelected(0);
+        }
+        reload();
+    }, Qt::QueuedConnection);
     return true;
 }

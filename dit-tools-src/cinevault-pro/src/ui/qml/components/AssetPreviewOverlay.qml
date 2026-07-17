@@ -134,8 +134,8 @@ Rectangle {
             }
 
             Rectangle {
-                width: 32
-                height: 32
+                Layout.preferredWidth: 32
+                Layout.preferredHeight: 32
                 radius: 16
                 color: closeArea.pressed ? "#334155" : "#1F2937"
                 border.width: 1

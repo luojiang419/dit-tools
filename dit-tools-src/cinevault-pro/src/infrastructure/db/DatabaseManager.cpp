@@ -271,6 +271,15 @@ bool DatabaseManager::initializeSchema(QSqlDatabase &db, bool databaseExistedBef
         return rollback();
     }
 
+    if (version < 7) {
+        if (!migrateToVersion7(db, errorMessage)) {
+            return rollback();
+        }
+        version = 7;
+    } else if (!ensureJobHistorySchemaCompatibility(db, errorMessage)) {
+        return rollback();
+    }
+
     if (!db.commit()) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("提交项目数据库迁移失败：%1").arg(db.lastError().text());
@@ -349,6 +358,8 @@ bool DatabaseManager::createBaseSchema(QSqlDatabase &db, QString *errorMessage) 
                        "error_message TEXT,"
                        "progress INTEGER NOT NULL DEFAULT 0,"
                        "source_root_id INTEGER NOT NULL DEFAULT 0,"
+                       "subject_json TEXT NOT NULL DEFAULT '{}',"
+                       "progress_context_json TEXT NOT NULL DEFAULT '{}',"
                        "started_at TEXT NOT NULL,"
                        "updated_at TEXT NOT NULL"
                        ");"),
@@ -437,9 +448,11 @@ bool DatabaseManager::ensureBaseSchemaCompatibility(QSqlDatabase &db, QString *e
                              {QStringLiteral("title"), QStringLiteral("title TEXT NOT NULL DEFAULT ''")},
                              {QStringLiteral("detail"), QStringLiteral("detail TEXT")},
                              {QStringLiteral("error_message"), QStringLiteral("error_message TEXT")},
-                             {QStringLiteral("progress"), QStringLiteral("progress INTEGER NOT NULL DEFAULT 0")},
-                             {QStringLiteral("source_root_id"), QStringLiteral("source_root_id INTEGER NOT NULL DEFAULT 0")},
-                             {QStringLiteral("started_at"), QStringLiteral("started_at TEXT NOT NULL DEFAULT ''")},
+                              {QStringLiteral("progress"), QStringLiteral("progress INTEGER NOT NULL DEFAULT 0")},
+                              {QStringLiteral("source_root_id"), QStringLiteral("source_root_id INTEGER NOT NULL DEFAULT 0")},
+                              {QStringLiteral("subject_json"), QStringLiteral("subject_json TEXT NOT NULL DEFAULT '{}'")},
+                              {QStringLiteral("progress_context_json"), QStringLiteral("progress_context_json TEXT NOT NULL DEFAULT '{}'")},
+                              {QStringLiteral("started_at"), QStringLiteral("started_at TEXT NOT NULL DEFAULT ''")},
                              {QStringLiteral("updated_at"), QStringLiteral("updated_at TEXT NOT NULL DEFAULT ''")}
                          },
                          errorMessage);
@@ -964,6 +977,32 @@ bool DatabaseManager::ensureResumableScanSchemaCompatibility(QSqlDatabase &db,
                             QStringLiteral("CREATE INDEX IF NOT EXISTS idx_scan_stage_asset_parent ON scan_stage_asset(session_id, parent_relative_path);"),
                             QStringLiteral("CREATE INDEX IF NOT EXISTS idx_scan_stage_folder_parent ON scan_stage_folder(session_id, parent_relative_path, depth);")
                         },
+                        errorMessage);
+}
+
+bool DatabaseManager::migrateToVersion7(QSqlDatabase &db, QString *errorMessage) const
+{
+    if (!ensureJobHistorySchemaCompatibility(db, errorMessage)) {
+        return false;
+    }
+    return setSchemaVersion(db, 7, errorMessage);
+}
+
+bool DatabaseManager::ensureJobHistorySchemaCompatibility(QSqlDatabase &db,
+                                                            QString *errorMessage) const
+{
+    return ensureColumns(db,
+                         QStringLiteral("job"),
+                         {
+                             {QStringLiteral("subject_json"),
+                              QStringLiteral("subject_json TEXT NOT NULL DEFAULT '{}'")},
+                             {QStringLiteral("progress_context_json"),
+                              QStringLiteral("progress_context_json TEXT NOT NULL DEFAULT '{}'")}
+                         },
+                         errorMessage)
+        && executeBatch(db,
+                        {QStringLiteral(
+                            "CREATE INDEX IF NOT EXISTS idx_job_updated_at ON job(updated_at DESC, id DESC)")},
                         errorMessage);
 }
 

@@ -1,6 +1,7 @@
 #include "app/AppBootstrap.h"
 
 #include "app/AppContext.h"
+#include "infrastructure/logging/Logger.h"
 #include "shared/Paths.h"
 #include "ui/imaging/LocalImageProvider.h"
 
@@ -8,31 +9,21 @@
 #include <QQmlContext>
 #include <QQmlError>
 #include <QQuickStyle>
-#include <QDateTime>
 #include <QDir>
-#include <QFile>
 #include <QMessageLogContext>
 #include <QCoreApplication>
-#include <QTextStream>
 #include <QTimer>
 #include <QWindow>
 
 namespace {
-QString qmlLogFilePath()
+QString applicationLogFilePath()
 {
-    return QDir(Paths::logsRoot()).filePath(QStringLiteral("qml-startup.log"));
+    return QDir(Paths::logsRoot()).filePath(QStringLiteral("app.log"));
 }
 
 void appendQmlStartupLog(const QString &message)
 {
-    QDir().mkpath(Paths::logsRoot());
-    QFile file(qmlLogFilePath());
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
-        return;
-    }
-
-    QTextStream out(&file);
-    out << QDateTime::currentDateTime().toString(Qt::ISODateWithMs) << " " << message << "\n";
+    Logger::info(message);
 }
 
 QString messageTypeLabel(QtMsgType type)
@@ -65,7 +56,14 @@ void qmlRuntimeMessageHandler(QtMsgType type, const QMessageLogContext &context,
         parts << QStringLiteral("[file:%1:%2]").arg(QString::fromUtf8(context.file)).arg(context.line);
     }
     parts << message;
-    appendQmlStartupLog(parts.join(' '));
+    const auto formattedMessage = parts.join(' ');
+    if (type == QtWarningMsg) {
+        Logger::warn(formattedMessage);
+    } else if (type == QtCriticalMsg || type == QtFatalMsg) {
+        Logger::error(formattedMessage);
+    } else {
+        Logger::info(formattedMessage);
+    }
 
     if (g_previousMessageHandler && g_previousMessageHandler != qmlRuntimeMessageHandler) {
         g_previousMessageHandler(type, context, message);
@@ -76,6 +74,10 @@ void installQmlRuntimeLogger()
 {
     static bool installed = false;
     if (installed) {
+        return;
+    }
+    QString loggerError;
+    if (!Logger::initialize(applicationLogFilePath(), &loggerError)) {
         return;
     }
     g_previousMessageHandler = qInstallMessageHandler(qmlRuntimeMessageHandler);
@@ -105,14 +107,14 @@ bool AppBootstrap::run()
     m_engine->addImageProvider(QStringLiteral("cinevault-local"), new LocalImageProvider);
     QObject::connect(m_engine.get(), &QQmlApplicationEngine::warnings, [](const QList<QQmlError> &warnings) {
         for (const auto &warning : warnings) {
-            appendQmlStartupLog(warning.toString());
+            Logger::warn(warning.toString());
         }
     });
     m_context->expose(*m_engine);
     m_engine->loadFromModule("CineVault", "Main");
     const auto loaded = !m_engine->rootObjects().isEmpty();
     if (!loaded) {
-        appendQmlStartupLog(QStringLiteral("QML root object load failed."));
+        Logger::error(QStringLiteral("QML root object load failed."));
         return false;
     }
 

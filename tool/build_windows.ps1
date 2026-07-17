@@ -3,14 +3,90 @@ param(
     [string]$FfmpegDevRoot = $env:FFMPEG_DEV_ROOT,
     [string]$Configuration = "Release",
     [string]$Version,
+    [string]$UpdateSignerSha256 = $env:CINEVAULT_UPDATE_SIGNER_SHA256,
+    [string]$SigningCertificateSha1 = $env:CINEVAULT_SIGNING_CERT_SHA1,
+    [string]$TimestampUrl = "http://timestamp.digicert.com",
     [switch]$RealWorkflow,
-    [switch]$EnableFfmpeg
+    [switch]$EnableFfmpeg,
+    [switch]$RequireSigning
 )
 
 $ErrorActionPreference = "Stop"
 
 . "$PSScriptRoot\windows_toolchain.ps1"
 . "$PSScriptRoot\version_helpers.ps1"
+
+$normalizedUpdateSignerSha256 = ([string]$UpdateSignerSha256).Replace(' ', '').Trim().ToLowerInvariant()
+$normalizedSigningCertificateSha1 = ([string]$SigningCertificateSha1).Replace(' ', '').Trim().ToLowerInvariant()
+if (-not [string]::IsNullOrWhiteSpace($normalizedUpdateSignerSha256) -and
+    $normalizedUpdateSignerSha256 -notmatch '^[0-9a-f]{64}$') {
+    throw "Update signer SHA-256 must contain exactly 64 hexadecimal characters."
+}
+if (-not [string]::IsNullOrWhiteSpace($normalizedSigningCertificateSha1) -and
+    $normalizedSigningCertificateSha1 -notmatch '^[0-9a-f]{40}$') {
+    throw "Signing certificate SHA-1 selector must contain exactly 40 hexadecimal characters."
+}
+if ($RequireSigning -and
+    ([string]::IsNullOrWhiteSpace($normalizedUpdateSignerSha256) -or
+     [string]::IsNullOrWhiteSpace($normalizedSigningCertificateSha1))) {
+    throw "A trusted Authenticode certificate is required for a production release."
+}
+
+function Get-CineVaultSignTool {
+    $command = Get-Command signtool.exe -ErrorAction SilentlyContinue
+    if ($null -ne $command) {
+        return $command.Source
+    }
+
+    $kitsRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+    $candidate = Get-ChildItem -LiteralPath $kitsRoot -Recurse -Filter signtool.exe -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Directory.Name -eq 'x64' } |
+        Sort-Object FullName -Descending |
+        Select-Object -First 1
+    if ($null -eq $candidate) {
+        throw "signtool.exe was not found."
+    }
+    return $candidate.FullName
+}
+
+function Assert-CineVaultSignature {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ExpectedSignerSha256
+    )
+
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or
+        $null -eq $signature.SignerCertificate) {
+        throw "Authenticode signature verification failed for ${Path}: $($signature.StatusMessage)"
+    }
+    $actualSignerSha256 = $signature.SignerCertificate.GetCertHashString('SHA256').ToLowerInvariant()
+    if ($actualSignerSha256 -cne $ExpectedSignerSha256) {
+        throw "Authenticode signer mismatch for $Path."
+    }
+}
+
+function Invoke-CineVaultSigning {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$SignToolPath,
+        [Parameter(Mandatory = $true)][string]$CertificateSha1,
+        [Parameter(Mandatory = $true)][string]$ExpectedSignerSha256,
+        [Parameter(Mandatory = $true)][string]$Rfc3161TimestampUrl
+    )
+
+    foreach ($attempt in 1..3) {
+        & $SignToolPath sign /q /sha1 $CertificateSha1 /s My /fd SHA256 /tr $Rfc3161TimestampUrl /td SHA256 $Path
+        if ($LASTEXITCODE -eq 0) {
+            Assert-CineVaultSignature -Path $Path -ExpectedSignerSha256 $ExpectedSignerSha256
+            return
+        }
+        if ($attempt -lt 3) {
+            Start-Sleep -Seconds (5 * $attempt)
+        }
+    }
+    throw "Authenticode signing failed after three attempts: $Path"
+}
 
 if ($RealWorkflow -and $EnableFfmpeg) {
     throw "-RealWorkflow uses the real project/import workflow without FFmpeg. Use -EnableFfmpeg by itself for the FFmpeg build."
@@ -19,10 +95,15 @@ if ($RealWorkflow -and $EnableFfmpeg) {
 $context = Get-CineVaultBuildContext -QtRoot $QtRoot -FfmpegDevRoot $FfmpegDevRoot -RequireFfmpeg:$EnableFfmpeg
 $projectRoot = Join-Path $context.RepoRoot "dit-tools-src\cinevault-pro"
 $outputRoot = Join-Path $context.RepoRoot "output"
+$sourceVersion = Get-CineVaultSourceVersion -RepositoryRoot $context.RepoRoot
+$sourceVersionTag = Get-NormalizedCineVaultVersionTag -Version $sourceVersion
 $version = if ([string]::IsNullOrWhiteSpace($Version)) {
-    Get-NextDistVersion -DistRoot $outputRoot -ReferenceRoots @((Join-Path $context.RepoRoot "dist"))
+    $sourceVersionTag
 } else {
     Get-NormalizedCineVaultVersionTag -Version $Version
+}
+if ($version -cne $sourceVersionTag) {
+    throw "Requested build version $version does not match repository VERSION $sourceVersionTag."
 }
 $appVersion = $version.TrimStart("v")
 
@@ -59,7 +140,7 @@ try {
         $assistantPrepareScript = Join-Path $projectRoot "cmake\PrepareSearchAssistantDependencies.cmake"
         Invoke-VcVarsCommand "cmake -DOUTPUT_ROOT=`"$assistantCacheRoot`" -P `"$assistantPrepareScript`""
     }
-    Invoke-VcVarsCommand "cmake --preset $configurePreset -DCINEVAULT_APP_VERSION=$appVersion"
+    Invoke-VcVarsCommand "cmake --preset $configurePreset -DCINEVAULT_UPDATE_SIGNER_SHA256=$normalizedUpdateSignerSha256"
     Invoke-VcVarsCommand "cmake --build --preset $buildPreset --config $Configuration"
 } finally {
     Pop-Location
@@ -158,6 +239,17 @@ if ((Test-Path -LiteralPath $exifToolExecutable -PathType Leaf) -and
 $deployMode = if ($Configuration -ieq "Debug") { "--debug" } else { "--release" }
 Invoke-VcVarsCommand "`"$($context.WindeployQt)`" $deployMode --qmldir `"$projectRoot\src\ui\qml`" `"$deployedExe`""
 
+$signToolPath = $null
+if ($RequireSigning) {
+    $signToolPath = Get-CineVaultSignTool
+    Invoke-CineVaultSigning `
+        -Path $deployedExe `
+        -SignToolPath $signToolPath `
+        -CertificateSha1 $normalizedSigningCertificateSha1 `
+        -ExpectedSignerSha256 $normalizedUpdateSignerSha256 `
+        -Rfc3161TimestampUrl $TimestampUrl
+}
+
 if ($context.HasFfmpegCli) {
     $ffmpegTargetRoot = Join-Path $stagingDir "ffmpeg"
     $ffmpegTargetBinDir = Join-Path $ffmpegTargetRoot "bin"
@@ -207,6 +299,14 @@ if ($LASTEXITCODE -ne 0) {
 $installerPath = Join-Path $installerOutputDir "CineVault-Setup-$version.exe"
 if (-not (Test-Path $installerPath)) {
     throw "Installer build completed but output was not found: $installerPath"
+}
+if ($RequireSigning) {
+    Invoke-CineVaultSigning `
+        -Path $installerPath `
+        -SignToolPath $signToolPath `
+        -CertificateSha1 $normalizedSigningCertificateSha1 `
+        -ExpectedSignerSha256 $normalizedUpdateSignerSha256 `
+        -Rfc3161TimestampUrl $TimestampUrl
 }
 
 Remove-InstallerStagingDir -Path $stagingDir -Root $stagingRoot

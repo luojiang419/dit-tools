@@ -13,6 +13,7 @@
 #include <QImage>
 #include <QImageReader>
 #include <QJsonArray>
+#include <QHostAddress>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QNetworkAccessManager>
@@ -153,6 +154,15 @@ QVector<FrameAnalysisRecord> sampleFramesForSummary(const QVector<FrameAnalysisR
     return sampled;
 }
 
+bool isLoopbackHost(const QString &host)
+{
+    if (host.compare(QStringLiteral("localhost"), Qt::CaseInsensitive) == 0) {
+        return true;
+    }
+    QHostAddress address;
+    return address.setAddress(host) && address.isLoopback();
+}
+
 QString normalizeEndpoint(QString baseUrl)
 {
     auto url = baseUrl.trimmed();
@@ -161,7 +171,8 @@ QString normalizeEndpoint(QString baseUrl)
     }
     if (!url.startsWith(QStringLiteral("http://"), Qt::CaseInsensitive)
         && !url.startsWith(QStringLiteral("https://"), Qt::CaseInsensitive)) {
-        url = QStringLiteral("http://") + url;
+        const QUrl candidate(QStringLiteral("https://") + url);
+        url = (isLoopbackHost(candidate.host()) ? QStringLiteral("http://") : QStringLiteral("https://")) + url;
     }
     if (url.endsWith(QLatin1Char('/'))) {
         url.chop(1);
@@ -174,6 +185,13 @@ QString normalizeEndpoint(QString baseUrl)
     }
 
     const QUrl parsedUrl(url);
+    if (!parsedUrl.isValid() || parsedUrl.host().isEmpty()
+        || (parsedUrl.scheme().compare(QStringLiteral("http"), Qt::CaseInsensitive) != 0
+            && parsedUrl.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) != 0)
+        || (parsedUrl.scheme().compare(QStringLiteral("http"), Qt::CaseInsensitive) == 0
+            && !isLoopbackHost(parsedUrl.host()))) {
+        return {};
+    }
     if (parsedUrl.path().isEmpty() || parsedUrl.path() == QStringLiteral("/")) {
         return url + QStringLiteral("/v1/chat/completions");
     }
@@ -200,6 +218,8 @@ HttpResult postJsonOnce(const QString &endpoint,
 
     QNetworkAccessManager manager;
     QNetworkRequest request{QUrl(endpoint)};
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                         QNetworkRequest::NoLessSafeRedirectPolicy);
     request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
     if (!apiKey.trimmed().isEmpty()) {
         request.setRawHeader("Authorization", QStringLiteral("Bearer %1").arg(apiKey.trimmed()).toUtf8());
@@ -250,6 +270,11 @@ HttpResult postJson(const QString &endpoint,
                     const QJsonObject &payload,
                     int timeoutSec)
 {
+    if (endpoint.trimmed().isEmpty()) {
+        HttpResult rejected;
+        rejected.errorMessage = QStringLiteral("非本机视觉接口必须使用 HTTPS，且不允许降级到 HTTP");
+        return rejected;
+    }
     const auto requestBody = QJsonDocument(payload).toJson(QJsonDocument::Compact);
     HttpResult result;
     int attempt = 0;
@@ -891,6 +916,11 @@ std::optional<QVector<MaterialDimensionAnalysis>> normalizeDimensionAnalyses(con
 }
 }
 
+QString VisionApiClient::normalizedEndpoint(const QString &baseUrl)
+{
+    return normalizeEndpoint(baseUrl);
+}
+
 bool VisionApiClient::testConnection(const QString &baseUrl,
                                      const QString &apiKey,
                                      const QString &model,
@@ -900,7 +930,9 @@ bool VisionApiClient::testConnection(const QString &baseUrl,
     const auto endpoint = normalizeEndpoint(baseUrl);
     if (endpoint.trimmed().isEmpty() || apiKey.trimmed().isEmpty() || model.trimmed().isEmpty()) {
         if (errorMessage) {
-            *errorMessage = QStringLiteral("请先完整填写 Base URL、API Key 和模型名");
+            *errorMessage = !baseUrl.trimmed().isEmpty() && endpoint.isEmpty()
+                ? QStringLiteral("非本机视觉接口必须使用 HTTPS，且不允许降级到 HTTP")
+                : QStringLiteral("请先完整填写 Base URL、API Key 和模型名");
         }
         return false;
     }

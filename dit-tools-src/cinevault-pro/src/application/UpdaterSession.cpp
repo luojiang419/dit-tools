@@ -20,6 +20,8 @@ namespace {
 constexpr auto kSessionArg = "--run-update-session=";
 constexpr auto kVersionArg = "--update-version=";
 constexpr auto kInstallerArg = "--update-installer=";
+constexpr auto kInstallerSizeArg = "--update-installer-size=";
+constexpr auto kInstallerSha256Arg = "--update-installer-sha256=";
 constexpr auto kInstallRootArg = "--update-install-root=";
 constexpr auto kExecutableNameArg = "--update-executable-name=";
 constexpr auto kOldPidArg = "--update-old-pid=";
@@ -45,6 +47,8 @@ QStringList UpdaterSessionRunner::buildArguments(const UpdaterInstallSession &se
         QString::fromLatin1(kSessionArg) + session.sessionId,
         QString::fromLatin1(kVersionArg) + session.versionTag,
         QString::fromLatin1(kInstallerArg) + session.installerPath,
+        QString::fromLatin1(kInstallerSizeArg) + QString::number(session.installerSize),
+        QString::fromLatin1(kInstallerSha256Arg) + session.installerSha256,
         QString::fromLatin1(kInstallRootArg) + session.installRoot,
         QString::fromLatin1(kExecutableNameArg) + session.executableName,
         QString::fromLatin1(kOldPidArg) + QString::number(session.oldProcessId)
@@ -69,6 +73,10 @@ bool UpdaterSessionRunner::parseArguments(const QStringList &arguments,
     parsed.versionTag = UpdateService::normalizeVersionTag(
         argumentValue(arguments, QString::fromLatin1(kVersionArg)));
     parsed.installerPath = argumentValue(arguments, QString::fromLatin1(kInstallerArg)).trimmed();
+    bool sizeOk = false;
+    parsed.installerSize = argumentValue(arguments, QString::fromLatin1(kInstallerSizeArg)).toLongLong(&sizeOk);
+    parsed.installerSha256 = UpdateService::normalizeSha256(
+        argumentValue(arguments, QString::fromLatin1(kInstallerSha256Arg)));
     parsed.installRoot = argumentValue(arguments, QString::fromLatin1(kInstallRootArg)).trimmed();
     parsed.executableName = QFileInfo(
         argumentValue(arguments, QString::fromLatin1(kExecutableNameArg))).fileName();
@@ -77,6 +85,9 @@ bool UpdaterSessionRunner::parseArguments(const QStringList &arguments,
 
     if (parsed.versionTag.isEmpty()
         || parsed.installerPath.isEmpty()
+        || !sizeOk
+        || parsed.installerSize <= 0
+        || parsed.installerSha256.isEmpty()
         || parsed.installRoot.isEmpty()
         || parsed.executableName.isEmpty()
         || !pidOk
@@ -95,6 +106,8 @@ bool UpdaterSessionRunner::parseArguments(const QStringList &arguments,
 
 bool UpdaterSessionRunner::launchDetached(const QString &versionTag,
                                           const QString &installerPath,
+                                          qint64 installerSize,
+                                          const QString &installerSha256,
                                           const QString &installRoot,
                                           const QString &sourceExecutablePath,
                                           qint64 oldProcessId,
@@ -103,6 +116,8 @@ bool UpdaterSessionRunner::launchDetached(const QString &versionTag,
 #if !defined(Q_OS_WIN)
     Q_UNUSED(versionTag)
     Q_UNUSED(installerPath)
+    Q_UNUSED(installerSize)
+    Q_UNUSED(installerSha256)
     Q_UNUSED(installRoot)
     Q_UNUSED(sourceExecutablePath)
     Q_UNUSED(oldProcessId)
@@ -116,10 +131,11 @@ bool UpdaterSessionRunner::launchDetached(const QString &versionTag,
     }
 
     const QFileInfo installerInfo(installerPath);
-    if (!installerInfo.isFile()) {
-        if (errorMessage) {
-            *errorMessage = QStringLiteral("更新安装包不存在：%1").arg(installerPath);
-        }
+    if (!UpdateService::validateInstallerFile(versionTag,
+                                              installerPath,
+                                              installerSize,
+                                              installerSha256,
+                                              errorMessage)) {
         return false;
     }
 
@@ -136,6 +152,8 @@ bool UpdaterSessionRunner::launchDetached(const QString &versionTag,
         QStringLiteral("update_%1").arg(QDateTime::currentMSecsSinceEpoch()));
     session.versionTag = normalizedVersion;
     session.installerPath = installerInfo.absoluteFilePath();
+    session.installerSize = installerSize;
+    session.installerSha256 = UpdateService::normalizeSha256(installerSha256);
     session.installRoot = QDir(installRoot).absolutePath();
     session.executableName = QFileInfo(sourceExecutablePath).fileName();
     session.oldProcessId = oldProcessId;
@@ -186,8 +204,17 @@ void UpdaterSessionRunner::start(const UpdaterInstallSession &session)
     m_started = true;
     m_session = session;
 
-    if (!QFileInfo::exists(m_session.installerPath)) {
-        completeFailure(QStringLiteral("更新安装包不存在：%1").arg(m_session.installerPath));
+    QString validationError;
+    if (!UpdateService::validateInstallerFile(m_session.versionTag,
+                                              m_session.installerPath,
+                                              m_session.installerSize,
+                                              m_session.installerSha256,
+                                              &validationError)) {
+        completeFailure(validationError);
+        return;
+    }
+    if (!UpdateService::verifyInstallerAuthenticode(m_session.installerPath, &validationError)) {
+        completeFailure(validationError);
         return;
     }
     if (!QFileInfo(m_session.installRoot).isDir()) {
@@ -403,6 +430,20 @@ void UpdaterSessionRunner::startSilentInstaller()
         return;
     }
 
+    QString validationError;
+    if (!UpdateService::validateInstallerFile(m_session.versionTag,
+                                              m_session.installerPath,
+                                              m_session.installerSize,
+                                              m_session.installerSha256,
+                                              &validationError)) {
+        completeFailure(validationError, QStringLiteral("更新安装包在启动安装器前未通过完整性复核。"));
+        return;
+    }
+    if (!UpdateService::verifyInstallerAuthenticode(m_session.installerPath, &validationError)) {
+        completeFailure(validationError, QStringLiteral("更新安装包在启动安装器前未通过发布者复核。"));
+        return;
+    }
+
     const QFileInfo installerInfo(m_session.installerPath);
     const auto installerSizeMiB = static_cast<double>(installerInfo.size()) / (1024.0 * 1024.0);
     emitProgress(2,
@@ -428,6 +469,8 @@ void UpdaterSessionRunner::startSilentInstaller()
     const QStringList scriptLines{
         QStringLiteral("$ErrorActionPreference = 'Stop'"),
         QStringLiteral("$installerPath = %1").arg(powerShellLiteral(m_session.installerPath)),
+        QStringLiteral("$expectedSha256 = '%1'").arg(m_session.installerSha256),
+        QStringLiteral("$expectedSignerSha256 = '%1'").arg(UpdateService::expectedUpdateSignerSha256()),
         QStringLiteral("$appDir = %1").arg(powerShellLiteral(m_session.installRoot)),
         QStringLiteral("$installerLogPath = %1").arg(powerShellLiteral(installerLogPath)),
         QStringLiteral("$installProgressPath = %1").arg(powerShellLiteral(m_installProgressFilePath)),
@@ -438,6 +481,12 @@ void UpdaterSessionRunner::startSilentInstaller()
         QStringLiteral("}"),
         QStringLiteral("try {"),
         QStringLiteral("    Write-UpdateLog '可视化更新器开始静默安装，目标版本：%1'").arg(m_session.versionTag),
+        QStringLiteral("    $actualSha256 = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()"),
+        QStringLiteral("    if ($actualSha256 -ne $expectedSha256) { throw '安装前 SHA-256 复核失败。' }"),
+        QStringLiteral("    $signature = Get-AuthenticodeSignature -LiteralPath $installerPath"),
+        QStringLiteral("    if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate) { throw '安装包 Authenticode 签名无效。' }"),
+        QStringLiteral("    $signerSha256 = $signature.SignerCertificate.GetCertHashString('SHA256').Replace(' ', '').ToLowerInvariant()"),
+        QStringLiteral("    if ($signerSha256 -ne $expectedSignerSha256) { throw '安装包签名者不受信任。' }"),
         QStringLiteral("    $installerArgs = @("),
         QStringLiteral("        '/SP-',"),
         QStringLiteral("        '/VERYSILENT',"),

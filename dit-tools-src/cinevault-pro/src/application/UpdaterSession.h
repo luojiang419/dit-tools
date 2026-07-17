@@ -12,6 +12,8 @@ struct UpdaterInstallSession {
     QString sessionId;
     QString versionTag;
     QString installerPath;
+    qint64 installerSize = 0;
+    QString installerSha256;
     QString installRoot;
     QString executableName;
     qint64 oldProcessId = 0;
@@ -39,6 +41,8 @@ public:
                                QString *errorMessage = nullptr);
     static bool launchDetached(const QString &versionTag,
                                const QString &installerPath,
+                               qint64 installerSize,
+                               const QString &installerSha256,
                                const QString &installRoot,
                                const QString &sourceExecutablePath,
                                qint64 oldProcessId,

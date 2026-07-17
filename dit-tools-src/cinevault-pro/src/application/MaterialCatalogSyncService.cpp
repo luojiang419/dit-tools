@@ -1041,18 +1041,49 @@ MaterialCatalogSyncService::MaterialCatalogSyncService(GlobalDatabaseManager *gl
 {
 }
 
+MaterialCatalogSyncService::~MaterialCatalogSyncService()
+{
+    waitForIdle();
+}
+
+void MaterialCatalogSyncService::waitForIdle()
+{
+    m_futures.waitForFinished();
+}
+
 void MaterialCatalogSyncService::syncCurrentProject()
 {
     if (!m_globalDatabaseManager || !m_projectService || !m_projectService->hasOpenProject()) {
         return;
     }
-    if (m_syncRunning.exchange(true)) {
-        m_syncPending = true;
+    syncProjectRecord(m_projectService->currentProject());
+}
+
+void MaterialCatalogSyncService::syncProject(const QString &projectDatabasePath)
+{
+    if (!m_globalDatabaseManager || !m_projectService || projectDatabasePath.trimmed().isEmpty()) {
         return;
     }
-    m_syncPending = false;
+    Project project;
+    QString errorMessage;
+    if (!m_projectService->projectForPath(projectDatabasePath, &project, &errorMessage)) {
+        return;
+    }
+    syncProjectRecord(project);
+}
 
-    const auto project = m_projectService->currentProject();
+void MaterialCatalogSyncService::syncProjectRecord(const Project &project)
+{
+    if (m_syncRunning.exchange(true)) {
+        if (!m_pendingProjectDatabasePaths.contains(project.databasePath)) {
+            m_pendingProjectDatabasePaths.enqueue(project.databasePath);
+        }
+        return;
+    }
+
+    const auto jobProjectDatabasePath = m_jobEngine
+        ? m_jobEngine->currentProjectDatabasePath()
+        : QString();
     const auto jobId = m_jobEngine
         ? m_jobEngine->createJob(JobType::GlobalSync,
                                  QStringLiteral("同步全局索引 %1").arg(project.name),
@@ -1062,31 +1093,36 @@ void MaterialCatalogSyncService::syncCurrentProject()
                                  projectProgressContext(QStringLiteral("同步项目索引"), 0, 1))
         : 0;
 
-    auto future = QtConcurrent::run([this, project, jobId]() {
+    auto future = QtConcurrent::run([this, project, jobProjectDatabasePath, jobId]() {
         const auto connectionName = QStringLiteral("global_sync_%1_%2")
             .arg(project.id)
             .arg(reinterpret_cast<quintptr>(QThread::currentThreadId()));
         QString errorMessage;
         auto db = m_globalDatabaseManager->openThreadConnection(connectionName, &errorMessage);
-        if (!db.isOpen()) {
-            failJob(jobId, errorMessage);
+        const auto closeConnection = [&]() {
+            db.close();
+            db = QSqlDatabase();
             m_globalDatabaseManager->closeThreadConnection(connectionName);
+        };
+        if (!db.isOpen()) {
+            failJob(jobProjectDatabasePath, jobId, errorMessage);
+            closeConnection();
             finishSyncRun();
             return;
         }
 
-        updateJob(jobId, 25, QStringLiteral("正在读取项目素材索引"), projectProgressContext(QStringLiteral("同步项目索引"), 0, 1));
+        updateJob(jobProjectDatabasePath, jobId, 25, QStringLiteral("正在读取项目素材索引"), projectProgressContext(QStringLiteral("同步项目索引"), 0, 1));
         if (!syncProjectIntoGlobal(db, project, m_globalDatabaseManager->hasFts5(), &errorMessage)) {
-            failJob(jobId, errorMessage);
+            failJob(jobProjectDatabasePath, jobId, errorMessage);
         } else {
-            updateJob(jobId, 100, QStringLiteral("当前项目素材已同步到素材管理中心"), projectProgressContext(QStringLiteral("同步项目索引"), 1, 1));
-            completeJob(jobId, QStringLiteral("当前项目素材已同步到素材管理中心"));
+            updateJob(jobProjectDatabasePath, jobId, 100, QStringLiteral("当前项目素材已同步到素材管理中心"), projectProgressContext(QStringLiteral("同步项目索引"), 1, 1));
+            completeJob(jobProjectDatabasePath, jobId, QStringLiteral("当前项目素材已同步到素材管理中心"));
             notifyCatalogChanged();
         }
-        m_globalDatabaseManager->closeThreadConnection(connectionName);
+        closeConnection();
         finishSyncRun();
     });
-    Q_UNUSED(future);
+    m_futures.addFuture(future);
 }
 
 void MaterialCatalogSyncService::rebuildAllProjects()
@@ -1101,6 +1137,9 @@ void MaterialCatalogSyncService::rebuildAllProjects()
     catalogSubject.name = QStringLiteral("全部已登记项目");
     catalogSubject.typeLabel = QStringLiteral("项目索引");
 
+    const auto jobProjectDatabasePath = m_jobEngine
+        ? m_jobEngine->currentProjectDatabasePath()
+        : QString();
     const auto jobId = m_jobEngine
         ? m_jobEngine->createJob(JobType::GlobalSync,
                                  QStringLiteral("重建全局素材索引"),
@@ -1110,27 +1149,32 @@ void MaterialCatalogSyncService::rebuildAllProjects()
                                  projectProgressContext(QStringLiteral("重建项目索引"), 0, 0))
         : 0;
 
-    auto future = QtConcurrent::run([this, jobId]() {
+    auto future = QtConcurrent::run([this, jobProjectDatabasePath, jobId]() {
         const auto connectionName = QStringLiteral("global_rebuild_%1").arg(reinterpret_cast<quintptr>(QThread::currentThreadId()));
         QString errorMessage;
         auto db = m_globalDatabaseManager->openThreadConnection(connectionName, &errorMessage);
-        if (!db.isOpen()) {
-            failJob(jobId, errorMessage);
+        const auto closeConnection = [&]() {
+            db.close();
+            db = QSqlDatabase();
             m_globalDatabaseManager->closeThreadConnection(connectionName);
+        };
+        if (!db.isOpen()) {
+            failJob(jobProjectDatabasePath, jobId, errorMessage);
+            closeConnection();
             finishSyncRun();
             return;
         }
 
         const auto projects = loadRegisteredProjects(db, &errorMessage);
         if (!errorMessage.isEmpty()) {
-            failJob(jobId, errorMessage);
-            m_globalDatabaseManager->closeThreadConnection(connectionName);
+            failJob(jobProjectDatabasePath, jobId, errorMessage);
+            closeConnection();
             finishSyncRun();
             return;
         }
         if (projects.isEmpty()) {
-            completeJob(jobId, QStringLiteral("没有可重建的已登记项目"));
-            m_globalDatabaseManager->closeThreadConnection(connectionName);
+            completeJob(jobProjectDatabasePath, jobId, QStringLiteral("没有可重建的已登记项目"));
+            closeConnection();
             finishSyncRun();
             return;
         }
@@ -1139,7 +1183,8 @@ void MaterialCatalogSyncService::rebuildAllProjects()
         int failedCount = 0;
         for (int index = 0; index < projects.size(); ++index) {
             const auto &project = projects.at(index);
-            updateJob(jobId,
+            updateJob(jobProjectDatabasePath,
+                      jobId,
                       qBound<qint64>(qint64{1},
                                      (static_cast<qint64>(index) * qint64{100}) / static_cast<qint64>(projects.size()),
                                      qint64{99}),
@@ -1158,55 +1203,62 @@ void MaterialCatalogSyncService::rebuildAllProjects()
         }
 
         if (failedCount > 0) {
-            updateJob(jobId, 100, QStringLiteral("全局索引重建完成，成功 %1 个项目，失败 %2 个项目").arg(successCount).arg(failedCount), projectProgressContext(QStringLiteral("重建项目索引"), projects.size(), projects.size()));
-            completeJob(jobId, QStringLiteral("全局索引重建完成，成功 %1 个项目，失败 %2 个项目").arg(successCount).arg(failedCount));
+            updateJob(jobProjectDatabasePath, jobId, 100, QStringLiteral("全局索引重建完成，成功 %1 个项目，失败 %2 个项目").arg(successCount).arg(failedCount), projectProgressContext(QStringLiteral("重建项目索引"), projects.size(), projects.size()));
+            completeJob(jobProjectDatabasePath, jobId, QStringLiteral("全局索引重建完成，成功 %1 个项目，失败 %2 个项目").arg(successCount).arg(failedCount));
         } else {
-            updateJob(jobId, 100, QStringLiteral("全局索引重建完成，共 %1 个项目").arg(successCount), projectProgressContext(QStringLiteral("重建项目索引"), projects.size(), projects.size()));
-            completeJob(jobId, QStringLiteral("全局索引重建完成，共 %1 个项目").arg(successCount));
+            updateJob(jobProjectDatabasePath, jobId, 100, QStringLiteral("全局索引重建完成，共 %1 个项目").arg(successCount), projectProgressContext(QStringLiteral("重建项目索引"), projects.size(), projects.size()));
+            completeJob(jobProjectDatabasePath, jobId, QStringLiteral("全局索引重建完成，共 %1 个项目").arg(successCount));
         }
         notifyCatalogChanged();
-        m_globalDatabaseManager->closeThreadConnection(connectionName);
+        closeConnection();
         finishSyncRun();
     });
-    Q_UNUSED(future);
+    m_futures.addFuture(future);
 }
 
-void MaterialCatalogSyncService::updateJob(qint64 jobId, qint64 progress, const QString &detail, const JobProgressContext &progressContext)
+void MaterialCatalogSyncService::updateJob(const QString &projectDatabasePath,
+                                           qint64 jobId,
+                                           qint64 progress,
+                                           const QString &detail,
+                                           const JobProgressContext &progressContext)
 {
     if (!m_jobEngine || jobId <= 0) {
         return;
     }
-    QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, jobId, progress, detail, progressContext]() {
-        engine->updateJob(jobId, progress, detail, progressContext);
+    QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, projectDatabasePath, jobId, progress, detail, progressContext]() {
+        engine->updateJobForProject(projectDatabasePath, jobId, progress, detail, progressContext);
     }, Qt::QueuedConnection);
 }
 
-void MaterialCatalogSyncService::completeJob(qint64 jobId, const QString &detail)
+void MaterialCatalogSyncService::completeJob(const QString &projectDatabasePath, qint64 jobId, const QString &detail)
 {
     if (!m_jobEngine || jobId <= 0) {
         return;
     }
-    QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, jobId, detail]() {
-        engine->completeJob(jobId, detail);
+    QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, projectDatabasePath, jobId, detail]() {
+        engine->completeJobForProject(projectDatabasePath, jobId, detail);
     }, Qt::QueuedConnection);
 }
 
-void MaterialCatalogSyncService::failJob(qint64 jobId, const QString &errorMessage)
+void MaterialCatalogSyncService::failJob(const QString &projectDatabasePath, qint64 jobId, const QString &errorMessage)
 {
     if (!m_jobEngine || jobId <= 0) {
         return;
     }
-    QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, jobId, errorMessage]() {
-        engine->failJob(jobId, errorMessage);
+    QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, projectDatabasePath, jobId, errorMessage]() {
+        engine->failJobForProject(projectDatabasePath, jobId, errorMessage);
     }, Qt::QueuedConnection);
 }
 
 void MaterialCatalogSyncService::finishSyncRun()
 {
-    m_syncRunning = false;
-    if (m_syncPending.exchange(false)) {
-        QMetaObject::invokeMethod(this, &MaterialCatalogSyncService::syncCurrentProject, Qt::QueuedConnection);
-    }
+    QMetaObject::invokeMethod(this, [this]() {
+        m_syncRunning = false;
+        if (!m_pendingProjectDatabasePaths.isEmpty()) {
+            const auto projectDatabasePath = m_pendingProjectDatabasePaths.dequeue();
+            syncProject(projectDatabasePath);
+        }
+    }, Qt::QueuedConnection);
 }
 
 void MaterialCatalogSyncService::notifyCatalogChanged()

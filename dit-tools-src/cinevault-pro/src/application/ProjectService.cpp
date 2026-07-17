@@ -10,6 +10,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QRegularExpression>
+#include <QSaveFile>
 #include <QSet>
 #include <QSqlDatabase>
 #include <QSqlError>
@@ -17,11 +18,14 @@
 #include <QUuid>
 
 namespace {
+constexpr auto kProjectDatabaseFileName = "project.cvdb";
+constexpr auto kProjectMarkerFileName = ".cinevault-project";
+
 QString projectDatabasePath(const QString &projectPath)
 {
     const QFileInfo info(projectPath.trimmed());
     const auto databasePath = info.isDir()
-        ? QDir(info.absoluteFilePath()).filePath(QStringLiteral("project.cvdb"))
+        ? QDir(info.absoluteFilePath()).filePath(QString::fromLatin1(kProjectDatabaseFileName))
         : info.absoluteFilePath();
     return QFileInfo(databasePath).absoluteFilePath();
 }
@@ -143,11 +147,22 @@ bool writeProjectRecordToDatabase(const QString &databasePath, const Project &pr
             return false;
         }
 
+        if (!db.transaction()) {
+            if (errorMessage) {
+                *errorMessage = db.lastError().text();
+            }
+            db.close();
+            db = QSqlDatabase();
+            QSqlDatabase::removeDatabase(connectionName);
+            return false;
+        }
+
         QSqlQuery clear(db);
         if (!clear.exec(QStringLiteral("DELETE FROM project"))) {
             if (errorMessage) {
                 *errorMessage = clear.lastError().text();
             }
+            db.rollback();
             db.close();
             db = QSqlDatabase();
             QSqlDatabase::removeDatabase(connectionName);
@@ -164,6 +179,17 @@ bool writeProjectRecordToDatabase(const QString &databasePath, const Project &pr
             if (errorMessage) {
                 *errorMessage = insert.lastError().text();
             }
+            db.rollback();
+            db.close();
+            db = QSqlDatabase();
+            QSqlDatabase::removeDatabase(connectionName);
+            return false;
+        }
+        if (!db.commit()) {
+            if (errorMessage) {
+                *errorMessage = db.lastError().text();
+            }
+            db.rollback();
             db.close();
             db = QSqlDatabase();
             QSqlDatabase::removeDatabase(connectionName);
@@ -202,6 +228,46 @@ bool renameDirectory(const QString &oldRoot, const QString &newRoot, QString *er
     }
     return false;
 }
+
+bool writeProjectMarker(const QString &projectRoot, const QString &projectId, QString *errorMessage)
+{
+    QSaveFile marker(QDir(projectRoot).filePath(QString::fromLatin1(kProjectMarkerFileName)));
+    if (!marker.open(QIODevice::WriteOnly | QIODevice::Text)
+        || marker.write(projectId.toUtf8()) != projectId.toUtf8().size()
+        || !marker.commit()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("无法写入项目根标记：%1").arg(marker.errorString());
+        }
+        return false;
+    }
+    return true;
+}
+
+bool isDedicatedProjectRoot(const QString &databasePath,
+                            const Project &project,
+                            QString *errorMessage)
+{
+    const QFileInfo databaseInfo(databasePath);
+    const auto projectRoot = databaseInfo.absolutePath();
+    if (databaseInfo.fileName().compare(QString::fromLatin1(kProjectDatabaseFileName), Qt::CaseInsensitive) != 0
+        || QDir(projectRoot).isRoot()
+        || !samePath(project.rootPath, projectRoot)) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("拒绝删除：该数据库不位于经过验证的专用项目根目录。可改用“从项目库移除”。");
+        }
+        return false;
+    }
+
+    QFile marker(QDir(projectRoot).filePath(QString::fromLatin1(kProjectMarkerFileName)));
+    if (!marker.open(QIODevice::ReadOnly | QIODevice::Text)
+        || QString::fromUtf8(marker.readAll()).trimmed() != project.id) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("拒绝删除：项目根标记缺失或不匹配。为保护同目录中的其他文件，只能移除项目库入口。");
+        }
+        return false;
+    }
+    return true;
+}
 }
 
 ProjectService::ProjectService(DatabaseManager *databaseManager,
@@ -228,8 +294,8 @@ bool ProjectService::createProject(const QString &projectName, const QString &pa
         return false;
     }
 
-    const auto projectRoot = QDir(parentDirectory).filePath(safeName);
-    const auto databasePath = QDir(projectRoot).filePath(QStringLiteral("project.cvdb"));
+    const auto projectRoot = QFileInfo(QDir(parentDirectory).filePath(safeName)).absoluteFilePath();
+    const auto databasePath = QDir(projectRoot).filePath(QString::fromLatin1(kProjectDatabaseFileName));
     if (QFileInfo::exists(projectRoot)) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("目标项目文件夹已存在：%1").arg(projectRoot);
@@ -241,9 +307,12 @@ bool ProjectService::createProject(const QString &projectName, const QString &pa
         return false;
     }
 
-    if (!m_databaseManager->openProjectDatabase(databasePath, errorMessage)) {
+    DatabaseManager preparationDatabase;
+    if (!preparationDatabase.openProjectDatabase(databasePath, errorMessage)) {
+        QDir(projectRoot).removeRecursively();
         return false;
     }
+    preparationDatabase.closeProjectDatabase();
 
     Project project;
     project.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -252,18 +321,17 @@ bool ProjectService::createProject(const QString &projectName, const QString &pa
     project.databasePath = databasePath;
     project.createdAt = QDateTime::currentDateTime().toString(Qt::ISODate);
 
-    if (!writeProjectRecord(project, errorMessage)) {
+    if (!writeProjectRecordToDatabase(databasePath, project, errorMessage)
+        || !writeProjectMarker(projectRoot, project.id, errorMessage)) {
+        QDir(projectRoot).removeRecursively();
         return false;
     }
 
-    m_currentProject = project;
-    m_settings->addKnownProject(project.databasePath);
-    m_settings->addRecentProject(project.databasePath);
-    if (!Logger::initialize(QDir(projectRoot).filePath(QStringLiteral("logs/app.log")), errorMessage)) {
+    if (!openProject(databasePath, errorMessage)) {
+        QDir(projectRoot).removeRecursively();
         return false;
     }
     Logger::info(QStringLiteral("项目已创建：%1").arg(project.rootPath));
-    emit projectChanged();
     return true;
 }
 
@@ -278,43 +346,46 @@ bool ProjectService::openProject(const QString &projectPath, QString *errorMessa
         return false;
     }
 
-    if (!m_databaseManager->openProjectDatabase(databasePath, errorMessage)) {
+    Project storedProject;
+    if (!readProjectRecord(databasePath, &storedProject, errorMessage)) {
         return false;
     }
 
-    QSqlQuery query(m_databaseManager->database());
-    query.prepare(QStringLiteral("SELECT id, name, root_path, created_at FROM project ORDER BY created_at DESC LIMIT 1"));
-    if (!query.exec()) {
-        if (errorMessage) {
-            *errorMessage = QStringLiteral("读取项目信息失败：%1").arg(query.lastError().text());
-        }
-        m_databaseManager->closeProjectDatabase();
-        return false;
-    }
-    if (!query.next()) {
-        if (errorMessage) {
-            *errorMessage = QStringLiteral("项目数据库缺少项目信息。");
-        }
-        m_databaseManager->closeProjectDatabase();
+    Project project = storedProject;
+    project.databasePath = databasePath;
+    project.rootPath = QFileInfo(databasePath).absolutePath();
+    if (!ensureProjectDirectories(project.rootPath, errorMessage)) {
         return false;
     }
 
-    m_currentProject.id = query.value(0).toString();
-    m_currentProject.name = query.value(1).toString();
-    m_currentProject.rootPath = query.value(2).toString();
-    m_currentProject.databasePath = databasePath;
-    m_currentProject.createdAt = query.value(3).toString();
-    if (!ensureProjectDirectories(m_currentProject.rootPath, errorMessage)) {
+    const auto previousProject = m_currentProject;
+    const auto restorePreviousProject = [&]() {
         m_databaseManager->closeProjectDatabase();
         m_currentProject = {};
+        if (previousProject.databasePath.isEmpty()) {
+            return;
+        }
+        QString restoreError;
+        if (m_databaseManager->openProjectDatabase(previousProject.databasePath, &restoreError)) {
+            m_currentProject = previousProject;
+        } else if (errorMessage) {
+            *errorMessage += QStringLiteral("；恢复原项目失败：%1").arg(restoreError);
+        }
+    };
+
+    if (!m_databaseManager->openProjectDatabase(databasePath, errorMessage)) {
+        restorePreviousProject();
+        return false;
+    }
+    const bool repairedPhysicalRoot = !samePath(storedProject.rootPath, project.rootPath);
+    if (repairedPhysicalRoot && !writeProjectRecord(project, errorMessage)) {
+        restorePreviousProject();
         return false;
     }
 
+    m_currentProject = project;
     m_settings->addKnownProject(databasePath);
     m_settings->addRecentProject(databasePath);
-    if (!Logger::initialize(QDir(m_currentProject.rootPath).filePath(QStringLiteral("logs/app.log")), errorMessage)) {
-        return false;
-    }
     Logger::info(QStringLiteral("项目已打开：%1").arg(databasePath));
     emit projectChanged();
     return true;
@@ -333,6 +404,11 @@ void ProjectService::closeProject()
 Project ProjectService::currentProject() const
 {
     return m_currentProject;
+}
+
+bool ProjectService::projectForPath(const QString &projectPath, Project *project, QString *errorMessage) const
+{
+    return readProjectRecord(projectDatabasePath(projectPath), project, errorMessage);
 }
 
 QVector<ProjectLibraryEntry> ProjectService::projectLibraryEntries() const
@@ -417,24 +493,70 @@ bool ProjectService::renameProject(const QString &projectPath, const QString &ne
         return false;
     }
 
+    const auto originalProject = project;
     project.name = safeName;
     project.rootPath = newRoot;
     project.databasePath = newDatabasePath;
     if (!ensureProjectDirectories(project.rootPath, errorMessage)
         || !writeProjectRecordToDatabase(project.databasePath, project, errorMessage)) {
+        const auto operationError = errorMessage ? *errorMessage : QStringLiteral("项目记录更新失败");
+        writeProjectRecordToDatabase(newDatabasePath, originalProject, nullptr);
+        QString rollbackError;
+        if (!folderUnchanged && !renameDirectory(newRoot, oldRoot, &rollbackError) && errorMessage) {
+            *errorMessage = QStringLiteral("%1；目录回滚失败：%2").arg(operationError, rollbackError);
+        } else if (errorMessage) {
+            *errorMessage = operationError;
+        }
+        if (wasCurrent) {
+            QString reopenError;
+            if (!openProject(databasePath, &reopenError) && errorMessage) {
+                *errorMessage += QStringLiteral("；恢复原项目失败：%1").arg(reopenError);
+            }
+        }
         return false;
     }
 
-    m_settings->replaceProjectPath(databasePath, project.databasePath);
+    bool globalReferenceUpdated = false;
     if (m_globalDatabaseManager) {
-        m_globalDatabaseManager->updateProjectReference(project.id, project.name, databasePath, project.databasePath, nullptr);
+        QString globalError;
+        globalReferenceUpdated = m_globalDatabaseManager->updateProjectReference(
+            project.id, project.name, databasePath, project.databasePath, &globalError);
+        if (!globalReferenceUpdated) {
+            writeProjectRecordToDatabase(newDatabasePath, originalProject, nullptr);
+            if (!folderUnchanged) {
+                renameDirectory(newRoot, oldRoot, nullptr);
+            }
+            if (wasCurrent) {
+                QString reopenError;
+                openProject(databasePath, &reopenError);
+            }
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("更新全局项目引用失败：%1").arg(globalError);
+            }
+            return false;
+        }
     }
 
     if (wasCurrent) {
         if (!openProject(project.databasePath, errorMessage)) {
+            if (globalReferenceUpdated) {
+                m_globalDatabaseManager->updateProjectReference(
+                    originalProject.id,
+                    originalProject.name,
+                    project.databasePath,
+                    databasePath,
+                    nullptr);
+            }
+            writeProjectRecordToDatabase(newDatabasePath, originalProject, nullptr);
+            if (!folderUnchanged) {
+                renameDirectory(newRoot, oldRoot, nullptr);
+            }
+            QString reopenError;
+            openProject(databasePath, &reopenError);
             return false;
         }
     }
+    m_settings->replaceProjectPath(databasePath, project.databasePath);
     emit projectLibraryChanged();
     return true;
 }
@@ -505,23 +627,65 @@ bool ProjectService::moveProject(const QString &projectPath, const QString &newP
         return false;
     }
 
+    const auto originalProject = project;
     project.rootPath = newRoot;
     project.databasePath = newDatabasePath;
     if (!ensureProjectDirectories(project.rootPath, errorMessage)
         || !writeProjectRecordToDatabase(project.databasePath, project, errorMessage)) {
+        const auto operationError = errorMessage ? *errorMessage : QStringLiteral("项目记录更新失败");
+        writeProjectRecordToDatabase(newDatabasePath, originalProject, nullptr);
+        QString rollbackError;
+        if (!renameDirectory(newRoot, oldRoot, &rollbackError) && errorMessage) {
+            *errorMessage = QStringLiteral("%1；目录回滚失败：%2").arg(operationError, rollbackError);
+        } else if (errorMessage) {
+            *errorMessage = operationError;
+        }
+        if (wasCurrent) {
+            QString reopenError;
+            if (!openProject(databasePath, &reopenError) && errorMessage) {
+                *errorMessage += QStringLiteral("；恢复原项目失败：%1").arg(reopenError);
+            }
+        }
         return false;
     }
 
-    m_settings->replaceProjectPath(databasePath, project.databasePath);
+    bool globalReferenceUpdated = false;
     if (m_globalDatabaseManager) {
-        m_globalDatabaseManager->updateProjectReference(project.id, project.name, databasePath, project.databasePath, nullptr);
+        QString globalError;
+        globalReferenceUpdated = m_globalDatabaseManager->updateProjectReference(
+            project.id, project.name, databasePath, project.databasePath, &globalError);
+        if (!globalReferenceUpdated) {
+            writeProjectRecordToDatabase(newDatabasePath, originalProject, nullptr);
+            renameDirectory(newRoot, oldRoot, nullptr);
+            if (wasCurrent) {
+                QString reopenError;
+                openProject(databasePath, &reopenError);
+            }
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("更新全局项目引用失败：%1").arg(globalError);
+            }
+            return false;
+        }
     }
 
     if (wasCurrent) {
         if (!openProject(project.databasePath, errorMessage)) {
+            if (globalReferenceUpdated) {
+                m_globalDatabaseManager->updateProjectReference(
+                    originalProject.id,
+                    originalProject.name,
+                    project.databasePath,
+                    databasePath,
+                    nullptr);
+            }
+            writeProjectRecordToDatabase(newDatabasePath, originalProject, nullptr);
+            renameDirectory(newRoot, oldRoot, nullptr);
+            QString reopenError;
+            openProject(databasePath, &reopenError);
             return false;
         }
     }
+    m_settings->replaceProjectPath(databasePath, project.databasePath);
     emit projectLibraryChanged();
     return true;
 }
@@ -540,6 +704,9 @@ bool ProjectService::deleteProjectToTrash(const QString &projectPath, QString *e
 
     Project project;
     if (!readProjectRecord(databasePath, &project, errorMessage)) {
+        return false;
+    }
+    if (!isDedicatedProjectRoot(databasePath, project, errorMessage)) {
         return false;
     }
 
@@ -571,11 +738,20 @@ bool ProjectService::deleteProjectToTrash(const QString &projectPath, QString *e
 
 bool ProjectService::writeProjectRecord(const Project &project, QString *errorMessage)
 {
-    QSqlQuery query(m_databaseManager->database());
+    auto db = m_databaseManager->database();
+    if (!db.transaction()) {
+        if (errorMessage) {
+            *errorMessage = db.lastError().text();
+        }
+        return false;
+    }
+
+    QSqlQuery query(db);
     if (!query.exec(QStringLiteral("DELETE FROM project"))) {
         if (errorMessage) {
             *errorMessage = query.lastError().text();
         }
+        db.rollback();
         return false;
     }
 
@@ -588,6 +764,14 @@ bool ProjectService::writeProjectRecord(const Project &project, QString *errorMe
         if (errorMessage) {
             *errorMessage = query.lastError().text();
         }
+        db.rollback();
+        return false;
+    }
+    if (!db.commit()) {
+        if (errorMessage) {
+            *errorMessage = db.lastError().text();
+        }
+        db.rollback();
         return false;
     }
     return true;

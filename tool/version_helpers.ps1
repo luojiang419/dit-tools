@@ -69,6 +69,26 @@ function Get-NormalizedCineVaultVersionTag {
     return Format-CineVaultVersionTag (ConvertTo-CineVaultVersionParts -Version $Version)
 }
 
+function Get-CineVaultSourceVersion {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepositoryRoot
+    )
+
+    $versionPath = Join-Path $RepositoryRoot 'VERSION'
+    if (-not (Test-Path -LiteralPath $versionPath -PathType Leaf)) {
+        throw "CineVault version source is missing: $versionPath"
+    }
+
+    $sourceVersion = (Get-Content -LiteralPath $versionPath -Raw).Trim()
+    $parts = ConvertTo-CineVaultVersionParts -Version $sourceVersion
+    $normalizedVersion = "{0}.{1}.{2}" -f $parts.Major, $parts.Minor, $parts.Patch
+    if ($sourceVersion -cne $normalizedVersion) {
+        throw "VERSION must contain exactly one normalized semantic version without a v prefix: $sourceVersion"
+    }
+    return $normalizedVersion
+}
+
 function Compare-CineVaultVersions {
     param(
         [Parameter(Mandatory = $true)]

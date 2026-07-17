@@ -1,9 +1,9 @@
 #ifndef AppVersion
-#define AppVersion "0.1.97"
+#error AppVersion must be injected from the repository VERSION file by tool/build_windows.ps1
 #endif
 
 #ifndef VersionTag
-#define VersionTag "v0.1.97"
+#error VersionTag must be injected from the repository VERSION file by tool/build_windows.ps1
 #endif
 
 #ifndef SourceDir

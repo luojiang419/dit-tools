@@ -78,6 +78,7 @@ AppContext::AppContext(QObject *parent)
     connect(m_sourceRailViewModel, &MinimalSourceRailViewModel::sourceSelected, m_reportWorkspaceViewModel, &MinimalReportWorkspaceViewModel::setSelectedSource);
     connect(m_libraryWorkspaceViewModel, &MinimalLibraryWorkspaceViewModel::assetSelected, m_inspectorViewModel, &MinimalInspectorViewModel::showAsset);
 }
+
 #else
     , m_quickSearchController(new QuickSearchController(&m_settings, this))
     , m_databaseManager(new DatabaseManager(this))
@@ -151,42 +152,45 @@ AppContext::AppContext(QObject *parent)
     }
 
     connect(m_projectService, &ProjectService::projectChanged, m_shellViewModel, &ShellViewModel::resetProjectUiState);
-    connect(m_projectService, &ProjectService::projectChanged, m_jobEngine, &JobEngine::clearJobs);
+    connect(m_projectService, &ProjectService::projectChanged, m_jobEngine, &JobEngine::reloadJobs);
     connect(m_projectService, &ProjectService::projectChanged, m_sourceRailViewModel, &SourceRailViewModel::resetForProject);
     connect(m_projectService, &ProjectService::projectChanged, m_libraryWorkspaceViewModel, &LibraryWorkspaceViewModel::resetForProject);
     connect(m_projectService, &ProjectService::projectChanged, m_jobTimelineViewModel, &JobTimelineViewModel::reload);
     connect(m_projectService, &ProjectService::projectChanged, m_inspectorViewModel, &InspectorViewModel::clear);
-    connect(m_projectService, &ProjectService::projectChanged, m_materialCatalogSyncService, &MaterialCatalogSyncService::syncCurrentProject);
+    connect(m_projectService, &ProjectService::projectChanged, m_materialCatalogSyncService, &MaterialCatalogSyncService::syncCurrentProject, Qt::QueuedConnection);
     connect(m_projectService, &ProjectService::projectChanged, m_mediaTaskService, &MediaTaskService::recoverStaleThumbnails);
     connect(m_projectService, &ProjectService::projectChanged, m_importService, &ImportService::resumeInterruptedScans);
     connect(m_projectService, &ProjectService::projectChanged, m_importService, &ImportService::rescanLegacySourceRoots);
-    connect(m_importService, &ImportService::catalogChanged, m_sourceRailViewModel, &SourceRailViewModel::reload);
-    connect(m_importService, &ImportService::catalogChanged, m_libraryWorkspaceViewModel, &LibraryWorkspaceViewModel::reload);
-    connect(m_importService, &ImportService::catalogChanged, m_materialCatalogSyncService, &MaterialCatalogSyncService::syncCurrentProject);
+    connect(m_importService, &ImportService::catalogChanged, m_sourceRailViewModel, &SourceRailViewModel::reload, Qt::QueuedConnection);
+    connect(m_importService, &ImportService::catalogChanged, m_libraryWorkspaceViewModel, &LibraryWorkspaceViewModel::reload, Qt::QueuedConnection);
+    connect(m_importService, &ImportService::catalogChanged, m_materialCatalogSyncService, &MaterialCatalogSyncService::syncCurrentProject, Qt::QueuedConnection);
 
     connect(m_scanEngine, &ScanEngine::scanFinished, m_mediaTaskService, &MediaTaskService::startForSourceRoot);
     connect(m_scanEngine,
             &ScanEngine::scanFinished,
             m_metadataExtractionService,
             &MetadataExtractionService::startForSourceRoot);
-    connect(m_mediaTaskService, &MediaTaskService::mediaCatalogChanged, m_libraryWorkspaceViewModel, &LibraryWorkspaceViewModel::reload);
-    connect(m_mediaTaskService, &MediaTaskService::mediaCatalogChanged, m_inspectorViewModel, &InspectorViewModel::reload);
-    connect(m_mediaTaskService, &MediaTaskService::mediaCatalogChanged, m_materialCatalogSyncService, &MaterialCatalogSyncService::syncCurrentProject);
+    connect(m_mediaTaskService, &MediaTaskService::mediaCatalogChanged, m_libraryWorkspaceViewModel, &LibraryWorkspaceViewModel::reload, Qt::QueuedConnection);
+    connect(m_mediaTaskService, &MediaTaskService::mediaCatalogChanged, m_inspectorViewModel, &InspectorViewModel::reload, Qt::QueuedConnection);
+    connect(m_mediaTaskService, &MediaTaskService::mediaCatalogChanged, m_materialCatalogSyncService, &MaterialCatalogSyncService::syncProject, Qt::QueuedConnection);
     connect(m_metadataExtractionService,
             &MetadataExtractionService::metadataCatalogChanged,
             m_libraryWorkspaceViewModel,
-            &LibraryWorkspaceViewModel::reload);
+            &LibraryWorkspaceViewModel::reload,
+            Qt::QueuedConnection);
     connect(m_metadataExtractionService,
             &MetadataExtractionService::metadataCatalogChanged,
             m_inspectorViewModel,
-            &InspectorViewModel::reload);
+            &InspectorViewModel::reload,
+            Qt::QueuedConnection);
     connect(m_metadataExtractionService,
             &MetadataExtractionService::metadataCatalogChanged,
             m_materialCatalogSyncService,
-            &MaterialCatalogSyncService::syncCurrentProject);
-    connect(m_libraryQueryService, &LibraryQueryService::dataChanged, m_sourceRailViewModel, &SourceRailViewModel::reload);
-    connect(m_libraryQueryService, &LibraryQueryService::dataChanged, m_inspectorViewModel, &InspectorViewModel::reload);
-    connect(m_libraryQueryService, &LibraryQueryService::dataChanged, m_materialCatalogSyncService, &MaterialCatalogSyncService::syncCurrentProject);
+            &MaterialCatalogSyncService::syncProject,
+            Qt::QueuedConnection);
+    connect(m_libraryQueryService, &LibraryQueryService::dataChanged, m_sourceRailViewModel, &SourceRailViewModel::reload, Qt::QueuedConnection);
+    connect(m_libraryQueryService, &LibraryQueryService::dataChanged, m_inspectorViewModel, &InspectorViewModel::reload, Qt::QueuedConnection);
+    connect(m_libraryQueryService, &LibraryQueryService::dataChanged, m_materialCatalogSyncService, &MaterialCatalogSyncService::syncCurrentProject, Qt::QueuedConnection);
     connect(m_materialCatalogSyncService, &MaterialCatalogSyncService::catalogChanged,
             m_searchDocumentSyncService, &SearchDocumentSyncService::scheduleFullSync);
     connect(m_videoAnalysisService, &VideoAnalysisService::catalogChanged,
@@ -230,6 +234,30 @@ AppContext::AppContext(QObject *parent)
     connect(m_libraryWorkspaceViewModel, &LibraryWorkspaceViewModel::assetSelected, m_inspectorViewModel, &InspectorViewModel::showAsset);
 }
 #endif
+
+AppContext::~AppContext()
+{
+#if !CINEVAULT_BUILD_MINIMAL_GUI
+    if (m_settingsViewModel) {
+        m_settingsViewModel->waitForIdle();
+    }
+    if (m_videoAnalysisService) {
+        m_videoAnalysisService->waitForIdle();
+    }
+    if (m_materialCatalogSyncService) {
+        m_materialCatalogSyncService->waitForIdle();
+    }
+    if (m_metadataExtractionService) {
+        m_metadataExtractionService->waitForIdle();
+    }
+    if (m_mediaTaskService) {
+        m_mediaTaskService->waitForIdle();
+    }
+    if (m_scanEngine) {
+        m_scanEngine->waitForIdle();
+    }
+#endif
+}
 
 void AppContext::expose(QQmlApplicationEngine &engine)
 {

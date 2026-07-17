@@ -22,6 +22,7 @@ public:
     void closeProject();
 
     Project currentProject() const;
+    bool projectForPath(const QString &projectPath, Project *project, QString *errorMessage) const;
     QVector<ProjectLibraryEntry> projectLibraryEntries() const;
     QStringList recentProjects() const;
     bool hasOpenProject() const;

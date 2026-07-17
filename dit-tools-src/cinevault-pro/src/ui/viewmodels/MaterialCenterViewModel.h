@@ -212,6 +212,8 @@ public:
     Q_INVOKABLE bool openQuickSearchResult(const QString &videoKey);
     Q_INVOKABLE bool openQuickSearchResultAtIndex(const QString &videoKey, int resultIndex);
     Q_INVOKABLE bool openQuickSearchFolderResult(const QString &folderKey);
+    Q_INVOKABLE QString quickSearchFolderKeyAt(int resultIndex) const;
+    Q_INVOKABLE QString quickSearchVideoKeyAt(int resultIndex) const;
     Q_INVOKABLE void locateSelectedSource();
     Q_INVOKABLE bool openAssetFolder(const QString &videoKey);
     Q_INVOKABLE bool copyAssetPath(const QString &videoKey);

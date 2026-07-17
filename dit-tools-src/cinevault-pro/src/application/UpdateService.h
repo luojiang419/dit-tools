@@ -14,6 +14,7 @@ struct UpdateReleaseInfo {
     QString installerName;
     QString installerUrl;
     qint64 installerSize = 0;
+    QString installerSha256;
 };
 
 class UpdateService : public QObject {
@@ -29,6 +30,17 @@ public:
     static QString expectedInstallerName(const QString &versionTag, const QString &platformKey = QString());
     static QStringList expectedInstallerNames(const QString &versionTag, const QString &platformKey = QString());
     static bool parseLatestRelease(const QByteArray &payload, UpdateReleaseInfo *info, QString *errorMessage, const QString &platformKey = QString());
+    static QString normalizeSha256(const QString &value);
+    static QString fileSha256(const QString &path, QString *errorMessage = nullptr);
+    static bool isTrustedReleaseUrl(const QString &url);
+    static bool validateInstallerFile(const QString &versionTag,
+                                      const QString &installerPath,
+                                      qint64 expectedSize,
+                                      const QString &expectedSha256,
+                                      QString *errorMessage = nullptr);
+    static QString expectedUpdateSignerSha256();
+    static bool verifyInstallerAuthenticode(const QString &installerPath,
+                                            QString *errorMessage = nullptr);
     static QString latestReleaseStatusMessage(int statusCode, const QString &networkErrorString);
     static QString normalizedProxyUrl(const QString &proxyUrl);
     static QString proxyUrlForNetworkProxy(const QNetworkProxy &proxy);
@@ -36,6 +48,8 @@ public:
     static QStringList proxyUrlsForEnvironment(const QProcessEnvironment &environment);
     static QStringList localProxyCandidates(const QStringList &hosts = QStringList());
     static QString firstReachableProxyUrl(const QStringList &proxyUrls, int timeoutMs = 120);
+    static bool updateCheckAllowed(int updatePolicy, bool manual);
+    static bool directFallbackAllowed(int networkMode);
 
     QString currentVersionTag() const;
     bool isBusy() const;
@@ -54,7 +68,11 @@ private:
     void setBusy(bool busy);
     void setStatusMessage(const QString &message);
     void clearPendingUpdateIfCurrentOrMissing();
-    bool readPendingUpdate(QString *versionTag, QString *installerPath) const;
+    void cleanupUpdateCache();
+    bool readPendingUpdate(QString *versionTag,
+                           QString *installerPath,
+                           qint64 *installerSize = nullptr,
+                           QString *installerSha256 = nullptr) const;
     bool useExistingInstaller(const UpdateReleaseInfo &release, bool manual);
     QString systemProxyUrl() const;
     QString autoDetectedProxyUrl() const;
@@ -83,4 +101,5 @@ private:
     bool m_checkAllowDirectFallback = false;
     bool m_downloadAllowDirectFallback = false;
     qint64 m_downloadExpectedSize = 0;
+    QString m_downloadExpectedSha256;
 };

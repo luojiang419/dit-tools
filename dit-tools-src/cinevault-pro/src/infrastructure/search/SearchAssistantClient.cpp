@@ -5,6 +5,8 @@
 #include "infrastructure/network/VisionResponseParser.h"
 
 #include <QElapsedTimer>
+#include <QCryptographicHash>
+#include <QDebug>
 #include <QEventLoop>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -26,6 +28,9 @@ struct HttpResult {
     QByteArray body;
     QString errorMessage;
 };
+
+constexpr int kAssistantMaxTokens = 768;
+constexpr int kMaxRepairContentLength = 6000;
 
 QString chatEndpoint(QString baseUrl)
 {
@@ -131,6 +136,65 @@ QString systemPrompt()
         "无法可靠判断的字段留空或 unspecified，confidence 必须真实反映确定程度。"
         "不要输出思考过程。"
     );
+}
+
+QString finishReason(const QByteArray &responseBody)
+{
+    QJsonParseError parseError;
+    const auto document = QJsonDocument::fromJson(responseBody, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        return QStringLiteral("unavailable");
+    }
+    const auto choices = document.object().value(QStringLiteral("choices")).toArray();
+    if (choices.isEmpty() || !choices.first().isObject()) {
+        return QStringLiteral("unavailable");
+    }
+    const auto reason = choices.first().toObject()
+                            .value(QStringLiteral("finish_reason"))
+                            .toString()
+                            .trimmed();
+    return reason.isEmpty() ? QStringLiteral("unavailable") : reason.left(40);
+}
+
+void logInvalidResponse(const char *stage, const HttpResult &response)
+{
+    const auto fingerprint = QCryptographicHash::hash(response.body, QCryptographicHash::Sha256)
+                                 .toHex();
+    qWarning().noquote()
+        << QStringLiteral("搜索助手 JSON %1失败：status=%2 bytes=%3 finish_reason=%4 sha256=%5")
+               .arg(QString::fromLatin1(stage))
+               .arg(response.statusCode)
+               .arg(response.body.size())
+               .arg(finishReason(response.body), QString::fromLatin1(fingerprint));
+}
+
+QJsonObject repairPayload(const QString &model,
+                          const QString &malformedContent,
+                          const QString &originalInput)
+{
+    const auto repairInput = malformedContent.isEmpty()
+        ? QStringLiteral("原始受约束输入如下，请重新生成合法 JSON：\n%1")
+              .arg(originalInput.left(kMaxRepairContentLength))
+        : QStringLiteral("待修复内容如下：\n%1")
+              .arg(malformedContent.left(kMaxRepairContentLength));
+    return QJsonObject{
+        {QStringLiteral("model"), model.trimmed()},
+        {QStringLiteral("temperature"), 0.0},
+        {QStringLiteral("max_tokens"), kAssistantMaxTokens},
+        {QStringLiteral("stream"), false},
+        {QStringLiteral("response_format"), responseFormat()},
+        {QStringLiteral("chat_template_kwargs"), QJsonObject{
+            {QStringLiteral("enable_thinking"), false}
+        }},
+        {QStringLiteral("messages"), QJsonArray{
+            QJsonObject{{QStringLiteral("role"), QStringLiteral("system")},
+                        {QStringLiteral("content"), QStringLiteral(
+                             "你是 JSON 修复器。只输出符合给定 JSON Schema 的版本2对象，不要 Markdown、解释或思考过程。"
+                             "修复截断、括号、引号、逗号或字段格式错误；不得添加待修复内容或原始受约束输入中没有的新事实。")}},
+            QJsonObject{{QStringLiteral("role"), QStringLiteral("user")},
+                        {QStringLiteral("content"), repairInput}}
+        }}
+    };
 }
 
 QString resultTargetName(SearchResultTarget target)
@@ -317,7 +381,7 @@ std::optional<ModelSearchUnderstanding> SearchAssistantClient::understandQuery(
     const QJsonObject payload{
         {QStringLiteral("model"), model.trimmed()},
         {QStringLiteral("temperature"), 0.0},
-        {QStringLiteral("max_tokens"), 256},
+        {QStringLiteral("max_tokens"), kAssistantMaxTokens},
         {QStringLiteral("stream"), false},
         {QStringLiteral("response_format"), responseFormat()},
         {QStringLiteral("chat_template_kwargs"), QJsonObject{
@@ -331,7 +395,7 @@ std::optional<ModelSearchUnderstanding> SearchAssistantClient::understandQuery(
         }}
     };
 
-    const auto response = postJson(endpoint, payload, qBound(2, timeoutSec, 30));
+    auto response = postJson(endpoint, payload, qBound(2, timeoutSec, 30));
     if (httpStatusCode) {
         *httpStatusCode = response.statusCode;
     }
@@ -343,12 +407,38 @@ std::optional<ModelSearchUnderstanding> SearchAssistantClient::understandQuery(
     }
 
     QString parseError;
-    const auto payloadObject = VisionResponseParser::parseAssistantJson(response.body, &parseError);
+    auto payloadObject = VisionResponseParser::parseAssistantJson(response.body, &parseError);
     if (!payloadObject.has_value()) {
-        if (errorMessage) {
-            *errorMessage = QStringLiteral("本地查询助手返回无法解析：%1").arg(parseError);
+        const auto firstParseError = parseError;
+        logInvalidResponse("首次解析", response);
+        QString contentError;
+        const auto malformedContent = VisionResponseParser::extractAssistantContent(
+            response.body,
+            &contentError);
+        response = postJson(endpoint,
+                            repairPayload(model,
+                                          malformedContent.value_or(QString()),
+                                          input),
+                            qBound(2, timeoutSec, 30));
+        if (httpStatusCode) {
+            *httpStatusCode = response.statusCode;
         }
-        return std::nullopt;
+        if (!response.success) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("本地查询助手 JSON 修复请求失败：%1；首次解析：%2")
+                                    .arg(response.errorMessage, firstParseError);
+            }
+            return std::nullopt;
+        }
+        payloadObject = VisionResponseParser::parseAssistantJson(response.body, &parseError);
+        if (!payloadObject.has_value()) {
+            logInvalidResponse("修复后解析", response);
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("本地查询助手返回无法解析，且一次修复仍失败：%1；首次解析：%2")
+                                    .arg(parseError, firstParseError);
+            }
+            return std::nullopt;
+        }
     }
     auto understanding = SearchQueryUnderstanding::parseModelPayload(*payloadObject, &parseError);
     if (!understanding.has_value()) {

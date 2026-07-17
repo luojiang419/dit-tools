@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QFutureSynchronizer>
 #include <QObject>
 #include <QStringList>
 
@@ -32,7 +33,7 @@ class SettingsViewModel : public QObject {
     Q_PROPERTY(int themeMode READ themeMode WRITE setThemeMode NOTIFY settingsChanged)
     Q_PROPERTY(int closeButtonBehavior READ closeButtonBehavior WRITE setCloseButtonBehavior NOTIFY settingsChanged)
     Q_PROPERTY(bool updateBusy READ updateBusy NOTIFY settingsChanged)
-    Q_PROPERTY(bool autoInstallUpdates READ autoInstallUpdates WRITE setAutoInstallUpdates NOTIFY settingsChanged)
+    Q_PROPERTY(int updatePolicy READ updatePolicy WRITE setUpdatePolicy NOTIFY settingsChanged)
     Q_PROPERTY(QString currentVersionLabel READ currentVersionLabel NOTIFY settingsChanged)
     Q_PROPERTY(int updateDownloadMode READ updateDownloadMode WRITE setUpdateDownloadMode NOTIFY settingsChanged)
     Q_PROPERTY(QString updateManualProxyUrl READ updateManualProxyUrl WRITE setUpdateManualProxyUrl NOTIFY settingsChanged)
@@ -49,6 +50,8 @@ public:
                                LocalSearchAssistantRuntime *localSearchAssistantRuntime,
                                SearchAssistantLifecycleController *searchAssistantLifecycleController,
                                QObject *parent = nullptr);
+    ~SettingsViewModel() override;
+    void waitForIdle();
 
     QString visionBaseUrl() const;
     void setVisionBaseUrl(const QString &value);
@@ -81,8 +84,8 @@ public:
     int closeButtonBehavior() const;
     void setCloseButtonBehavior(int value);
     bool updateBusy() const;
-    bool autoInstallUpdates() const;
-    void setAutoInstallUpdates(bool enabled);
+    int updatePolicy() const;
+    void setUpdatePolicy(int value);
     QString currentVersionLabel() const;
     int updateDownloadMode() const;
     void setUpdateDownloadMode(int value);
@@ -94,7 +97,9 @@ public:
 
     Q_INVOKABLE void beginStartupUpdateFlow();
     Q_INVOKABLE void checkForUpdates();
-    Q_INVOKABLE void saveUpdateDownloadSettings(int updateDownloadMode, const QString &updateManualProxyUrl);
+    Q_INVOKABLE void saveUpdateDownloadSettings(int updatePolicy,
+                                                int updateDownloadMode,
+                                                const QString &updateManualProxyUrl);
     Q_INVOKABLE void refresh();
     Q_INVOKABLE void refreshCacheInfo();
     Q_INVOKABLE void testConnection();
@@ -117,9 +122,10 @@ public:
                                   int analysisMode,
                                   int frameInterval,
                                   int thumbnailFrameIndex,
-                                  int contactSheetFrameCount,
-                                  int analysisTimeoutSec,
-                                  int updateDownloadMode,
+                                   int contactSheetFrameCount,
+                                   int analysisTimeoutSec,
+                                   int updatePolicy,
+                                   int updateDownloadMode,
                                   const QString &updateManualProxyUrl);
 
 signals:
@@ -137,6 +143,7 @@ private:
     QuickSearchController *m_quickSearchController = nullptr;
     LocalSearchAssistantRuntime *m_localSearchAssistantRuntime = nullptr;
     SearchAssistantLifecycleController *m_searchAssistantLifecycleController = nullptr;
+    QFutureSynchronizer<void> m_futures;
     QString m_frameCacheSizeLabel;
     QString m_lastMessage;
 };

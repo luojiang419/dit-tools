@@ -37,34 +37,9 @@ quint16 reserveLoopbackPort()
     return port;
 }
 
-QString detectGpuDevice(const QString &executablePath, QString *errorMessage)
+QString gpuDeviceFromProbeOutput(const QByteArray &probeOutput)
 {
-    QProcess probe;
-#ifdef Q_OS_WIN
-    probe.setCreateProcessArgumentsModifier(
-        [](QProcess::CreateProcessArguments *arguments) {
-            arguments->flags |= CREATE_NO_WINDOW;
-        });
-#endif
-    probe.setProcessChannelMode(QProcess::MergedChannels);
-    probe.start(QDir::toNativeSeparators(executablePath),
-                {QStringLiteral("--list-devices")});
-    if (!probe.waitForStarted(3000)) {
-        if (errorMessage) {
-            *errorMessage = QStringLiteral("无法探测 GPU：%1").arg(probe.errorString());
-        }
-        return {};
-    }
-    if (!probe.waitForFinished(5000)) {
-        probe.kill();
-        probe.waitForFinished(1000);
-        if (errorMessage) {
-            *errorMessage = QStringLiteral("GPU 探测超时");
-        }
-        return {};
-    }
-
-    const auto output = QString::fromLocal8Bit(probe.readAll());
+    const auto output = QString::fromLocal8Bit(probeOutput);
     bool readingDevices = false;
     const auto lines = output.split(QLatin1Char('\n'));
     for (const auto &rawLine : lines) {
@@ -80,9 +55,6 @@ QString detectGpuDevice(const QString &executablePath, QString *errorMessage)
         return separator >= 0 ? line.mid(separator + 1).trimmed() : line;
     }
 
-    if (errorMessage) {
-        *errorMessage = QStringLiteral("未检测到可用 GPU；内置文本模型已停用，不会回落到 CPU");
-    }
     return {};
 }
 }
@@ -98,19 +70,68 @@ LocalSearchAssistantRuntime::LocalSearchAssistantRuntime(QString executablePath,
                       ? defaultModelPath()
                       : QDir::fromNativeSeparators(modelPath.trimmed()))
     , m_process(new QProcess(this))
+    , m_gpuProbeProcess(new QProcess(this))
     , m_network(new QNetworkAccessManager(this))
 {
     m_probeTimer.setInterval(250);
+    m_gpuProbeTimeout.setSingleShot(true);
+    m_gpuProbeTimeout.setInterval(8000);
+    m_stopKillTimer.setSingleShot(true);
+    m_stopKillTimer.setInterval(1500);
     m_network->setProxy(QNetworkProxy::NoProxy);
 #ifdef Q_OS_WIN
-    m_process->setCreateProcessArgumentsModifier(
-        [](QProcess::CreateProcessArguments *arguments) {
+    const auto hideProcessWindow = [](QProcess::CreateProcessArguments *arguments) {
             arguments->flags |= CREATE_NO_WINDOW;
-        });
+    };
+    m_process->setCreateProcessArgumentsModifier(hideProcessWindow);
+    m_gpuProbeProcess->setCreateProcessArgumentsModifier(hideProcessWindow);
 #endif
+    m_gpuProbeProcess->setProcessChannelMode(QProcess::MergedChannels);
     connect(&m_probeTimer, &QTimer::timeout,
             this, &LocalSearchAssistantRuntime::probeHealth);
+    connect(&m_gpuProbeTimeout, &QTimer::timeout, this, [this]() {
+        if (m_state != State::GpuProbing) {
+            return;
+        }
+        m_gpuProbeProcess->kill();
+        fail(QStringLiteral("GPU 探测超时"));
+    });
+    connect(&m_stopKillTimer, &QTimer::timeout, this, [this]() {
+        if (m_process->state() != QProcess::NotRunning) {
+            m_process->kill();
+        }
+    });
+    connect(m_gpuProbeProcess,
+            qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
+            this,
+            [this](int, QProcess::ExitStatus) {
+        m_gpuProbeTimeout.stop();
+        if (m_state != State::GpuProbing) {
+            maybeRestartAfterStop();
+            return;
+        }
+        m_gpuDeviceName = gpuDeviceFromProbeOutput(m_gpuProbeProcess->readAll());
+        if (m_gpuDeviceName.isEmpty()) {
+            fail(QStringLiteral("未检测到可用 GPU；内置文本模型已停用，不会回落到 CPU"));
+            return;
+        }
+        launchRuntime();
+    });
+    connect(m_gpuProbeProcess,
+            &QProcess::errorOccurred,
+            this,
+            [this](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart && m_state == State::GpuProbing) {
+            fail(QStringLiteral("无法探测 GPU：%1")
+                     .arg(m_gpuProbeProcess->errorString()));
+        }
+    });
     connect(m_process, &QProcess::started, this, [this]() {
+        if (m_state != State::Starting) {
+            m_process->terminate();
+            m_stopKillTimer.start();
+            return;
+        }
         m_startElapsed.restart();
         m_probeTimer.start();
         probeHealth();
@@ -122,16 +143,19 @@ LocalSearchAssistantRuntime::LocalSearchAssistantRuntime(QString executablePath,
         appendDiagnostic(m_process->readAllStandardOutput());
     });
     connect(m_process, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
-        if (error == QProcess::FailedToStart) {
+        if (error == QProcess::FailedToStart && m_state == State::Starting) {
             fail(QStringLiteral("无法启动内置查询助手运行时：%1")
                      .arg(m_process->errorString()));
         }
     });
     connect(m_process,
             qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
-            this,
-            [this](int exitCode, QProcess::ExitStatus) {
-        if (m_state == State::Stopped || m_state == State::Failed) {
+             this,
+             [this](int exitCode, QProcess::ExitStatus) {
+        m_stopKillTimer.stop();
+        if (m_state == State::Stopped || m_state == State::Stopping
+            || m_state == State::Failed) {
+            maybeRestartAfterStop();
             return;
         }
         fail(QStringLiteral("内置查询助手意外退出（%1）：%2")
@@ -140,16 +164,33 @@ LocalSearchAssistantRuntime::LocalSearchAssistantRuntime(QString executablePath,
                           ? QStringLiteral("没有运行时日志")
                           : m_lastDiagnostic));
     });
+    if (auto *application = QCoreApplication::instance()) {
+        connect(application,
+                &QCoreApplication::aboutToQuit,
+                this,
+                &LocalSearchAssistantRuntime::stop);
+    }
 }
 
 LocalSearchAssistantRuntime::~LocalSearchAssistantRuntime()
 {
     stop();
+    disconnect(m_process, nullptr, this, nullptr);
+    disconnect(m_gpuProbeProcess, nullptr, this, nullptr);
+    if (m_gpuProbeProcess->state() != QProcess::NotRunning) {
+        m_gpuProbeProcess->kill();
+        m_gpuProbeProcess->waitForFinished(500);
+    }
+    if (m_process->state() != QProcess::NotRunning) {
+        m_process->kill();
+        m_process->waitForFinished(500);
+    }
 }
 
 bool LocalSearchAssistantRuntime::start()
 {
-    if (m_state == State::Ready || m_state == State::Starting) {
+    if (m_state == State::Ready || m_state == State::GpuProbing
+        || m_state == State::Starting) {
         return true;
     }
     m_lastError.clear();
@@ -160,25 +201,37 @@ bool LocalSearchAssistantRuntime::start()
                  .arg(m_executablePath, m_modelPath));
         return false;
     }
-    if (m_process->state() != QProcess::NotRunning) {
-        m_process->kill();
-        if (!m_process->waitForFinished(1000)) {
-            fail(QStringLiteral("无法重置内置查询助手运行时"));
-            return false;
-        }
+    if (m_process->state() != QProcess::NotRunning
+        || m_gpuProbeProcess->state() != QProcess::NotRunning) {
+        beginStop(true);
+        return true;
     }
 
-    QString gpuProbeError;
-    m_gpuDeviceName = detectGpuDevice(m_executablePath, &gpuProbeError);
-    if (m_gpuDeviceName.isEmpty()) {
-        fail(gpuProbeError);
-        return false;
-    }
+    startGpuProbe();
+    return true;
+}
 
+void LocalSearchAssistantRuntime::startGpuProbe()
+{
+    m_lastError.clear();
+    m_lastDiagnostic.clear();
+    m_gpuDeviceName.clear();
+    m_endpoint.clear();
+    m_restartAfterStop = false;
+    m_state = State::GpuProbing;
+    emit statusChanged();
+    m_gpuProbeTimeout.start();
+    m_gpuProbeProcess->setProgram(QDir::toNativeSeparators(m_executablePath));
+    m_gpuProbeProcess->setArguments({QStringLiteral("--list-devices")});
+    m_gpuProbeProcess->start();
+}
+
+void LocalSearchAssistantRuntime::launchRuntime()
+{
     const auto port = reserveLoopbackPort();
     if (port == 0) {
         fail(QStringLiteral("无法为内置查询助手分配本机回环端口"));
-        return false;
+        return;
     }
     m_endpoint = QStringLiteral("http://127.0.0.1:%1").arg(port);
     const auto idealThreads = qMax(1, QThread::idealThreadCount());
@@ -207,28 +260,54 @@ bool LocalSearchAssistantRuntime::start()
     m_startElapsed.start();
     emit statusChanged();
     m_process->start();
-    return true;
 }
 
 void LocalSearchAssistantRuntime::stop()
 {
+    beginStop(false);
+}
+
+void LocalSearchAssistantRuntime::beginStop(bool restartAfterStop)
+{
     const auto stateChanged = m_state != State::Stopped
         || !m_endpoint.isEmpty()
-        || (m_process && m_process->state() != QProcess::NotRunning);
+        || m_process->state() != QProcess::NotRunning
+        || m_gpuProbeProcess->state() != QProcess::NotRunning;
+    m_restartAfterStop = restartAfterStop;
     m_probeTimer.stop();
+    m_gpuProbeTimeout.stop();
     m_probeInFlight = false;
-    m_state = State::Stopped;
+    m_state = restartAfterStop ? State::Stopping : State::Stopped;
     m_endpoint.clear();
-    if (m_process && m_process->state() != QProcess::NotRunning) {
+    if (m_gpuProbeProcess->state() != QProcess::NotRunning) {
+        m_gpuProbeProcess->kill();
+    }
+    if (m_process->state() != QProcess::NotRunning) {
         m_process->terminate();
-        if (!m_process->waitForFinished(1500)) {
-            m_process->kill();
-            m_process->waitForFinished(1000);
-        }
+        m_stopKillTimer.start();
+    } else {
+        m_stopKillTimer.stop();
     }
     if (stateChanged) {
         emit statusChanged();
     }
+    maybeRestartAfterStop();
+}
+
+void LocalSearchAssistantRuntime::maybeRestartAfterStop()
+{
+    if (!m_restartAfterStop
+        || m_process->state() != QProcess::NotRunning
+        || m_gpuProbeProcess->state() != QProcess::NotRunning) {
+        return;
+    }
+    m_restartAfterStop = false;
+    m_state = State::Stopped;
+    QTimer::singleShot(0, this, [this]() {
+        if (m_state == State::Stopped) {
+            start();
+        }
+    });
 }
 
 bool LocalSearchAssistantRuntime::assetsAvailable() const
@@ -244,7 +323,9 @@ bool LocalSearchAssistantRuntime::isReady() const
 
 bool LocalSearchAssistantRuntime::isStarting() const
 {
-    return m_state == State::Starting;
+    return m_state == State::GpuProbing
+        || m_state == State::Starting
+        || m_state == State::Stopping;
 }
 
 QString LocalSearchAssistantRuntime::endpoint() const
@@ -335,10 +416,16 @@ void LocalSearchAssistantRuntime::fail(const QString &message)
         return;
     }
     m_probeTimer.stop();
+    m_gpuProbeTimeout.stop();
     m_probeInFlight = false;
+    m_restartAfterStop = false;
     m_lastError = message.trimmed();
+    m_endpoint.clear();
     m_state = State::Failed;
-    if (m_process && m_process->state() != QProcess::NotRunning) {
+    if (m_gpuProbeProcess->state() != QProcess::NotRunning) {
+        m_gpuProbeProcess->kill();
+    }
+    if (m_process->state() != QProcess::NotRunning) {
         m_process->kill();
     }
     emit statusChanged();

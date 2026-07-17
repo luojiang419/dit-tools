@@ -22,9 +22,9 @@ Item {
     property int draftContactSheetFrameCount: 24
     property int draftAnalysisTimeoutSec: 60
     property int draftThemeMode: Theme.modeSystem
+    property int draftUpdatePolicy: 0
     property int draftUpdateDownloadMode: 0
     property string draftUpdateManualProxyUrl: ""
-    property bool draftAutoInstallUpdates: false
     property int bodyFontSize: 15
     property int sectionTitleSize: 20
     property int controlHeight: 42
@@ -56,9 +56,9 @@ Item {
             draftContactSheetFrameCount = viewModel.contactSheetFrameCount
             draftAnalysisTimeoutSec = viewModel.analysisTimeoutSec
             draftThemeMode = viewModel.themeMode
+            draftUpdatePolicy = viewModel.updatePolicy
             draftUpdateDownloadMode = viewModel.updateDownloadMode
             draftUpdateManualProxyUrl = viewModel.updateManualProxyUrl
-            draftAutoInstallUpdates = viewModel.autoInstallUpdates
         }
     }
 
@@ -150,10 +150,11 @@ Item {
                     Layout.preferredWidth: 118
                     Layout.preferredHeight: root.controlHeight
                     text: viewModel && viewModel.updateBusy ? "检查中..." : "检查更新"
-                    enabled: viewModel && !viewModel.updateBusy
+                    enabled: viewModel && !viewModel.updateBusy && root.draftUpdatePolicy !== 2
                     textPixelSize: root.bodyFontSize
                     onClicked: if (viewModel) {
                         viewModel.saveUpdateDownloadSettings(
+                            root.draftUpdatePolicy,
                             root.draftUpdateDownloadMode,
                             root.draftUpdateManualProxyUrl)
                         viewModel.checkForUpdates()
@@ -182,6 +183,7 @@ Item {
                             root.draftThumbnailFrameIndex,
                             root.draftContactSheetFrameCount,
                             root.draftAnalysisTimeoutSec,
+                            root.draftUpdatePolicy,
                             root.draftUpdateDownloadMode,
                             root.draftUpdateManualProxyUrl)
                     }
@@ -257,27 +259,29 @@ Item {
                             Text {
                                 Layout.preferredWidth: root.formLabelWidth
                                 Layout.alignment: Qt.AlignVCenter
-                                text: "自动更新"
+                                text: "更新策略"
                                 color: Theme.muted
                                 font.pixelSize: root.bodyFontSize
                             }
 
-                            ThemedSwitch {
-                                checked: root.draftAutoInstallUpdates
-                                text: checked ? "下载完成后自动安装" : "下载完成后询问"
+                            ThemedComboBox {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: root.controlHeight
                                 font.pixelSize: root.bodyFontSize
-                                onToggled: {
-                                    root.draftAutoInstallUpdates = checked
-                                    if (viewModel) {
-                                        viewModel.autoInstallUpdates = checked
-                                    }
-                                }
+                                model: [
+                                    { label: "自动更新（检测并下载后询问）", value: 0 },
+                                    { label: "手动更新（仅点击检查时联网）", value: 1 },
+                                    { label: "禁止更新（不联网、不提示）", value: 2 }
+                                ]
+                                textRole: "label"
+                                currentIndex: root.draftUpdatePolicy === 1 ? 1 : (root.draftUpdatePolicy === 2 ? 2 : 0)
+                                onActivated: root.draftUpdatePolicy = model[index].value
                             }
 
                             Text {
                                 Layout.preferredWidth: root.formLabelWidth
                                 Layout.alignment: Qt.AlignVCenter
-                                text: "下载更新渠道"
+                                text: "更新网络"
                                 color: Theme.muted
                                 font.pixelSize: root.bodyFontSize
                             }
@@ -1037,7 +1041,13 @@ Item {
             anchors.margins: 22
             clip: true
             contentWidth: availableWidth
-            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+            ScrollBar.horizontal: ThemedScrollBar {
+                policy: ScrollBar.AlwaysOff
+            }
+
+            ScrollBar.vertical: ThemedScrollBar {
+                policy: ScrollBar.AsNeeded
+            }
 
             MiddleDragScrollHandler {
                 parent: customDimensionScroll.contentItem
@@ -1101,7 +1111,7 @@ Item {
 
                 Rectangle {
                     Layout.fillWidth: true
-                    height: 1
+                    Layout.preferredHeight: 1
                     color: Qt.rgba(0.62, 0.72, 0.90, 0.16)
                 }
 

@@ -20,6 +20,7 @@
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QMetaObject>
+#include <QScopeGuard>
 #include <QSqlDatabase>
 #include <QSqlError>
 #include <QSqlQuery>
@@ -1408,6 +1409,16 @@ VideoAnalysisService::VideoAnalysisService(GlobalDatabaseManager *globalDatabase
 {
 }
 
+VideoAnalysisService::~VideoAnalysisService()
+{
+    waitForIdle();
+}
+
+void VideoAnalysisService::waitForIdle()
+{
+    m_futures.waitForFinished();
+}
+
 bool VideoAnalysisService::hasBatchSummary() const
 {
     return !m_batchStates.isEmpty();
@@ -2009,6 +2020,9 @@ bool VideoAnalysisService::startDimensionAnalysisNow(const QString &videoKey,
     m_dimensionAnalysisKeys.insert(normalizedKey);
     emit dimensionAnalysisProgressChanged(normalizedKey, true, QStringLiteral("准备多维度解析"), QString());
 
+    const auto jobProjectDatabasePath = m_jobEngine
+        ? m_jobEngine->currentProjectDatabasePath()
+        : QString();
     const auto jobId = m_jobEngine
         ? m_jobEngine->createJob(JobType::ContentAnalysis,
                                  QStringLiteral("素材多维度解析"),
@@ -2018,12 +2032,18 @@ bool VideoAnalysisService::startDimensionAnalysisNow(const QString &videoKey,
                                  analysisProgressContext(1, 4, QStringLiteral("准备多维度解析")))
         : 0;
 
-    auto future = QtConcurrent::run([this, normalizedKey, requestedDimensions, config, jobId]() {
+    auto future = QtConcurrent::run([this, normalizedKey, requestedDimensions, config, jobProjectDatabasePath, jobId]() {
         const auto connectionName = QStringLiteral("dimension_analysis_%1").arg(reinterpret_cast<quintptr>(QThread::currentThreadId()));
         QString errorMessage;
+        QSqlDatabase db;
+        const auto connectionGuard = qScopeGuard([&]() {
+            db.close();
+            db = QSqlDatabase();
+            m_globalDatabaseManager->closeThreadConnection(connectionName);
+        });
 
         auto report = [&](const QString &detail, qint64 progress, const JobProgressContext &progressContext) {
-            updateJob(jobId, progress, detail, progressContext);
+            updateJob(jobProjectDatabasePath, jobId, progress, detail, progressContext);
             QMetaObject::invokeMethod(this, [this, normalizedKey, detail]() {
                 emit dimensionAnalysisProgressChanged(normalizedKey, true, detail, QString());
             }, Qt::QueuedConnection);
@@ -2031,11 +2051,10 @@ bool VideoAnalysisService::startDimensionAnalysisNow(const QString &videoKey,
 
         auto finish = [&](bool success, const QString &detail, const QString &error) {
             if (success) {
-                completeJob(jobId, detail);
+                completeJob(jobProjectDatabasePath, jobId, detail);
             } else {
-                failJob(jobId, error.trimmed().isEmpty() ? detail : error);
+                failJob(jobProjectDatabasePath, jobId, error.trimmed().isEmpty() ? detail : error);
             }
-            m_globalDatabaseManager->closeThreadConnection(connectionName);
             QMetaObject::invokeMethod(this, [this, normalizedKey, success, detail, error]() {
                 m_dimensionAnalysisKeys.remove(normalizedKey);
                 emit dimensionAnalysisProgressChanged(normalizedKey, false, detail, error);
@@ -2048,7 +2067,7 @@ bool VideoAnalysisService::startDimensionAnalysisNow(const QString &videoKey,
             }, Qt::QueuedConnection);
         };
 
-        auto db = m_globalDatabaseManager->openThreadConnection(connectionName, &errorMessage);
+        db = m_globalDatabaseManager->openThreadConnection(connectionName, &errorMessage);
         if (!db.isOpen()) {
             finish(false, QStringLiteral("多维度解析失败"), errorMessage);
             return;
@@ -2062,7 +2081,7 @@ bool VideoAnalysisService::startDimensionAnalysisNow(const QString &videoKey,
             finish(false, QStringLiteral("多维度解析失败"), errorMessage);
             return;
         }
-        updateJobSubject(jobId, analysisSubjectForAsset(asset));
+        updateJobSubject(jobProjectDatabasePath, jobId, analysisSubjectForAsset(asset));
         if (asset.analysisStatus != VideoAnalysisStatus::Ready) {
             finish(false,
                    QStringLiteral("请先完成基础内容解析。"),
@@ -2262,7 +2281,8 @@ bool VideoAnalysisService::startDimensionAnalysisNow(const QString &videoKey,
             return;
         }
 
-        updateJob(jobId,
+        updateJob(jobProjectDatabasePath,
+                  jobId,
                   90,
                   QStringLiteral("正在保存多维度解析结果"),
                   analysisProgressContext(4, 4, QStringLiteral("保存解析结果")));
@@ -2280,13 +2300,14 @@ bool VideoAnalysisService::startDimensionAnalysisNow(const QString &videoKey,
             return;
         }
 
-        updateJob(jobId,
+        updateJob(jobProjectDatabasePath,
+                  jobId,
                   100,
                   QStringLiteral("多维度解析完成，新增 %1 个维度。").arg(analyses->size()),
                   analysisProgressContext(4, 4, QStringLiteral("完成多维度解析"), analyses->size(), analyses->size(), QStringLiteral("个维度")));
         finish(true, QStringLiteral("多维度解析完成，新增 %1 个维度。").arg(analyses->size()), QString());
     });
-    Q_UNUSED(future);
+    m_futures.addFuture(future);
     return true;
 }
 
@@ -2357,6 +2378,9 @@ void VideoAnalysisService::startNextAnalysis()
         return;
     }
 
+    const auto jobProjectDatabasePath = m_jobEngine
+        ? m_jobEngine->currentProjectDatabasePath()
+        : QString();
     const auto jobId = m_jobEngine
         ? m_jobEngine->createJob(JobType::ContentAnalysis,
                                  job.mode == AnalysisRunMode::SingleFrame ? QStringLiteral("视频帧补解析") : QStringLiteral("素材内容解析"),
@@ -2372,10 +2396,16 @@ void VideoAnalysisService::startNextAnalysis()
                            job.mode == AnalysisRunMode::SingleFrame ? QStringLiteral("准备重解析失败视频帧") : QStringLiteral("准备解析素材内容"),
                            JobState::Running);
 
-    auto future = QtConcurrent::run([this, job, config, jobId]() {
+    auto future = QtConcurrent::run([this, job, config, jobProjectDatabasePath, jobId]() {
         const auto connectionName = QStringLiteral("video_analysis_%1").arg(reinterpret_cast<quintptr>(QThread::currentThreadId()));
         QString errorMessage;
         qint64 lastProgress = 0;
+        QSqlDatabase db;
+        const auto connectionGuard = qScopeGuard([&]() {
+            db.close();
+            db = QSqlDatabase();
+            m_globalDatabaseManager->closeThreadConnection(connectionName);
+        });
 
         auto finishFailure = [&](const QString &message, QSqlDatabase *db = nullptr, bool updateAsset = true) {
             const auto normalizedMessage = message.trimmed().isEmpty()
@@ -2389,10 +2419,9 @@ void VideoAnalysisService::startNextAnalysis()
                                  normalizedMessage,
                                  nullptr);
             }
-            failJob(jobId, normalizedMessage);
+            failJob(jobProjectDatabasePath, jobId, normalizedMessage);
             reportAnalysisProgress(job.videoKey, lastProgress, normalizedMessage, JobState::Failed, normalizedMessage);
             notifyCatalogChanged();
-            m_globalDatabaseManager->closeThreadConnection(connectionName);
             QMetaObject::invokeMethod(this, [this, videoKey = job.videoKey]() {
                 finishCurrentAnalysis(videoKey, false);
             }, Qt::QueuedConnection);
@@ -2400,21 +2429,20 @@ void VideoAnalysisService::startNextAnalysis()
 
         auto updateRunning = [&](qint64 progress, const QString &detail, const JobProgressContext &progressContext = JobProgressContext()) {
             lastProgress = progress;
-            updateJob(jobId, progress, detail, progressContext);
+            updateJob(jobProjectDatabasePath, jobId, progress, detail, progressContext);
             reportAnalysisProgress(job.videoKey, progress, detail, JobState::Running);
         };
 
         auto finishSuccess = [&](const QString &successMessage) {
-            completeJob(jobId, successMessage);
+            completeJob(jobProjectDatabasePath, jobId, successMessage);
             reportAnalysisProgress(job.videoKey, 100, successMessage, JobState::Completed);
             notifyCatalogChanged();
-            m_globalDatabaseManager->closeThreadConnection(connectionName);
             QMetaObject::invokeMethod(this, [this, videoKey = job.videoKey]() {
                 finishCurrentAnalysis(videoKey, true);
             }, Qt::QueuedConnection);
         };
 
-        auto db = m_globalDatabaseManager->openThreadConnection(connectionName, &errorMessage);
+        db = m_globalDatabaseManager->openThreadConnection(connectionName, &errorMessage);
         if (!db.isOpen()) {
             finishFailure(errorMessage, nullptr, false);
             return;
@@ -2425,7 +2453,7 @@ void VideoAnalysisService::startNextAnalysis()
             finishFailure(errorMessage, &db, false);
             return;
         }
-        updateJobSubject(jobId, analysisSubjectForAsset(asset));
+        updateJobSubject(jobProjectDatabasePath, jobId, analysisSubjectForAsset(asset));
 
         if (!canAnalyzeAsset(asset.assetType, asset.extension)) {
             const auto message = QStringLiteral("该素材类型当前仅参与索引，不支持内容解析。");
@@ -2536,7 +2564,8 @@ void VideoAnalysisService::startNextAnalysis()
                 return;
             }
 
-            updateJob(jobId,
+            updateJob(jobProjectDatabasePath,
+                      jobId,
                       100,
                       QStringLiteral("图片解析完成，结果已自动生效"),
                       analysisProgressContext(3, 3, QStringLiteral("完成图片解析"), 1, 1, QStringLiteral("张")));
@@ -2615,7 +2644,8 @@ void VideoAnalysisService::startNextAnalysis()
                 return;
             }
 
-            updateJob(jobId,
+            updateJob(jobProjectDatabasePath,
+                      jobId,
                       100,
                       QStringLiteral("文本/文档解析完成，结果已自动生效"),
                       analysisProgressContext(3, 3, QStringLiteral("完成文本解析"), 1, 1, QStringLiteral("个文件")));
@@ -2716,7 +2746,8 @@ void VideoAnalysisService::startNextAnalysis()
                 return false;
             }
 
-            updateJob(jobId,
+            updateJob(jobProjectDatabasePath,
+                      jobId,
                       100,
                       successMessage,
                       analysisProgressContext(job.mode == AnalysisRunMode::SingleFrame ? 2 : 4,
@@ -2725,7 +2756,7 @@ void VideoAnalysisService::startNextAnalysis()
                                               task.completedFrames,
                                               task.totalFrames,
                                               QStringLiteral("帧")));
-            completeJob(jobId, successMessage);
+            completeJob(jobProjectDatabasePath, jobId, successMessage);
             reportAnalysisProgress(job.videoKey, 100, successMessage, JobState::Completed);
             return true;
         };
@@ -3181,12 +3212,11 @@ void VideoAnalysisService::startNextAnalysis()
         }
 
         notifyCatalogChanged();
-        m_globalDatabaseManager->closeThreadConnection(connectionName);
         QMetaObject::invokeMethod(this, [this, videoKey = job.videoKey]() {
             finishCurrentAnalysis(videoKey, true);
         }, Qt::QueuedConnection);
     });
-    Q_UNUSED(future);
+    m_futures.addFuture(future);
 }
 
 void VideoAnalysisService::finishCurrentAnalysis(const QString &videoKey, bool succeeded)
@@ -3324,43 +3354,47 @@ QString VideoAnalysisService::lookupVideoLabel(const QString &videoKey) const
     return label.isEmpty() ? videoKey : label;
 }
 
-void VideoAnalysisService::updateJob(qint64 jobId, qint64 progress, const QString &detail, const JobProgressContext &progressContext)
+void VideoAnalysisService::updateJob(const QString &projectDatabasePath,
+                                     qint64 jobId,
+                                     qint64 progress,
+                                     const QString &detail,
+                                     const JobProgressContext &progressContext)
 {
     if (!m_jobEngine || jobId <= 0) {
         return;
     }
-    QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, jobId, progress, detail, progressContext]() {
-        engine->updateJob(jobId, progress, detail, progressContext);
+    QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, projectDatabasePath, jobId, progress, detail, progressContext]() {
+        engine->updateJobForProject(projectDatabasePath, jobId, progress, detail, progressContext);
     }, Qt::QueuedConnection);
 }
 
-void VideoAnalysisService::updateJobSubject(qint64 jobId, const JobSubject &subject)
+void VideoAnalysisService::updateJobSubject(const QString &projectDatabasePath, qint64 jobId, const JobSubject &subject)
 {
     if (!m_jobEngine || jobId <= 0) {
         return;
     }
-    QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, jobId, subject]() {
-        engine->updateJobSubject(jobId, subject);
+    QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, projectDatabasePath, jobId, subject]() {
+        engine->updateJobSubjectForProject(projectDatabasePath, jobId, subject);
     }, Qt::QueuedConnection);
 }
 
-void VideoAnalysisService::completeJob(qint64 jobId, const QString &detail)
+void VideoAnalysisService::completeJob(const QString &projectDatabasePath, qint64 jobId, const QString &detail)
 {
     if (!m_jobEngine || jobId <= 0) {
         return;
     }
-    QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, jobId, detail]() {
-        engine->completeJob(jobId, detail);
+    QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, projectDatabasePath, jobId, detail]() {
+        engine->completeJobForProject(projectDatabasePath, jobId, detail);
     }, Qt::QueuedConnection);
 }
 
-void VideoAnalysisService::failJob(qint64 jobId, const QString &errorMessage)
+void VideoAnalysisService::failJob(const QString &projectDatabasePath, qint64 jobId, const QString &errorMessage)
 {
     if (!m_jobEngine || jobId <= 0) {
         return;
     }
-    QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, jobId, errorMessage]() {
-        engine->failJob(jobId, errorMessage);
+    QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, projectDatabasePath, jobId, errorMessage]() {
+        engine->failJobForProject(projectDatabasePath, jobId, errorMessage);
     }, Qt::QueuedConnection);
 }
 

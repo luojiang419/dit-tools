@@ -141,6 +141,7 @@ JobTimelineViewModel::JobTimelineViewModel(JobService *jobService, VideoAnalysis
     if (m_videoAnalysisService) {
         connect(m_videoAnalysisService, &VideoAnalysisService::analysisBatchChanged, this, &JobTimelineViewModel::scheduleReload);
     }
+    reload();
 }
 
 JobListModel *JobTimelineViewModel::model() const

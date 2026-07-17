@@ -165,6 +165,33 @@ private slots:
         QVERIFY(hasJeans);
     }
 
+    void threeRealQueriesRemainValidForTwentyRounds()
+    {
+        const QStringList queries{
+            QStringLiteral("搜索红色牛仔裤"),
+            QStringLiteral("找上周上海拍的竖屏视频"),
+            QStringLiteral("有男人穿着牛仔裤的画面")
+        };
+        for (int round = 1; round <= 20; ++round) {
+            for (const auto &query : queries) {
+                QString error;
+                const auto result = m_client.understandQuery(
+                    query,
+                    QDate(2026, 7, 15),
+                    m_runtime.endpoint(),
+                    m_runtime.modelName(),
+                    30,
+                    &error);
+                QVERIFY2(result.has_value(),
+                         qPrintable(QStringLiteral("第 %1 轮查询失败（%2）：%3")
+                                        .arg(round)
+                                        .arg(query, error)));
+                QCOMPARE(result->protocolVersion, 2);
+                QVERIFY(result->confidence >= 0.55);
+            }
+        }
+    }
+
     void cleanupTestCase()
     {
         m_runtime.stop();

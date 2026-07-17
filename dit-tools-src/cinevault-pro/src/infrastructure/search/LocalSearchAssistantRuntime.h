@@ -41,11 +41,17 @@ signals:
 private:
     enum class State {
         Stopped,
+        GpuProbing,
         Starting,
+        Stopping,
         Ready,
         Failed
     };
 
+    void startGpuProbe();
+    void launchRuntime();
+    void beginStop(bool restartAfterStop);
+    void maybeRestartAfterStop();
     void probeHealth();
     void fail(const QString &message);
     void appendDiagnostic(const QByteArray &output);
@@ -59,8 +65,12 @@ private:
     QString m_modelName = QStringLiteral("cinevault-qwen3-0.6b");
     State m_state = State::Stopped;
     QProcess *m_process = nullptr;
+    QProcess *m_gpuProbeProcess = nullptr;
     QNetworkAccessManager *m_network = nullptr;
     QTimer m_probeTimer;
+    QTimer m_gpuProbeTimeout;
+    QTimer m_stopKillTimer;
     QElapsedTimer m_startElapsed;
     bool m_probeInFlight = false;
+    bool m_restartAfterStop = false;
 };

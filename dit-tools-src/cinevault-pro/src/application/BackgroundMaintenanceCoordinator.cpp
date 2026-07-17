@@ -42,11 +42,13 @@ BackgroundMaintenanceCoordinator::BackgroundMaintenanceCoordinator(
     connect(m_importService,
             &ImportService::sourceRootsChanged,
             this,
-            [this]() { reloadSourceRoots(false); });
+            [this]() { reloadSourceRoots(false); },
+            Qt::QueuedConnection);
     connect(m_libraryQueryService,
             &LibraryQueryService::sourceRootsChanged,
             this,
-            [this]() { reloadSourceRoots(false); });
+            [this]() { reloadSourceRoots(false); },
+            Qt::QueuedConnection);
     connect(m_sourceChangeMonitor,
             &SourceChangeMonitor::sourceChanged,
             this,

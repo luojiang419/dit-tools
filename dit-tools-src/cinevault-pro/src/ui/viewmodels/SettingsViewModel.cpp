@@ -66,6 +66,16 @@ bool containsDimension(const QStringList &dimensions, const QString &name)
 }
 }
 
+SettingsViewModel::~SettingsViewModel()
+{
+    waitForIdle();
+}
+
+void SettingsViewModel::waitForIdle()
+{
+    m_futures.waitForFinished();
+}
+
 SettingsViewModel::SettingsViewModel(AppSettings *settings,
                                      VisionApiClient *visionApiClient,
                                      VideoAnalysisService *videoAnalysisService,
@@ -105,14 +115,6 @@ SettingsViewModel::SettingsViewModel(AppSettings *settings,
         connect(m_updateService, &UpdateService::statusMessageChanged, this, &SettingsViewModel::setLastMessage);
         connect(m_updateService, &UpdateService::busyChanged, this, &SettingsViewModel::settingsChanged);
         connect(m_updateService, &UpdateService::updateReady, this, [this](const QString &versionTag, const QString &, bool) {
-            if (m_settings && m_settings->autoInstallUpdates()) {
-                QString errorMessage;
-                if (!m_updateService->installPendingUpdateNow(&errorMessage)) {
-                    setLastMessage(errorMessage);
-                    QMessageBox::warning(dialogParent(), QStringLiteral("安装更新失败"), errorMessage);
-                }
-                return;
-            }
             promptInstallUpdate(versionTag);
         });
     }
@@ -433,17 +435,18 @@ bool SettingsViewModel::updateBusy() const
     return m_updateService && m_updateService->isBusy();
 }
 
-bool SettingsViewModel::autoInstallUpdates() const
+int SettingsViewModel::updatePolicy() const
 {
-    return m_settings && m_settings->autoInstallUpdates();
+    return m_settings ? m_settings->updatePolicy() : 0;
 }
 
-void SettingsViewModel::setAutoInstallUpdates(bool enabled)
+void SettingsViewModel::setUpdatePolicy(int value)
 {
-    if (!m_settings || m_settings->autoInstallUpdates() == enabled) {
+    const auto normalized = qBound(0, value, 2);
+    if (!m_settings || m_settings->updatePolicy() == normalized) {
         return;
     }
-    m_settings->setAutoInstallUpdates(enabled);
+    m_settings->setUpdatePolicy(normalized);
     m_settings->sync();
     emit settingsChanged();
 }
@@ -477,6 +480,10 @@ QString SettingsViewModel::updateManualProxyUrl() const
 void SettingsViewModel::setUpdateManualProxyUrl(const QString &value)
 {
     if (!m_settings || updateManualProxyUrl() == value.trimmed()) {
+        return;
+    }
+    if (value.contains(QLatin1Char('@'))) {
+        setLastMessage(QStringLiteral("手动代理地址不能包含用户名或密码，请使用无凭据的本地代理。"));
         return;
     }
     m_settings->setUpdateManualProxyUrl(value);
@@ -521,12 +528,20 @@ void SettingsViewModel::checkForUpdates()
     m_updateService->checkForUpdates(true);
 }
 
-void SettingsViewModel::saveUpdateDownloadSettings(int updateDownloadMode, const QString &updateManualProxyUrl)
+void SettingsViewModel::saveUpdateDownloadSettings(int updatePolicy,
+                                                   int updateDownloadMode,
+                                                   const QString &updateManualProxyUrl)
 {
     if (!m_settings) {
         return;
     }
+    if (updateDownloadMode == 1
+        && UpdateService::normalizedProxyUrl(updateManualProxyUrl).isEmpty()) {
+        setLastMessage(QStringLiteral("手动代理地址无效或包含凭据，设置未保存。"));
+        return;
+    }
 
+    m_settings->setUpdatePolicy(updatePolicy);
     m_settings->setUpdateDownloadMode(updateDownloadMode);
     m_settings->setUpdateManualProxyUrl(updateManualProxyUrl);
     m_settings->sync();
@@ -579,7 +594,7 @@ void SettingsViewModel::testConnectionWith(const QString &visionBaseUrl,
             setLastMessage(ok ? QStringLiteral("视觉接口连通测试成功。") : errorMessage);
         }, Qt::QueuedConnection);
     });
-    Q_UNUSED(future);
+    m_futures.addFuture(future);
 }
 
 QString SettingsViewModel::shortcutFromKeyEvent(int key, int modifiers) const
@@ -601,10 +616,17 @@ void SettingsViewModel::saveAndApply(const QString &visionBaseUrl,
                                      int thumbnailFrameIndex,
                                      int contactSheetFrameCount,
                                      int analysisTimeoutSec,
+                                     int updatePolicy,
                                      int updateDownloadMode,
                                      const QString &updateManualProxyUrl)
 {
     if (!m_settings) {
+        return;
+    }
+    if (updateDownloadMode == 1
+        && UpdateService::normalizedProxyUrl(updateManualProxyUrl).isEmpty()) {
+        setLastMessage(QStringLiteral("手动代理地址无效或包含凭据，设置未保存。"));
+        emit settingsChanged();
         return;
     }
 
@@ -649,6 +671,7 @@ void SettingsViewModel::saveAndApply(const QString &visionBaseUrl,
     m_settings->setThumbnailFrameIndex(thumbnailFrameIndex);
     m_settings->setContactSheetFrameCount(contactSheetFrameCount);
     m_settings->setAnalysisTimeoutSec(analysisTimeoutSec);
+    m_settings->setUpdatePolicy(updatePolicy);
     m_settings->setUpdateDownloadMode(updateDownloadMode);
     m_settings->setUpdateManualProxyUrl(updateManualProxyUrl);
     m_settings->sync();

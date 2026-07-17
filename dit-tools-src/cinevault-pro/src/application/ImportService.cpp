@@ -60,7 +60,6 @@ ImportService::ImportService(DatabaseManager *databaseManager, JobService *jobSe
     , m_jobService(jobService)
     , m_scanEngine(scanEngine)
 {
-    connect(m_scanEngine, &ScanEngine::scanBatchCommitted, this, &ImportService::catalogChanged);
     connect(m_scanEngine, &ScanEngine::scanFinished, this, [this](qint64 sourceRootId) {
         emit catalogChanged();
         emit sourceScanFinished(sourceRootId);

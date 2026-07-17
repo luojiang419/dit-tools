@@ -1,5 +1,10 @@
 #include "core/jobs/JobEngine.h"
+#include "infrastructure/db/DatabaseManager.h"
 
+#include <QDir>
+#include <QSqlError>
+#include <QSqlQuery>
+#include <QTemporaryDir>
 #include <QtTest>
 
 namespace {
@@ -19,6 +24,10 @@ class JobEngineTest : public QObject {
 
 private slots:
     void clearCompletedJobsKeepsActiveAndFailedJobs();
+    void reloadJobsRestoresHistoryAndAdvancesIds();
+    void projectScopedUpdatesDoNotMutateSameIdInCurrentProject();
+    void reloadJobsCapsLoadedHistory();
+    void persistenceFailureDoesNotPublishInMemoryJob();
 };
 
 void JobEngineTest::clearCompletedJobsKeepsActiveAndFailedJobs()
@@ -42,6 +51,211 @@ void JobEngineTest::clearCompletedJobsKeepsActiveAndFailedJobs()
     QVERIFY(containsJob(jobs, pendingId));
     QVERIFY(containsJob(jobs, failedId));
     QVERIFY(spy.count() >= 7);
+}
+
+void JobEngineTest::reloadJobsRestoresHistoryAndAdvancesIds()
+{
+    QTemporaryDir temp;
+    QVERIFY(temp.isValid());
+
+    DatabaseManager databaseManager;
+    QString errorMessage;
+    const auto databasePath = QDir(temp.path()).filePath(QStringLiteral("jobs.cvdb"));
+    QVERIFY2(databaseManager.openProjectDatabase(databasePath, &errorMessage), qPrintable(errorMessage));
+
+    qint64 runningId = 0;
+    qint64 completedId = 0;
+    JobSubject subject;
+    subject.kind = QStringLiteral("frame");
+    subject.key = QStringLiteral("video-42#120");
+    subject.name = QStringLiteral("第 120 帧");
+    subject.path = QStringLiteral("D:/media/clip.mp4");
+    subject.thumbnailPath = QStringLiteral("D:/cache/frame-120.webp");
+    subject.thumbnailStatus = ThumbnailStatus::Success;
+    subject.typeLabel = QStringLiteral("视频帧");
+    JobProgressContext progressContext;
+    progressContext.currentStep = 2;
+    progressContext.totalSteps = 4;
+    progressContext.stepLabel = QStringLiteral("分析画面");
+    progressContext.currentItem = 120;
+    progressContext.totalItems = 240;
+    progressContext.unitLabel = QStringLiteral("帧");
+    progressContext.currentFrameNumber = 120;
+    progressContext.extraLabel = QStringLiteral("场景识别");
+    {
+        JobEngine initialEngine(&databaseManager);
+        runningId = initialEngine.createJob(JobType::Thumbnail,
+                                             QStringLiteral("生成缩略图"),
+                                             QStringLiteral("处理中"),
+                                             0,
+                                             subject,
+                                             progressContext);
+        completedId = initialEngine.createJob(JobType::Scan,
+                                              QStringLiteral("建立索引"),
+                                              QStringLiteral("处理中"),
+                                              0);
+        initialEngine.completeJob(completedId, QStringLiteral("完成"));
+    }
+
+    JobEngine restoredEngine(&databaseManager);
+    restoredEngine.reloadJobs();
+    const auto restoredJobs = restoredEngine.jobs();
+    QCOMPARE(restoredJobs.size(), 2);
+
+    const Job *restoredRunningJob = nullptr;
+    for (const auto &job : restoredJobs) {
+        if (job.id == runningId) {
+            restoredRunningJob = &job;
+            break;
+        }
+    }
+    QVERIFY(restoredRunningJob);
+    QCOMPARE(restoredRunningJob->state, JobState::Failed);
+    QVERIFY(restoredRunningJob->errorMessage.contains(QStringLiteral("任务已中断")));
+    QCOMPARE(restoredRunningJob->subject.kind, subject.kind);
+    QCOMPARE(restoredRunningJob->subject.key, subject.key);
+    QCOMPARE(restoredRunningJob->subject.name, subject.name);
+    QCOMPARE(restoredRunningJob->subject.path, subject.path);
+    QCOMPARE(restoredRunningJob->subject.thumbnailPath, subject.thumbnailPath);
+    QCOMPARE(restoredRunningJob->subject.thumbnailStatus, subject.thumbnailStatus);
+    QCOMPARE(restoredRunningJob->subject.typeLabel, subject.typeLabel);
+    QCOMPARE(restoredRunningJob->progressContext.currentStep, progressContext.currentStep);
+    QCOMPARE(restoredRunningJob->progressContext.totalSteps, progressContext.totalSteps);
+    QCOMPARE(restoredRunningJob->progressContext.stepLabel, progressContext.stepLabel);
+    QCOMPARE(restoredRunningJob->progressContext.currentItem, progressContext.currentItem);
+    QCOMPARE(restoredRunningJob->progressContext.totalItems, progressContext.totalItems);
+    QCOMPARE(restoredRunningJob->progressContext.unitLabel, progressContext.unitLabel);
+    QCOMPARE(restoredRunningJob->progressContext.currentFrameNumber,
+             progressContext.currentFrameNumber);
+    QCOMPARE(restoredRunningJob->progressContext.extraLabel, progressContext.extraLabel);
+
+    const auto nextId = restoredEngine.createJob(JobType::Metadata,
+                                                 QStringLiteral("读取元数据"),
+                                                 QStringLiteral("准备中"));
+    QVERIFY(nextId > completedId);
+
+    QSqlQuery query(databaseManager.database());
+    query.prepare(QStringLiteral("SELECT state FROM job WHERE id = ?"));
+    query.addBindValue(runningId);
+    QVERIFY(query.exec());
+    QVERIFY(query.next());
+    QCOMPARE(query.value(0).toInt(), static_cast<int>(JobState::Failed));
+}
+
+void JobEngineTest::projectScopedUpdatesDoNotMutateSameIdInCurrentProject()
+{
+    QTemporaryDir temp;
+    QVERIFY(temp.isValid());
+
+    DatabaseManager databaseManager;
+    JobEngine engine(&databaseManager);
+    QString errorMessage;
+    const auto firstPath = QDir(temp.path()).filePath(QStringLiteral("first.cvdb"));
+    const auto secondPath = QDir(temp.path()).filePath(QStringLiteral("second.cvdb"));
+
+    QVERIFY2(databaseManager.openProjectDatabase(firstPath, &errorMessage), qPrintable(errorMessage));
+    const auto firstId = engine.createJob(JobType::Scan,
+                                          QStringLiteral("项目一任务"),
+                                          QStringLiteral("运行中"));
+
+    QVERIFY2(databaseManager.openProjectDatabase(secondPath, &errorMessage), qPrintable(errorMessage));
+    engine.reloadJobs();
+    const auto secondId = engine.createJob(JobType::Scan,
+                                           QStringLiteral("项目二任务"),
+                                           QStringLiteral("运行中"));
+    QCOMPARE(firstId, secondId);
+
+    engine.completeJobForProject(firstPath, firstId, QStringLiteral("项目一已完成"));
+
+    const auto currentJobs = engine.jobs();
+    QCOMPARE(currentJobs.size(), 1);
+    QCOMPARE(currentJobs.constFirst().id, secondId);
+    QCOMPARE(currentJobs.constFirst().state, JobState::Running);
+
+    QSqlQuery currentQuery(databaseManager.database());
+    currentQuery.prepare(QStringLiteral("SELECT state FROM job WHERE id = ?"));
+    currentQuery.addBindValue(secondId);
+    QVERIFY(currentQuery.exec());
+    QVERIFY(currentQuery.next());
+    QCOMPARE(currentQuery.value(0).toInt(), static_cast<int>(JobState::Running));
+
+    const auto connectionName = QStringLiteral("job_engine_first_project_test");
+    auto firstDatabase = databaseManager.openThreadConnectionForPath(firstPath,
+                                                                      connectionName,
+                                                                      &errorMessage);
+    QVERIFY2(firstDatabase.isOpen(), qPrintable(errorMessage));
+    QSqlQuery firstQuery(firstDatabase);
+    firstQuery.prepare(QStringLiteral("SELECT state, detail FROM job WHERE id = ?"));
+    firstQuery.addBindValue(firstId);
+    QVERIFY(firstQuery.exec());
+    QVERIFY(firstQuery.next());
+    QCOMPARE(firstQuery.value(0).toInt(), static_cast<int>(JobState::Completed));
+    QCOMPARE(firstQuery.value(1).toString(), QStringLiteral("项目一已完成"));
+    firstQuery = QSqlQuery();
+    firstDatabase.close();
+    firstDatabase = QSqlDatabase();
+    databaseManager.closeThreadConnection(connectionName);
+}
+
+void JobEngineTest::reloadJobsCapsLoadedHistory()
+{
+    QTemporaryDir temp;
+    QVERIFY(temp.isValid());
+    DatabaseManager databaseManager;
+    QString errorMessage;
+    QVERIFY2(databaseManager.openProjectDatabase(
+                 QDir(temp.path()).filePath(QStringLiteral("history.cvdb")),
+                 &errorMessage),
+             qPrintable(errorMessage));
+
+    QSqlQuery insert(databaseManager.database());
+    insert.prepare(QStringLiteral(
+        "INSERT INTO job (id, type, state, title, progress, source_root_id, started_at, updated_at) "
+        "VALUES (?, ?, ?, ?, 100, 0, ?, ?)"));
+    const auto timestamp = QDateTime::currentDateTime().toString(Qt::ISODate);
+    for (int id = 1; id <= 520; ++id) {
+        insert.bindValue(0, id);
+        insert.bindValue(1, static_cast<int>(JobType::Scan));
+        insert.bindValue(2, static_cast<int>(JobState::Completed));
+        insert.bindValue(3, QStringLiteral("历史任务 %1").arg(id));
+        insert.bindValue(4, timestamp);
+        insert.bindValue(5, timestamp);
+        QVERIFY2(insert.exec(), qPrintable(insert.lastError().text()));
+    }
+
+    JobEngine engine(&databaseManager);
+    engine.reloadJobs();
+    QCOMPARE(engine.jobs().size(), 500);
+    QCOMPARE(engine.jobs().constFirst().id, 520);
+    const auto newId = engine.createJob(JobType::Metadata,
+                                        QStringLiteral("新任务"),
+                                        QStringLiteral("准备中"));
+    QCOMPARE(newId, 521);
+}
+
+void JobEngineTest::persistenceFailureDoesNotPublishInMemoryJob()
+{
+    QTemporaryDir temp;
+    QVERIFY(temp.isValid());
+    DatabaseManager databaseManager;
+    QString errorMessage;
+    QVERIFY2(databaseManager.openProjectDatabase(
+                 QDir(temp.path()).filePath(QStringLiteral("readonly.cvdb")),
+                 &errorMessage),
+             qPrintable(errorMessage));
+    QSqlQuery pragma(databaseManager.database());
+    QVERIFY2(pragma.exec(QStringLiteral("PRAGMA query_only = ON")),
+             qPrintable(pragma.lastError().text()));
+
+    JobEngine engine(&databaseManager);
+    QSignalSpy errorSpy(&engine, &JobEngine::persistenceError);
+    const auto id = engine.createJob(JobType::Scan,
+                                     QStringLiteral("不应发布"),
+                                     QStringLiteral("写入失败"));
+
+    QCOMPARE(id, 0);
+    QVERIFY(engine.jobs().isEmpty());
+    QCOMPARE(errorSpy.count(), 1);
 }
 
 QTEST_APPLESS_MAIN(JobEngineTest)

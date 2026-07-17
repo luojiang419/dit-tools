@@ -328,7 +328,7 @@ private slots:
         QCOMPARE(cameraFolder.at(5).toString(), QStringLiteral("2026-07-14"));
     }
 
-    void interruptedScan_resumesFromPersistedDirectoryCheckpointAfterProjectReopen()
+    void interruptedScan_rebuildsGenerationAfterDirectoryChanges()
     {
         QTemporaryDir temp;
         QVERIFY(temp.isValid());
@@ -347,8 +347,7 @@ private slots:
         {
             JobEngine initialJobs(&databaseManager);
             ScanEngine initialScan(&databaseManager, &initialJobs, nullptr, nullptr);
-            // 根目录先提交 A/B 两个子目录检查点，随后在 A 目录中断，
-            // 以验证重启后不会从已完成的根目录检查点重新开始。
+            // 根目录先提交 A/B 两个子目录检查点，随后在 A 目录中断。
             initialScan.setFailureAfterEntriesForTesting(3);
             const auto jobId = initialJobs.createJob(JobType::Scan,
                                                      QStringLiteral("中断扫描"),
@@ -363,6 +362,9 @@ private slots:
         QCOMPARE(scanSessionCount(databaseManager.database(), &errorMessage), qint64{1});
         QCOMPARE(completedScanWorkItemCount(databaseManager.database(), &errorMessage), qint64{1});
 
+        QVERIFY(QFile::remove(QDir(sourcePath).filePath(QStringLiteral("A/clip-a.mov"))));
+        writeFile(QDir(sourcePath).filePath(QStringLiteral("A/clip-after-resume.mov")), "changed");
+
         databaseManager.closeProjectDatabase();
         QVERIFY2(databaseManager.openProjectDatabase(projectDb, &errorMessage), qPrintable(errorMessage));
 
@@ -376,7 +378,7 @@ private slots:
         resumedScan.waitForIdle();
         QCoreApplication::processEvents();
         QCOMPARE(assetNames(databaseManager.database()).join(QLatin1Char(',')),
-                 QStringLiteral("clip-a.mov,clip-b.mov,notes.txt"));
+                 QStringLiteral("clip-after-resume.mov,clip-b.mov,notes.txt"));
         QCOMPARE(scanSessionCount(databaseManager.database(), &errorMessage), qint64{0});
     }
 };

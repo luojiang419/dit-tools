@@ -10,6 +10,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QGuiApplication>
+#include <QMetaObject>
 #include <QUrl>
 
 namespace {
@@ -296,7 +297,7 @@ bool LibraryWorkspaceViewModel::removeAsset(qint64 assetId)
         emit selectionChanged();
         emit assetSelected(0);
     }
-    refresh();
+    QMetaObject::invokeMethod(this, &LibraryWorkspaceViewModel::reload, Qt::QueuedConnection);
     return true;
 }
 

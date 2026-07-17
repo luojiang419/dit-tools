@@ -6,6 +6,8 @@
 #include "shared/Paths.h"
 
 #include <QCoreApplication>
+#include <QCryptographicHash>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -17,16 +19,32 @@
 #include <QNetworkProxyFactory>
 #include <QNetworkProxyQuery>
 #include <QProcess>
+#include <QRegularExpression>
+#include <QStorageInfo>
 #include <QTcpSocket>
 #include <QTimer>
 #include <QUrl>
 #include <QVersionNumber>
+
+#if defined(Q_OS_WIN)
+#include <qt_windows.h>
+#endif
+
+#include <limits>
+
+#ifndef CINEVAULT_UPDATE_SIGNER_SHA256
+#define CINEVAULT_UPDATE_SIGNER_SHA256 ""
+#endif
 
 namespace {
 constexpr auto kLatestReleaseUrl = "https://api.github.com/repos/luojiang419/dit-tools/releases/latest";
 constexpr int kUpdateDownloadModeAuto = 0;
 constexpr int kUpdateDownloadModeManual = 1;
 constexpr int kUpdateDownloadModeDirect = 2;
+constexpr int kUpdatePolicyAutomatic = 0;
+constexpr int kUpdatePolicyManual = 1;
+constexpr int kUpdatePolicyDisabled = 2;
+constexpr qint64 kMinimumUpdateSpaceReserve = 512LL * 1024 * 1024;
 
 QString normalizedPlatformKey(QString platformKey)
 {
@@ -91,6 +109,33 @@ QStringList localProxyHosts()
         appendUnique(&hosts, address.toString());
     }
     return hosts;
+}
+
+bool pathIsInside(const QString &path, const QString &root)
+{
+    auto normalizedPath = QDir::cleanPath(path);
+    auto normalizedRoot = QDir::cleanPath(root);
+    if (!normalizedRoot.endsWith(QDir::separator())) {
+        normalizedRoot.append(QDir::separator());
+    }
+#if defined(Q_OS_WIN)
+    return normalizedPath.startsWith(normalizedRoot, Qt::CaseInsensitive);
+#else
+    return normalizedPath.startsWith(normalizedRoot, Qt::CaseSensitive);
+#endif
+}
+
+bool isReparsePoint(const QString &path)
+{
+#if defined(Q_OS_WIN)
+    const auto nativePath = QDir::toNativeSeparators(path).toStdWString();
+    const auto attributes = GetFileAttributesW(nativePath.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES
+        && (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+#else
+    Q_UNUSED(path)
+    return false;
+#endif
 }
 }
 
@@ -214,25 +259,57 @@ bool UpdateService::parseLatestRelease(const QByteArray &payload, UpdateReleaseI
 
     const auto assets = root.value(QStringLiteral("assets")).toArray();
     for (const auto &expectedName : expectedNames) {
+        QList<QJsonObject> matchingAssets;
         for (const auto &assetValue : assets) {
             const auto assetObject = assetValue.toObject();
             if (assetObject.value(QStringLiteral("name")).toString() != expectedName) {
                 continue;
             }
 
-            const auto downloadUrl = assetObject.value(QStringLiteral("browser_download_url")).toString().trimmed();
-            if (downloadUrl.isEmpty()) {
-                continue;
-            }
-
-            if (info) {
-                info->versionTag = versionTag;
-                info->installerName = expectedName;
-                info->installerUrl = downloadUrl;
-                info->installerSize = assetObject.value(QStringLiteral("size")).toVariant().toLongLong();
-            }
-            return true;
+            matchingAssets.append(assetObject);
         }
+
+        if (matchingAssets.size() > 1) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("最新发布版本包含重复更新资产：%1").arg(expectedName);
+            }
+            return false;
+        }
+        if (matchingAssets.isEmpty()) {
+            continue;
+        }
+
+        const auto assetObject = matchingAssets.constFirst();
+        const auto downloadUrl = assetObject.value(QStringLiteral("browser_download_url")).toString().trimmed();
+        const auto installerSize = assetObject.value(QStringLiteral("size")).toVariant().toLongLong();
+        const auto installerSha256 = normalizeSha256(assetObject.value(QStringLiteral("digest")).toString());
+        if (!isTrustedReleaseUrl(downloadUrl)) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("更新资产下载地址不是受信任的 GitHub HTTPS 地址。");
+            }
+            return false;
+        }
+        if (installerSize <= 0) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("更新资产大小无效：%1").arg(expectedName);
+            }
+            return false;
+        }
+        if (installerSha256.isEmpty()) {
+            if (errorMessage) {
+                *errorMessage = QStringLiteral("更新资产缺少有效 SHA-256 摘要：%1").arg(expectedName);
+            }
+            return false;
+        }
+
+        if (info) {
+            info->versionTag = versionTag;
+            info->installerName = expectedName;
+            info->installerUrl = downloadUrl;
+            info->installerSize = installerSize;
+            info->installerSha256 = installerSha256;
+        }
+        return true;
     }
 
     if (errorMessage) {
@@ -240,6 +317,192 @@ bool UpdateService::parseLatestRelease(const QByteArray &payload, UpdateReleaseI
                             .arg(expectedInstallerNamesLabel(expectedNames));
     }
     return false;
+}
+
+QString UpdateService::normalizeSha256(const QString &value)
+{
+    auto normalized = value.trimmed().toLower();
+    if (normalized.startsWith(QStringLiteral("sha256:"))) {
+        normalized.remove(0, 7);
+    }
+    static const QRegularExpression pattern(QStringLiteral("^[0-9a-f]{64}$"));
+    return pattern.match(normalized).hasMatch() ? normalized : QString();
+}
+
+QString UpdateService::fileSha256(const QString &path, QString *errorMessage)
+{
+    if (errorMessage) {
+        errorMessage->clear();
+    }
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("无法读取更新安装包：%1").arg(path);
+        }
+        return {};
+    }
+
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    if (!hash.addData(&file)) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("计算更新安装包 SHA-256 失败：%1").arg(path);
+        }
+        return {};
+    }
+    return QString::fromLatin1(hash.result().toHex());
+}
+
+bool UpdateService::isTrustedReleaseUrl(const QString &url)
+{
+    const QUrl parsed(url);
+    if (!parsed.isValid() || parsed.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) != 0) {
+        return false;
+    }
+    const auto host = parsed.host().trimmed().toLower();
+    return host == QStringLiteral("github.com")
+        || host == QStringLiteral("api.github.com")
+        || host.endsWith(QStringLiteral(".githubusercontent.com"));
+}
+
+bool UpdateService::updateCheckAllowed(int updatePolicy, bool manual)
+{
+    if (updatePolicy == kUpdatePolicyDisabled) {
+        return false;
+    }
+    return manual || updatePolicy == kUpdatePolicyAutomatic;
+}
+
+bool UpdateService::directFallbackAllowed(int networkMode)
+{
+    return networkMode == kUpdateDownloadModeAuto;
+}
+
+bool UpdateService::validateInstallerFile(const QString &versionTag,
+                                          const QString &installerPath,
+                                          qint64 expectedSize,
+                                          const QString &expectedSha256,
+                                          QString *errorMessage)
+{
+    if (errorMessage) {
+        errorMessage->clear();
+    }
+    const auto normalizedVersion = normalizeVersionTag(versionTag);
+    const auto normalizedSha256 = normalizeSha256(expectedSha256);
+    const QFileInfo installerInfo(installerPath);
+    if (normalizedVersion.isEmpty() || normalizedSha256.isEmpty() || expectedSize <= 0) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("更新安装包校验信息不完整。");
+        }
+        return false;
+    }
+    if (!installerInfo.isFile() || installerInfo.isSymLink() || isReparsePoint(installerInfo.absoluteFilePath())) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("更新安装包不存在或不是普通文件：%1").arg(installerPath);
+        }
+        return false;
+    }
+    if (!installerNameMatchesExpected(installerInfo.fileName(), expectedInstallerNames(normalizedVersion))) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("更新安装包名称与版本不匹配：%1").arg(installerInfo.fileName());
+        }
+        return false;
+    }
+
+    const auto canonicalPath = installerInfo.canonicalFilePath();
+    const QFileInfo rootInfo(updatesRootForPlatform(currentPlatformKey()));
+    const auto canonicalRoot = rootInfo.canonicalFilePath().isEmpty()
+        ? rootInfo.absoluteFilePath()
+        : rootInfo.canonicalFilePath();
+    if (canonicalPath.isEmpty() || !pathIsInside(canonicalPath, canonicalRoot)) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("更新安装包不在应用专用缓存目录内。");
+        }
+        return false;
+    }
+    if (installerInfo.size() != expectedSize) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("更新安装包大小与发布信息不一致。");
+        }
+        return false;
+    }
+
+    QString hashError;
+    const auto actualSha256 = fileSha256(canonicalPath, &hashError);
+    if (actualSha256.isEmpty() || actualSha256 != normalizedSha256) {
+        if (errorMessage) {
+            *errorMessage = hashError.isEmpty()
+                ? QStringLiteral("更新安装包 SHA-256 校验失败。"): hashError;
+        }
+        return false;
+    }
+    return true;
+}
+
+QString UpdateService::expectedUpdateSignerSha256()
+{
+    return normalizeSha256(QString::fromLatin1(CINEVAULT_UPDATE_SIGNER_SHA256));
+}
+
+bool UpdateService::verifyInstallerAuthenticode(const QString &installerPath,
+                                                 QString *errorMessage)
+{
+    if (errorMessage) {
+        errorMessage->clear();
+    }
+#if !defined(Q_OS_WIN)
+    Q_UNUSED(installerPath)
+    return true;
+#else
+    const auto expectedSigner = expectedUpdateSignerSha256();
+    if (expectedSigner.isEmpty()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("当前版本未配置可信更新发布者，已阻止自动提权安装。请从 GitHub Release 手动安装。");
+        }
+        return false;
+    }
+
+    QProcess process;
+    process.setProgram(QStringLiteral("powershell.exe"));
+    process.setArguments({
+        QStringLiteral("-NoProfile"),
+        QStringLiteral("-NonInteractive"),
+        QStringLiteral("-ExecutionPolicy"),
+        QStringLiteral("Bypass"),
+        QStringLiteral("-Command"),
+        QStringLiteral(
+            "$ErrorActionPreference='Stop';"
+            "$signature=Get-AuthenticodeSignature -LiteralPath $env:CINEVAULT_INSTALLER_PATH;"
+            "if($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate){exit 2};"
+            "$thumbprint=$signature.SignerCertificate.GetCertHashString('SHA256').Replace(' ','').ToLowerInvariant();"
+            "if($thumbprint -ne $env:CINEVAULT_EXPECTED_SIGNER_SHA256){exit 3};"
+            "Write-Output $signature.SignerCertificate.Subject")
+    });
+    auto environment = QProcessEnvironment::systemEnvironment();
+    environment.insert(QStringLiteral("CINEVAULT_INSTALLER_PATH"), QFileInfo(installerPath).absoluteFilePath());
+    environment.insert(QStringLiteral("CINEVAULT_EXPECTED_SIGNER_SHA256"), expectedSigner);
+    process.setProcessEnvironment(environment);
+    process.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments *arguments) {
+        arguments->flags |= CREATE_NO_WINDOW;
+    });
+    process.start();
+    if (!process.waitForStarted(3000) || !process.waitForFinished(20000)) {
+        process.kill();
+        process.waitForFinished(2000);
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("无法完成更新安装包发布者验证。");
+        }
+        return false;
+    }
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
+        if (errorMessage) {
+            *errorMessage = process.exitCode() == 3
+                ? QStringLiteral("更新安装包签名者与内置可信发布者不一致。")
+                : QStringLiteral("更新安装包没有有效的 Authenticode 签名。");
+        }
+        return false;
+    }
+    return true;
+#endif
 }
 
 QString UpdateService::latestReleaseStatusMessage(int statusCode, const QString &networkErrorString)
@@ -267,6 +530,8 @@ QString UpdateService::normalizedProxyUrl(const QString &proxyUrl)
     if (!url.isValid()
         || url.host().trimmed().isEmpty()
         || url.port() <= 0
+        || !url.userName().isEmpty()
+        || !url.password().isEmpty()
         || (scheme != QStringLiteral("http")
             && scheme != QStringLiteral("https")
             && scheme != QStringLiteral("socks4")
@@ -409,6 +674,13 @@ bool UpdateService::hasPendingUpdate() const
 void UpdateService::beginStartupFlow()
 {
     clearPendingUpdateIfCurrentOrMissing();
+    cleanupUpdateCache();
+
+    const auto updatePolicy = m_settings ? m_settings->updatePolicy() : kUpdatePolicyAutomatic;
+    if (updatePolicy == kUpdatePolicyDisabled) {
+        setStatusMessage(QStringLiteral("已禁止更新，不会在启动时联网检查。"));
+        return;
+    }
 
     QString versionTag;
     QString installerPath;
@@ -418,8 +690,7 @@ void UpdateService::beginStartupFlow()
             ? normalizeVersionTag(m_settings->scheduledUpdateVersion())
             : QString();
         const auto shouldInstall = m_settings
-            && (m_settings->autoInstallUpdates()
-                || compareVersionTags(scheduledVersion, versionTag) == 0);
+            && compareVersionTags(scheduledVersion, versionTag) == 0;
         if (shouldInstall) {
             QString errorMessage;
             if (installPendingUpdateNow(&errorMessage)) {
@@ -432,6 +703,11 @@ void UpdateService::beginStartupFlow()
         return;
     }
 
+    if (updatePolicy == kUpdatePolicyManual) {
+        setStatusMessage(QStringLiteral("更新策略为手动，仅在点击检查更新后联网。"));
+        return;
+    }
+
     checkForUpdates(false);
 }
 
@@ -439,6 +715,14 @@ void UpdateService::checkForUpdates(bool manual)
 {
     if (m_busy) {
         setStatusMessage(QStringLiteral("正在检查或下载更新，请稍候。"));
+        return;
+    }
+
+    const auto updatePolicy = m_settings ? m_settings->updatePolicy() : kUpdatePolicyAutomatic;
+    if (!updateCheckAllowed(updatePolicy, manual)) {
+        setStatusMessage(updatePolicy == kUpdatePolicyDisabled
+            ? QStringLiteral("更新已被禁止，请先在设置中切换到自动或手动更新。")
+            : QStringLiteral("当前仅允许手动检查更新。"));
         return;
     }
 
@@ -473,7 +757,9 @@ void UpdateService::checkForUpdates(bool manual)
                       : QStringLiteral("未检测到可用代理，启动后正在直连检查最新发布版本...")))
         : (manual ? QStringLiteral("正在通过%1检查最新发布版本...").arg(proxyLabel)
                   : QStringLiteral("启动后正在通过%1检查最新发布版本...").arg(proxyLabel)));
-    launchCheckProcess(proxyUrl, !proxyUrl.isEmpty());
+    const auto networkMode = m_settings ? m_settings->updateDownloadMode() : kUpdateDownloadModeAuto;
+    launchCheckProcess(proxyUrl,
+                       !proxyUrl.isEmpty() && directFallbackAllowed(networkMode));
 }
 
 QString UpdateService::systemProxyUrl() const
@@ -594,7 +880,9 @@ bool UpdateService::installPendingUpdateNow(QString *errorMessage)
 
     QString versionTag;
     QString installerPath;
-    if (!readPendingUpdate(&versionTag, &installerPath)
+    qint64 installerSize = 0;
+    QString installerSha256;
+    if (!readPendingUpdate(&versionTag, &installerPath, &installerSize, &installerSha256)
         || compareVersionTags(versionTag, currentVersionTag()) <= 0) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("当前没有可安装的更新包。");
@@ -610,10 +898,16 @@ bool UpdateService::installPendingUpdateNow(QString *errorMessage)
     return false;
 #endif
 
+    if (!verifyInstallerAuthenticode(installerPath, errorMessage)) {
+        return false;
+    }
+
     const auto appDir = QCoreApplication::applicationDirPath();
     const auto appPid = QCoreApplication::applicationPid();
     if (!UpdaterSessionRunner::launchDetached(versionTag,
                                               installerPath,
+                                              installerSize,
+                                              installerSha256,
                                               appDir,
                                               QCoreApplication::applicationFilePath(),
                                               appPid,
@@ -664,7 +958,69 @@ void UpdateService::clearPendingUpdateIfCurrentOrMissing()
     }
 }
 
-bool UpdateService::readPendingUpdate(QString *versionTag, QString *installerPath) const
+void UpdateService::cleanupUpdateCache()
+{
+    const auto platformRoot = updatesRootForPlatform(currentPlatformKey());
+    QDir root(platformRoot);
+    if (!root.exists()) {
+        return;
+    }
+
+    const auto currentVersion = currentVersionTag();
+    const auto pendingPath = m_settings
+        ? QFileInfo(m_settings->pendingUpdateInstallerPath()).canonicalFilePath()
+        : QString();
+    const auto now = QDateTime::currentDateTimeUtc();
+    const auto files = root.entryInfoList(QDir::Files | QDir::NoDotAndDotDot, QDir::Time);
+    int retainedPartialCount = 0;
+    int retainedFutureInstallerCount = 0;
+    for (const auto &file : files) {
+        if (file.canonicalFilePath() == pendingPath) {
+            continue;
+        }
+        if (file.fileName().endsWith(QStringLiteral(".part"), Qt::CaseInsensitive)) {
+            ++retainedPartialCount;
+            if (retainedPartialCount > 2
+                || file.lastModified().toUTC().secsTo(now) > 14LL * 24 * 60 * 60) {
+                QFile::remove(file.absoluteFilePath());
+            }
+            continue;
+        }
+
+        const QRegularExpression installerPattern(
+            QStringLiteral("^CineVault-Setup-(v[0-9]+(?:\\.[0-9]+)+)\\.exe$"),
+            QRegularExpression::CaseInsensitiveOption);
+        const auto match = installerPattern.match(file.fileName());
+        if (match.hasMatch()) {
+            if (compareVersionTags(match.captured(1), currentVersion) <= 0) {
+                QFile::remove(file.absoluteFilePath());
+            } else {
+                ++retainedFutureInstallerCount;
+                if (retainedFutureInstallerCount > 2) {
+                    QFile::remove(file.absoluteFilePath());
+                }
+            }
+        }
+    }
+
+    const auto cleanupOldDirectories = [&now](const QString &directoryPath, int retentionDays) {
+        QDir directory(directoryPath);
+        const auto entries = directory.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Time);
+        for (const auto &entry : entries) {
+            if (entry.lastModified().toUTC().secsTo(now)
+                > static_cast<qint64>(retentionDays) * 24 * 60 * 60) {
+                QDir(entry.absoluteFilePath()).removeRecursively();
+            }
+        }
+    };
+    cleanupOldDirectories(root.filePath(QStringLiteral("staging")), 1);
+    cleanupOldDirectories(root.filePath(QStringLiteral("sessions")), 30);
+}
+
+bool UpdateService::readPendingUpdate(QString *versionTag,
+                                      QString *installerPath,
+                                      qint64 *installerSize,
+                                      QString *installerSha256) const
 {
     if (!m_settings) {
         return false;
@@ -672,16 +1028,14 @@ bool UpdateService::readPendingUpdate(QString *versionTag, QString *installerPat
 
     const auto normalizedVersionTag = normalizeVersionTag(m_settings->pendingUpdateVersion());
     const auto normalizedInstallerPath = m_settings->pendingUpdateInstallerPath().trimmed();
-    if (normalizedVersionTag.isEmpty() || normalizedInstallerPath.isEmpty()) {
-        return false;
-    }
-
-    if (!QFileInfo::exists(normalizedInstallerPath)) {
-        return false;
-    }
-
-    if (!installerNameMatchesExpected(QFileInfo(normalizedInstallerPath).fileName(),
-                                      expectedInstallerNames(normalizedVersionTag))) {
+    const auto expectedSize = m_settings->pendingUpdateInstallerSize();
+    const auto expectedSha256 = normalizeSha256(m_settings->pendingUpdateInstallerSha256());
+    if (normalizedVersionTag.isEmpty()
+        || normalizedInstallerPath.isEmpty()
+        || !validateInstallerFile(normalizedVersionTag,
+                                  normalizedInstallerPath,
+                                  expectedSize,
+                                  expectedSha256)) {
         return false;
     }
 
@@ -689,7 +1043,13 @@ bool UpdateService::readPendingUpdate(QString *versionTag, QString *installerPat
         *versionTag = normalizedVersionTag;
     }
     if (installerPath) {
-        *installerPath = normalizedInstallerPath;
+        *installerPath = QFileInfo(normalizedInstallerPath).canonicalFilePath();
+    }
+    if (installerSize) {
+        *installerSize = expectedSize;
+    }
+    if (installerSha256) {
+        *installerSha256 = expectedSha256;
     }
     return true;
 }
@@ -700,24 +1060,24 @@ bool UpdateService::useExistingInstaller(const UpdateReleaseInfo &release, bool 
     QString installerPath;
     if (readPendingUpdate(&versionTag, &installerPath)
         && compareVersionTags(versionTag, release.versionTag) == 0
-        && (release.installerSize <= 0
-            || QFileInfo(installerPath).size() == release.installerSize)) {
+        && QFileInfo(installerPath).size() == release.installerSize
+        && fileSha256(installerPath) == release.installerSha256) {
         setStatusMessage(QStringLiteral("已找到已下载更新包：%1").arg(versionTag));
         emit updateReady(versionTag, installerPath, manual);
         return true;
     }
 
     const QStringList candidatePaths{
-        QDir(updatesRootForPlatform(currentPlatformKey())).filePath(release.installerName),
-        QDir(Paths::updatesRoot()).filePath(release.installerName)
+        QDir(updatesRootForPlatform(currentPlatformKey())).filePath(release.installerName)
     };
 
     QString existingInstallerPath;
     for (const auto &candidatePath : candidatePaths) {
         const QFileInfo candidateInfo(candidatePath);
-        if (candidateInfo.isFile()
-            && (release.installerSize <= 0
-                || candidateInfo.size() == release.installerSize)) {
+        if (validateInstallerFile(release.versionTag,
+                                  candidatePath,
+                                  release.installerSize,
+                                  release.installerSha256)) {
             existingInstallerPath = candidatePath;
             break;
         }
@@ -731,6 +1091,8 @@ bool UpdateService::useExistingInstaller(const UpdateReleaseInfo &release, bool 
         m_settings->setDownloadedUpdateVersion(release.versionTag);
         m_settings->setPendingUpdateVersion(release.versionTag);
         m_settings->setPendingUpdateInstallerPath(existingInstallerPath);
+        m_settings->setPendingUpdateInstallerSize(release.installerSize);
+        m_settings->setPendingUpdateInstallerSha256(release.installerSha256);
         m_settings->setScheduledUpdateVersion(QString());
         m_settings->sync();
     }
@@ -755,6 +1117,7 @@ void UpdateService::startInstallerDownload(const UpdateReleaseInfo &release, boo
     m_downloadTargetPath = QDir(platformUpdatesRoot).filePath(release.installerName);
     m_downloadPartPath = m_downloadTargetPath + QStringLiteral(".part");
     m_downloadExpectedSize = release.installerSize;
+    m_downloadExpectedSha256 = release.installerSha256;
     QString proxyErrorMessage;
     const auto proxyUrl = configuredProxyUrl(&proxyErrorMessage);
     if (!proxyErrorMessage.isEmpty()) {
@@ -770,7 +1133,9 @@ void UpdateService::startInstallerDownload(const UpdateReleaseInfo &release, boo
             ? QStringLiteral("发现新版本 %1，正在直连下载更新包...").arg(release.versionTag)
             : QStringLiteral("发现新版本 %1，未检测到可用代理，正在直连下载更新包...").arg(release.versionTag))
         : QStringLiteral("发现新版本 %1，正在通过%2下载更新包...").arg(release.versionTag, proxyLabel));
-    launchDownloadProcess(proxyUrl, !proxyUrl.isEmpty());
+    const auto networkMode = m_settings ? m_settings->updateDownloadMode() : kUpdateDownloadModeAuto;
+    launchDownloadProcess(proxyUrl,
+                          !proxyUrl.isEmpty() && directFallbackAllowed(networkMode));
 }
 
 void UpdateService::launchDownloadProcess(const QString &proxyUrl, bool allowDirectFallback)
@@ -784,18 +1149,30 @@ void UpdateService::launchDownloadProcess(const QString &proxyUrl, bool allowDir
 
     m_downloadProxyUrl = proxyUrl.trimmed();
     m_downloadAllowDirectFallback = allowDirectFallback && !m_downloadProxyUrl.isEmpty();
-    QFile::remove(m_downloadPartPath);
-
     QStringList arguments = curlNetworkArguments(m_downloadProxyUrl);
-    arguments << QStringLiteral("-L")
+    arguments << QStringLiteral("--fail")
+              << QStringLiteral("--location")
               << QStringLiteral("--silent")
               << QStringLiteral("--show-error")
+              << QStringLiteral("--retry")
+              << QStringLiteral("4")
+              << QStringLiteral("--retry-all-errors")
+              << QStringLiteral("--retry-delay")
+              << QStringLiteral("3")
               << QStringLiteral("--connect-timeout")
-              << QStringLiteral("20")
-              << QStringLiteral("--max-time")
-              << QStringLiteral("600")
+              << QStringLiteral("30")
+              << QStringLiteral("--speed-time")
+              << QStringLiteral("120")
+              << QStringLiteral("--speed-limit")
+              << QStringLiteral("1024")
+              << QStringLiteral("--proto")
+              << QStringLiteral("=https")
+              << QStringLiteral("--proto-redir")
+              << QStringLiteral("=https")
               << QStringLiteral("-H")
               << QStringLiteral("User-Agent: CineVault")
+              << QStringLiteral("--continue-at")
+              << QStringLiteral("-")
               << QStringLiteral("--output")
               << QDir::toNativeSeparators(m_downloadPartPath)
               << m_downloadSourceUrl;
@@ -933,6 +1310,7 @@ void UpdateService::finishDownloadProcess(int exitCode, QProcess::ExitStatus exi
         m_downloadProxyUrl.clear();
         m_downloadAllowDirectFallback = false;
         m_downloadExpectedSize = 0;
+        m_downloadExpectedSha256.clear();
     };
 
     if (!downloadProcess) {
@@ -946,7 +1324,6 @@ void UpdateService::finishDownloadProcess(int exitCode, QProcess::ExitStatus exi
     downloadProcess->deleteLater();
 
     if (exitStatus != QProcess::NormalExit || exitCode != 0) {
-        QFile::remove(m_downloadPartPath);
         if (retryDownloadWithoutProxy()) {
             return;
         }
@@ -982,6 +1359,32 @@ void UpdateService::finishDownloadProcess(int exitCode, QProcess::ExitStatus exi
         return;
     }
 
+    const QStorageInfo storage(platformUpdatesRoot);
+    const auto requiredSpace = release.installerSize > (std::numeric_limits<qint64>::max() - kMinimumUpdateSpaceReserve) / 3
+        ? std::numeric_limits<qint64>::max()
+        : release.installerSize * 3 + kMinimumUpdateSpaceReserve;
+    if (storage.isValid() && storage.isReady() && storage.bytesAvailable() < requiredSpace) {
+        setBusy(false);
+        setStatusMessage(QStringLiteral("更新所需磁盘空间不足：至少需要 %1 GiB 可用空间。")
+                             .arg(static_cast<double>(requiredSpace) / (1024.0 * 1024.0 * 1024.0), 0, 'f', 1));
+        return;
+    }
+
+    QString hashError;
+    const auto actualSha256 = fileSha256(m_downloadPartPath, &hashError);
+    if (actualSha256.isEmpty() || actualSha256 != m_downloadExpectedSha256) {
+        QFile::remove(m_downloadPartPath);
+        if (retryDownloadWithoutProxy()) {
+            return;
+        }
+        resetDownloadState();
+        setBusy(false);
+        setStatusMessage(hashError.isEmpty()
+            ? QStringLiteral("下载更新包失败：SHA-256 校验不一致。")
+            : hashError);
+        return;
+    }
+
     if (QFile::exists(m_downloadTargetPath) && !QFile::remove(m_downloadTargetPath)) {
         QFile::remove(m_downloadPartPath);
         const auto targetPath = m_downloadTargetPath;
@@ -1002,10 +1405,14 @@ void UpdateService::finishDownloadProcess(int exitCode, QProcess::ExitStatus exi
 
     const auto versionTag = m_downloadVersionTag;
     const auto targetPath = m_downloadTargetPath;
+    const auto installerSize = m_downloadExpectedSize;
+    const auto installerSha256 = m_downloadExpectedSha256;
     if (m_settings) {
         m_settings->setDownloadedUpdateVersion(versionTag);
         m_settings->setPendingUpdateVersion(versionTag);
         m_settings->setPendingUpdateInstallerPath(targetPath);
+        m_settings->setPendingUpdateInstallerSize(installerSize);
+        m_settings->setPendingUpdateInstallerSha256(installerSha256);
         m_settings->setScheduledUpdateVersion(QString());
         m_settings->sync();
     }

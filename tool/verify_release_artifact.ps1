@@ -6,7 +6,11 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$InstallerPath,
 
-    [string]$GitHubOutput = $env:GITHUB_OUTPUT
+    [string]$GitHubOutput = $env:GITHUB_OUTPUT,
+
+    [string]$ExpectedSignerSha256 = $env:CINEVAULT_UPDATE_SIGNER_SHA256,
+
+    [switch]$RequireSignature
 )
 
 $ErrorActionPreference = 'Stop'
@@ -29,6 +33,22 @@ if ($installer.Length -lt 10MB) {
 $productVersion = $installer.VersionInfo.ProductVersion.Trim()
 if ($productVersion -ne $appVersion) {
     throw "Installer product version mismatch. Expected '$appVersion', got '$productVersion'."
+}
+
+if ($RequireSignature) {
+    $normalizedExpectedSigner = ([string]$ExpectedSignerSha256).Replace(' ', '').Trim().ToLowerInvariant()
+    if ($normalizedExpectedSigner -notmatch '^[0-9a-f]{64}$') {
+        throw 'A valid expected signer SHA-256 is required for release verification.'
+    }
+    $signature = Get-AuthenticodeSignature -LiteralPath $installer.FullName
+    if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or
+        $null -eq $signature.SignerCertificate) {
+        throw "Installer Authenticode signature is invalid: $($signature.StatusMessage)"
+    }
+    $actualSigner = $signature.SignerCertificate.GetCertHashString('SHA256').ToLowerInvariant()
+    if ($actualSigner -cne $normalizedExpectedSigner) {
+        throw 'Installer Authenticode signer does not match the pinned release signer.'
+    }
 }
 
 $hash = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()

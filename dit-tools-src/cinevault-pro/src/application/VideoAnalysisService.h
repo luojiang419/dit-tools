@@ -2,6 +2,7 @@
 
 #include "domain/Entities.h"
 
+#include <QFutureSynchronizer>
 #include <QObject>
 #include <QQueue>
 #include <QSet>
@@ -23,6 +24,8 @@ public:
                                   FFmpegAdapter *ffmpegAdapter,
                                   VisionApiClient *visionApiClient,
                                   QObject *parent = nullptr);
+    ~VideoAnalysisService() override;
+    void waitForIdle();
 
     bool enqueueVideo(const QString &videoKey, QString *errorMessage = nullptr);
     int enqueueVideos(const QStringList &videoKeys, QString *errorMessage = nullptr);
@@ -91,10 +94,14 @@ private:
     void setBatchItemState(const QString &videoKey, BatchItemState state);
     void notifyBatchChanged();
     QString lookupVideoLabel(const QString &videoKey) const;
-    void updateJob(qint64 jobId, qint64 progress, const QString &detail, const JobProgressContext &progressContext = JobProgressContext());
-    void updateJobSubject(qint64 jobId, const JobSubject &subject);
-    void completeJob(qint64 jobId, const QString &detail);
-    void failJob(qint64 jobId, const QString &errorMessage);
+    void updateJob(const QString &projectDatabasePath,
+                   qint64 jobId,
+                   qint64 progress,
+                   const QString &detail,
+                   const JobProgressContext &progressContext = JobProgressContext());
+    void updateJobSubject(const QString &projectDatabasePath, qint64 jobId, const JobSubject &subject);
+    void completeJob(const QString &projectDatabasePath, qint64 jobId, const QString &detail);
+    void failJob(const QString &projectDatabasePath, qint64 jobId, const QString &errorMessage);
     void notifyCatalogChanged();
 
     GlobalDatabaseManager *m_globalDatabaseManager = nullptr;
@@ -102,6 +109,7 @@ private:
     AppSettings *m_settings = nullptr;
     FFmpegAdapter *m_ffmpegAdapter = nullptr;
     VisionApiClient *m_visionApiClient = nullptr;
+    QFutureSynchronizer<void> m_futures;
     QQueue<AnalysisJob> m_analysisQueue;
     QQueue<DimensionAnalysisJob> m_dimensionAnalysisQueue;
     QSet<QString> m_queuedVideoKeys;

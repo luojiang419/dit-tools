@@ -1,7 +1,10 @@
 #include "infrastructure/config/AppSettings.h"
 
+#include "infrastructure/security/WindowsCredentialStore.h"
+
 #include <QFileInfo>
 #include <QSettings>
+#include <QUrl>
 
 #include <utility>
 
@@ -10,6 +13,7 @@ constexpr auto kRecentProjectsKey = "recentProjects";
 constexpr auto kKnownProjectsKey = "knownProjects";
 constexpr auto kVisionBaseUrlKey = "materialCenter/visionBaseUrl";
 constexpr auto kVisionApiKeyKey = "materialCenter/visionApiKey";
+constexpr auto kVisionApiCredentialTarget = "CineVaultPro/material-center/vision-api-key";
 constexpr auto kVisionModelKey = "materialCenter/visionModel";
 constexpr auto kCustomAnalysisDimensionsKey = "materialCenter/customAnalysisDimensions";
 constexpr auto kSearchAssistantEnabledKey = "materialCenter/searchAssistantEnabled";
@@ -28,9 +32,12 @@ constexpr auto kThemeModeKey = "ui/themeMode";
 constexpr auto kCloseButtonBehaviorKey = "ui/closeButtonBehavior";
 constexpr auto kPendingUpdateVersionKey = "updates/pendingVersion";
 constexpr auto kPendingUpdateInstallerPathKey = "updates/pendingInstallerPath";
+constexpr auto kPendingUpdateInstallerSizeKey = "updates/pendingInstallerSize";
+constexpr auto kPendingUpdateInstallerSha256Key = "updates/pendingInstallerSha256";
 constexpr auto kDownloadedUpdateVersionKey = "updates/downloadedVersion";
 constexpr auto kScheduledUpdateVersionKey = "updates/scheduledVersion";
 constexpr auto kAutoInstallUpdatesKey = "updates/autoInstall";
+constexpr auto kUpdatePolicyKey = "updates/policy";
 constexpr auto kUpdateDownloadModeKey = "updates/downloadMode";
 constexpr auto kUpdateManualProxyUrlKey = "updates/manualProxyUrl";
 constexpr auto kFeedbackSessionKey = "feedback/sessionJson";
@@ -59,6 +66,11 @@ QString normalizedProjectPath(const QString &projectPath)
 {
     const auto trimmed = projectPath.trimmed();
     return trimmed.isEmpty() ? QString() : QFileInfo(trimmed).absoluteFilePath();
+}
+
+int normalizedUpdatePolicy(int value)
+{
+    return value >= 0 && value <= 2 ? value : 0;
 }
 
 QStringList normalizedCustomAnalysisDimensions(const QStringList &values)
@@ -193,12 +205,30 @@ void AppSettings::setVisionBaseUrl(const QString &value)
 
 QString AppSettings::visionApiKey() const
 {
-    return m_settings->value(QLatin1String(kVisionApiKeyKey)).toString().trimmed();
+    const auto credentialTarget = QString::fromLatin1(kVisionApiCredentialTarget);
+    const auto storedSecret = WindowsCredentialStore::read(credentialTarget).trimmed();
+    if (!storedSecret.isEmpty()) {
+        return storedSecret;
+    }
+
+    const auto legacySecret = m_settings->value(QLatin1String(kVisionApiKeyKey)).toString().trimmed();
+    if (!legacySecret.isEmpty() && WindowsCredentialStore::write(credentialTarget, legacySecret)) {
+        m_settings->remove(QLatin1String(kVisionApiKeyKey));
+        m_settings->sync();
+    }
+    return legacySecret;
 }
 
 void AppSettings::setVisionApiKey(const QString &value)
 {
-    m_settings->setValue(QLatin1String(kVisionApiKeyKey), value.trimmed());
+    const auto normalized = value.trimmed();
+    const auto credentialTarget = QString::fromLatin1(kVisionApiCredentialTarget);
+    if (normalized.isEmpty()) {
+        WindowsCredentialStore::remove(credentialTarget);
+    } else {
+        WindowsCredentialStore::write(credentialTarget, normalized);
+    }
+    m_settings->remove(QLatin1String(kVisionApiKeyKey));
 }
 
 QString AppSettings::visionModel() const
@@ -408,6 +438,26 @@ void AppSettings::setPendingUpdateInstallerPath(const QString &value)
     m_settings->setValue(QLatin1String(kPendingUpdateInstallerPathKey), value.trimmed());
 }
 
+qint64 AppSettings::pendingUpdateInstallerSize() const
+{
+    return m_settings->value(QLatin1String(kPendingUpdateInstallerSizeKey), 0).toLongLong();
+}
+
+void AppSettings::setPendingUpdateInstallerSize(qint64 value)
+{
+    m_settings->setValue(QLatin1String(kPendingUpdateInstallerSizeKey), qMax<qint64>(0, value));
+}
+
+QString AppSettings::pendingUpdateInstallerSha256() const
+{
+    return m_settings->value(QLatin1String(kPendingUpdateInstallerSha256Key)).toString().trimmed();
+}
+
+void AppSettings::setPendingUpdateInstallerSha256(const QString &value)
+{
+    m_settings->setValue(QLatin1String(kPendingUpdateInstallerSha256Key), value.trimmed().toLower());
+}
+
 QString AppSettings::downloadedUpdateVersion() const
 {
     return m_settings->value(QLatin1String(kDownloadedUpdateVersionKey)).toString().trimmed();
@@ -437,6 +487,8 @@ void AppSettings::clearPendingUpdate()
 {
     m_settings->remove(QLatin1String(kPendingUpdateVersionKey));
     m_settings->remove(QLatin1String(kPendingUpdateInstallerPathKey));
+    m_settings->remove(QLatin1String(kPendingUpdateInstallerSizeKey));
+    m_settings->remove(QLatin1String(kPendingUpdateInstallerSha256Key));
     m_settings->remove(QLatin1String(kDownloadedUpdateVersionKey));
     m_settings->remove(QLatin1String(kScheduledUpdateVersionKey));
     m_settings->sync();
@@ -452,6 +504,19 @@ void AppSettings::setAutoInstallUpdates(bool enabled)
     m_settings->setValue(QLatin1String(kAutoInstallUpdatesKey), enabled);
 }
 
+int AppSettings::updatePolicy() const
+{
+    return normalizedUpdatePolicy(m_settings->value(QLatin1String(kUpdatePolicyKey), 0).toInt());
+}
+
+void AppSettings::setUpdatePolicy(int value)
+{
+    m_settings->setValue(QLatin1String(kUpdatePolicyKey), normalizedUpdatePolicy(value));
+    // The former boolean meant unattended installation. It is intentionally
+    // disabled after migration; automatic policy still prompts after download.
+    m_settings->setValue(QLatin1String(kAutoInstallUpdatesKey), false);
+}
+
 int AppSettings::updateDownloadMode() const
 {
     return normalizedUpdateDownloadMode(m_settings->value(QLatin1String(kUpdateDownloadModeKey), 0).toInt());
@@ -464,12 +529,25 @@ void AppSettings::setUpdateDownloadMode(int value)
 
 QString AppSettings::updateManualProxyUrl() const
 {
-    return m_settings->value(QLatin1String(kUpdateManualProxyUrlKey)).toString().trimmed();
+    return m_settings->value(QLatin1String(kUpdateManualProxyUrlKey),
+                             QStringLiteral("http://127.0.0.1:7890"))
+        .toString()
+        .trimmed();
 }
 
 void AppSettings::setUpdateManualProxyUrl(const QString &value)
 {
-    m_settings->setValue(QLatin1String(kUpdateManualProxyUrlKey), value.trimmed());
+    auto normalized = value.trimmed();
+    auto parsedValue = normalized;
+    if (!parsedValue.isEmpty() && !parsedValue.contains(QStringLiteral("://"))) {
+        parsedValue.prepend(QStringLiteral("http://"));
+    }
+    const QUrl url(parsedValue);
+    if (!url.userName().isEmpty() || !url.password().isEmpty()) {
+        m_settings->remove(QLatin1String(kUpdateManualProxyUrlKey));
+        return;
+    }
+    m_settings->setValue(QLatin1String(kUpdateManualProxyUrlKey), normalized);
 }
 
 QString AppSettings::feedbackSessionJson() const

@@ -1598,8 +1598,8 @@ Rectangle {
                                     BusyIndicator {
                                         visible: viewModel && viewModel.selectedDimensionAnalysisBusy
                                         running: visible
-                                        width: 22
-                                        height: 22
+                                        Layout.preferredWidth: 22
+                                        Layout.preferredHeight: 22
                                     }
                                 }
 

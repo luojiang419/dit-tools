@@ -635,6 +635,28 @@ private slots:
         QVERIFY(visionHeader.contains(QStringLiteral("analyzeFrame")));
     }
 
+    void completedAssistantResultIsCachedBeforeStaleUiGuard()
+    {
+        const auto source = sourceFile(QStringLiteral("src/ui/viewmodels/MaterialCenterViewModel.cpp"));
+        const auto understanding = sourceSection(
+            source,
+            QStringLiteral("void MaterialCenterViewModel::startSearchUnderstanding"),
+            QStringLiteral("void MaterialCenterViewModel::setSearchText"));
+        QVERIFY2(!understanding.isEmpty(), "无法定位查询理解实现");
+
+        const auto cacheWrite = understanding.indexOf(
+            QStringLiteral("m_searchUnderstandingCache.insert"));
+        const auto currentQueryGuard = understanding.indexOf(
+            QStringLiteral("task.queryText != currentQuery"));
+        QVERIFY(cacheWrite >= 0);
+        QVERIFY(currentQueryGuard >= 0);
+        QVERIFY2(cacheWrite < currentQueryGuard,
+                 "过期 generation 的完成结果必须先进入缓存，A→B→A 才能复用");
+        QVERIFY(!understanding.contains(QStringLiteral("task.generation")));
+        QVERIFY(understanding.contains(
+            QStringLiteral("task.cacheKey != currentCacheKey")));
+    }
+
     void flowStyleQuickSearchHasGlobalHotkeyAndKeyboardContracts()
     {
         const auto controllerHeader = sourceFile(QStringLiteral("src/ui/window/QuickSearchController.h"));
@@ -1006,6 +1028,80 @@ private slots:
         QVERIFY(fileRevealService.contains(QStringLiteral("explorer.exe")));
         QVERIFY(libraryHeader.contains(QStringLiteral("copyAssetPath(qint64 assetId)")));
         QVERIFY(minimalLibraryHeader.contains(QStringLiteral("copyAssetPath(qint64 assetId)")));
+    }
+
+    void importAndRemovalRefreshesAvoidQmlModelReentrancy()
+    {
+        const auto appContext = sourceFile(QStringLiteral("src/app/AppContext.cpp"));
+        const auto importService = sourceFile(QStringLiteral("src/application/ImportService.cpp"));
+        const auto mediaTasks = sourceFile(QStringLiteral("src/application/MediaTaskService.cpp"));
+        const auto metadata = sourceFile(QStringLiteral("src/application/MetadataExtractionService.cpp"));
+        const auto catalogSync = sourceFile(QStringLiteral("src/application/MaterialCatalogSyncService.cpp"));
+        const auto jobEngine = sourceFile(QStringLiteral("src/core/jobs/JobEngine.cpp"));
+        const auto jobTimeline = sourceFile(QStringLiteral("src/ui/viewmodels/JobTimelineViewModel.cpp"));
+        const auto jobsWorkspace = sourceFile(QStringLiteral("src/ui/qml/workspaces/JobsWorkspace.qml"));
+        const auto jobTimelineBar = sourceFile(QStringLiteral("src/ui/qml/components/JobTimelineBar.qml"));
+        const auto sourceRail = sourceFile(QStringLiteral("src/ui/viewmodels/SourceRailViewModel.cpp"));
+        const auto library = sourceFile(QStringLiteral("src/ui/viewmodels/LibraryWorkspaceViewModel.cpp"));
+        QVERIFY2(!appContext.isEmpty() && !importService.isEmpty() && !mediaTasks.isEmpty()
+                     && !metadata.isEmpty() && !catalogSync.isEmpty()
+                     && !jobEngine.isEmpty() && !jobTimeline.isEmpty()
+                     && !jobsWorkspace.isEmpty() && !jobTimelineBar.isEmpty()
+                     && !sourceRail.isEmpty() && !library.isEmpty(),
+                 "无法读取素材导入、移除与缩略图刷新契约源码");
+
+        const auto sourceRemoval = sourceSection(
+            sourceRail,
+            QStringLiteral("bool SourceRailViewModel::removeSource"),
+            QStringLiteral("\n}"));
+        const auto assetRemoval = sourceSection(
+            library,
+            QStringLiteral("bool LibraryWorkspaceViewModel::removeAsset"),
+            QStringLiteral("\n}"));
+        QVERIFY(sourceRemoval.contains(QStringLiteral("QMetaObject::invokeMethod")));
+        QVERIFY(sourceRemoval.contains(QStringLiteral("Qt::QueuedConnection")));
+        QVERIFY(assetRemoval.contains(QStringLiteral("QMetaObject::invokeMethod")));
+        QVERIFY(assetRemoval.contains(QStringLiteral("Qt::QueuedConnection")));
+        QVERIFY(appContext.count(QStringLiteral("Qt::QueuedConnection")) >= 6);
+
+        const auto importConstructor = sourceSection(
+            importService,
+            QStringLiteral("ImportService::ImportService"),
+            QStringLiteral("bool ImportService::importDirectory"));
+        QVERIFY2(!importConstructor.contains(QStringLiteral("scanBatchCommitted")),
+                 "原子扫描暂存批次不应反复重置可见素材模型");
+
+        const auto mediaRun = sourceSection(
+            mediaTasks,
+            QStringLiteral("void MediaTaskService::runMediaJobs"),
+            QStringLiteral("bool MediaTaskService::runMetadataJob"));
+        verifyOrdered(mediaRun,
+                      {QStringLiteral("runThumbnailJob"),
+                       QStringLiteral("runMetadataJob")});
+        const auto mediaRecovery = sourceSection(
+            mediaTasks,
+            QStringLiteral("void MediaTaskService::recoverStaleThumbnails"),
+            QStringLiteral("QVector<AssetFile> MediaTaskService::fetchAssets"));
+        QVERIFY(mediaRecovery.contains(QStringLiteral("SELECT id FROM source_root")));
+        QVERIFY(mediaRecovery.contains(QStringLiteral("IN ('ok', 'warning')")));
+        QVERIFY(mediaRecovery.contains(QStringLiteral("startForSourceRoot(sourceRootId)")));
+        QVERIFY(mediaRecovery.contains(QStringLiteral("Qt::QueuedConnection")));
+        QVERIFY(mediaRun.contains(QStringLiteral("db = QSqlDatabase();")));
+        QVERIFY(metadata.contains(QStringLiteral("db = QSqlDatabase();")));
+        QVERIFY(catalogSync.count(QStringLiteral("db = QSqlDatabase();")) >= 2);
+
+        QVERIFY(appContext.contains(QStringLiteral("&JobEngine::reloadJobs")));
+        QVERIFY(jobEngine.contains(QStringLiteral("FROM job j LEFT JOIN source_root")));
+        QVERIFY(jobEngine.contains(QStringLiteral("m_nextId = qMax(m_nextId, job.id + 1)")));
+        const auto timelineConstructor = sourceSection(
+            jobTimeline,
+            QStringLiteral("JobTimelineViewModel::JobTimelineViewModel"),
+            QStringLiteral("JobListModel *JobTimelineViewModel::model"));
+        QVERIFY(timelineConstructor.contains(QStringLiteral("&JobEngine::jobsChanged")));
+        QVERIFY(timelineConstructor.contains(QStringLiteral("reload();")));
+        QVERIFY(jobsWorkspace.contains(QStringLiteral("model: viewModel ? viewModel.model : null")));
+        QVERIFY(jobTimelineBar.contains(QStringLiteral("viewModel.footerProgress")));
+        QVERIFY(jobTimelineBar.contains(QStringLiteral("viewModel.footerRunningCount")));
     }
 
     void middleButtonAnchorScrollIsReusableAndGloballyCovered()

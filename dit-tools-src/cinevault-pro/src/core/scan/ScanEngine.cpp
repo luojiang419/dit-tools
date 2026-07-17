@@ -190,32 +190,7 @@ qint64 ScanEngine::prepareSession(const SourceRoot &sourceRoot, QString *errorMe
         }
         return 0;
     }
-    if (existing.next()) {
-        const auto sessionId = existing.value(0).toLongLong();
-        QSqlQuery resume(db);
-        resume.prepare(QStringLiteral(
-            "UPDATE scan_session SET state = 'running', last_error = '', updated_at = ? WHERE id = ?"));
-        resume.addBindValue(now);
-        resume.addBindValue(sessionId);
-        if (!resume.exec()) {
-            if (errorMessage) {
-                *errorMessage = resume.lastError().text();
-            }
-            return 0;
-        }
-        QSqlQuery releaseRunningWork(db);
-        releaseRunningWork.prepare(QStringLiteral(
-            "UPDATE scan_work_item SET state = 'pending', updated_at = ? WHERE session_id = ? AND state = 'running'"));
-        releaseRunningWork.addBindValue(now);
-        releaseRunningWork.addBindValue(sessionId);
-        if (!releaseRunningWork.exec()) {
-            if (errorMessage) {
-                *errorMessage = releaseRunningWork.lastError().text();
-            }
-            return 0;
-        }
-        return sessionId;
-    }
+    const auto obsoleteSessionId = existing.next() ? existing.value(0).toLongLong() : qint64{0};
 
     if (!db.transaction()) {
         if (errorMessage) {
@@ -226,6 +201,19 @@ qint64 ScanEngine::prepareSession(const SourceRoot &sourceRoot, QString *errorMe
     const auto rollback = [&db]() {
         db.rollback();
     };
+
+    if (obsoleteSessionId > 0) {
+        QSqlQuery resetGeneration(db);
+        resetGeneration.prepare(QStringLiteral("DELETE FROM scan_session WHERE id = ?"));
+        resetGeneration.addBindValue(obsoleteSessionId);
+        if (!resetGeneration.exec()) {
+            if (errorMessage) {
+                *errorMessage = resetGeneration.lastError().text();
+            }
+            rollback();
+            return 0;
+        }
+    }
 
     QSqlQuery createSession(db);
     createSession.prepare(QStringLiteral(
@@ -330,12 +318,12 @@ void ScanEngine::runScan(SourceRoot sourceRoot,
                                                               &errorMessage);
     if (!db.isOpen()) {
         QMetaObject::invokeMethod(this, [this, sourceRoot, projectDatabasePath, errorMessage, jobId]() {
+            if (m_jobEngine) {
+                m_jobEngine->failJobForProject(projectDatabasePath, jobId, errorMessage);
+            }
             if (m_databaseManager
                 && FolderPathMetadata::normalizedPathKey(m_databaseManager->databaseFilePath())
                     == FolderPathMetadata::normalizedPathKey(projectDatabasePath)) {
-                if (m_jobEngine) {
-                    m_jobEngine->failJob(jobId, errorMessage);
-                }
                 emit scanFailed(sourceRoot.id, errorMessage);
             }
             emit scanFailedForProject(projectDatabasePath, sourceRoot.id, errorMessage);
@@ -362,20 +350,21 @@ void ScanEngine::runScan(SourceRoot sourceRoot,
 
     auto invokeProgress = [this, projectDatabasePath, jobId](const ScanBatch &progressBatch) {
         QMetaObject::invokeMethod(this, [this, projectDatabasePath, progressBatch, jobId]() {
-            if (!m_databaseManager
-                || FolderPathMetadata::normalizedPathKey(m_databaseManager->databaseFilePath())
-                    != FolderPathMetadata::normalizedPathKey(projectDatabasePath)) {
-                return;
-            }
             if (m_jobEngine) {
-                m_jobEngine->updateJob(jobId,
-                                       progressBatch.progressPercent,
-                                       QStringLiteral("已扫描 %1 个文件夹，%2 个文件")
-                                           .arg(progressBatch.totalFolders)
-                                           .arg(progressBatch.totalFiles),
-                                       scanProgressContext(progressBatch));
+                m_jobEngine->updateJobForProject(
+                    projectDatabasePath,
+                    jobId,
+                    progressBatch.progressPercent,
+                    QStringLiteral("已扫描 %1 个文件夹，%2 个文件")
+                        .arg(progressBatch.totalFolders)
+                        .arg(progressBatch.totalFiles),
+                    scanProgressContext(progressBatch));
             }
-            emit scanBatchCommitted(progressBatch);
+            if (m_databaseManager
+                && FolderPathMetadata::normalizedPathKey(m_databaseManager->databaseFilePath())
+                    == FolderPathMetadata::normalizedPathKey(projectDatabasePath)) {
+                emit scanBatchCommitted(progressBatch);
+            }
         }, Qt::QueuedConnection);
     };
 
@@ -743,13 +732,15 @@ void ScanEngine::runScan(SourceRoot sourceRoot,
             const auto stillCurrent = m_databaseManager
                 && FolderPathMetadata::normalizedPathKey(m_databaseManager->databaseFilePath())
                     == FolderPathMetadata::normalizedPathKey(projectDatabasePath);
+            if (m_jobEngine) {
+                m_jobEngine->completeJobForProject(
+                    projectDatabasePath,
+                    jobId,
+                    QStringLiteral("%1 扫描完成，发现 %2 个文件")
+                        .arg(sourceRoot.name)
+                        .arg(batch.totalFiles));
+            }
             if (stillCurrent) {
-                if (m_jobEngine) {
-                    m_jobEngine->completeJob(jobId,
-                                             QStringLiteral("%1 扫描完成，发现 %2 个文件")
-                                                 .arg(sourceRoot.name)
-                                                 .arg(batch.totalFiles));
-                }
                 emit scanFinished(sourceRoot.id);
             }
             emit scanFinishedForProject(projectDatabasePath, sourceRoot.id);
@@ -771,10 +762,10 @@ void ScanEngine::runScan(SourceRoot sourceRoot,
             const auto stillCurrent = m_databaseManager
                 && FolderPathMetadata::normalizedPathKey(m_databaseManager->databaseFilePath())
                     == FolderPathMetadata::normalizedPathKey(projectDatabasePath);
+            if (m_jobEngine) {
+                m_jobEngine->failJobForProject(projectDatabasePath, jobId, message);
+            }
             if (stillCurrent) {
-                if (m_jobEngine) {
-                    m_jobEngine->failJob(jobId, message);
-                }
                 emit scanFailed(sourceRoot.id, message);
             }
             emit scanFailedForProject(projectDatabasePath, sourceRoot.id, message);
@@ -826,7 +817,8 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
 
         QSqlQuery work(db);
         work.prepare(QStringLiteral(
-            "SELECT COALESCE(SUM(CASE WHEN state = 'completed' THEN 1 ELSE 0 END), 0), COUNT(*) "
+            "SELECT COALESCE(SUM(CASE WHEN state IN ('completed', 'skipped') THEN 1 ELSE 0 END), 0), "
+            "COUNT(*), COALESCE(SUM(CASE WHEN state = 'skipped' THEN 1 ELSE 0 END), 0) "
             "FROM scan_work_item WHERE session_id = ?"));
         work.addBindValue(sessionId);
         if (!work.exec() || !work.next()) {
@@ -835,6 +827,7 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
         }
         batch.processedEntries = work.value(0).toLongLong();
         const auto totalDirectories = work.value(1).toLongLong();
+        batch.warningCount += work.value(2).toLongLong();
         const auto estimated = totalDirectories > 0
             ? (batch.processedEntries * 95 / totalDirectories)
             : 0;
@@ -853,20 +846,21 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
         }
         progressTimer.restart();
         QMetaObject::invokeMethod(this, [this, projectDatabasePath, batch, jobId]() {
-            if (!m_databaseManager
-                || FolderPathMetadata::normalizedPathKey(m_databaseManager->databaseFilePath())
-                    != FolderPathMetadata::normalizedPathKey(projectDatabasePath)) {
-                return;
-            }
             if (m_jobEngine) {
-                m_jobEngine->updateJob(jobId,
-                                       batch.progressPercent,
-                                       QStringLiteral("已完成 %1 个目录检查点，暂存 %2 个文件")
-                                           .arg(batch.processedEntries)
-                                           .arg(batch.totalFiles),
-                                       scanProgressContext(batch));
+                m_jobEngine->updateJobForProject(
+                    projectDatabasePath,
+                    jobId,
+                    batch.progressPercent,
+                    QStringLiteral("已完成 %1 个目录检查点，暂存 %2 个文件")
+                        .arg(batch.processedEntries)
+                        .arg(batch.totalFiles),
+                    scanProgressContext(batch));
             }
-            emit scanBatchCommitted(batch);
+            if (m_databaseManager
+                && FolderPathMetadata::normalizedPathKey(m_databaseManager->databaseFilePath())
+                    == FolderPathMetadata::normalizedPathKey(projectDatabasePath)) {
+                emit scanBatchCommitted(batch);
+            }
         }, Qt::QueuedConnection);
     };
 
@@ -892,10 +886,10 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
             const auto stillCurrent = m_databaseManager
                 && FolderPathMetadata::normalizedPathKey(m_databaseManager->databaseFilePath())
                     == FolderPathMetadata::normalizedPathKey(projectDatabasePath);
+            if (m_jobEngine) {
+                m_jobEngine->failJobForProject(projectDatabasePath, jobId, message);
+            }
             if (stillCurrent) {
-                if (m_jobEngine) {
-                    m_jobEngine->failJob(jobId, message);
-                }
                 emit scanFailed(sourceRoot.id, message);
             }
             emit scanFailedForProject(projectDatabasePath, sourceRoot.id, message);
@@ -941,8 +935,82 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
             item.relativePath = next.value(2).toString();
             item.depth = next.value(3).toInt();
 
-            if (!QFileInfo(item.absolutePath).isDir() || !QFileInfo(item.absolutePath).isReadable()) {
-                throw std::runtime_error(QStringLiteral("扫描目录不可访问：%1").arg(item.absolutePath).toStdString());
+            const QFileInfo directoryInfo(item.absolutePath);
+            if (!directoryInfo.isDir() || !directoryInfo.isReadable()) {
+                if (item.depth <= 0) {
+                    throw std::runtime_error(QStringLiteral("扫描根目录不可访问：%1").arg(item.absolutePath).toStdString());
+                }
+                const auto now = QDateTime::currentDateTime().toString(Qt::ISODate);
+                const auto warning = QStringLiteral("已跳过不可访问的子目录：%1").arg(item.absolutePath);
+                if (!db.transaction()) {
+                    throw std::runtime_error(db.lastError().text().toStdString());
+                }
+                QSqlQuery preserveFolders(db);
+                preserveFolders.prepare(QStringLiteral(
+                    "INSERT OR REPLACE INTO scan_stage_folder "
+                    "(session_id, path_key, name, absolute_path, relative_path, parent_relative_path, depth, "
+                    "file_count, direct_file_count, recursive_file_count, normalized_date, date_anchor, created_at, updated_at) "
+                    "SELECT ?, path_key, name, absolute_path, relative_path, parent_relative_path, depth, "
+                    "file_count, direct_file_count, recursive_file_count, normalized_date, date_anchor, created_at, updated_at "
+                    "FROM folder_node WHERE source_root_id = ? AND "
+                    "(relative_path = ? OR substr(relative_path, 1, length(?) + 1) = ? || '/')"));
+                preserveFolders.addBindValue(sessionId);
+                preserveFolders.addBindValue(sourceRoot.id);
+                preserveFolders.addBindValue(item.relativePath);
+                preserveFolders.addBindValue(item.relativePath);
+                preserveFolders.addBindValue(item.relativePath);
+                if (!preserveFolders.exec()) {
+                    const auto message = preserveFolders.lastError().text();
+                    db.rollback();
+                    throw std::runtime_error(message.toStdString());
+                }
+                QSqlQuery preserveAssets(db);
+                preserveAssets.prepare(QStringLiteral(
+                    "INSERT OR REPLACE INTO scan_stage_asset "
+                    "(session_id, path_key, name, extension, absolute_path, relative_path, parent_path, parent_relative_path, "
+                    "asset_type, size_bytes, modified_at, is_readable, created_at) "
+                    "SELECT ?, path_key, name, extension, absolute_path, relative_path, parent_path, "
+                    "CASE WHEN length(relative_path) > length(name) "
+                    "THEN substr(relative_path, 1, length(relative_path) - length(name) - 1) ELSE '' END, "
+                    "asset_type, size_bytes, modified_at, is_readable, created_at "
+                    "FROM asset_file WHERE source_root_id = ? AND "
+                    "(relative_path = ? OR substr(relative_path, 1, length(?) + 1) = ? || '/')"));
+                preserveAssets.addBindValue(sessionId);
+                preserveAssets.addBindValue(sourceRoot.id);
+                preserveAssets.addBindValue(item.relativePath);
+                preserveAssets.addBindValue(item.relativePath);
+                preserveAssets.addBindValue(item.relativePath);
+                if (!preserveAssets.exec()) {
+                    const auto message = preserveAssets.lastError().text();
+                    db.rollback();
+                    throw std::runtime_error(message.toStdString());
+                }
+                QSqlQuery skipWork(db);
+                skipWork.prepare(QStringLiteral(
+                    "UPDATE scan_work_item SET state = 'skipped', updated_at = ? WHERE id = ?"));
+                skipWork.addBindValue(now);
+                skipWork.addBindValue(item.id);
+                if (!skipWork.exec()) {
+                    db.rollback();
+                    throw std::runtime_error(skipWork.lastError().text().toStdString());
+                }
+                QSqlQuery recordWarning(db);
+                recordWarning.prepare(QStringLiteral(
+                    "UPDATE scan_session SET last_error = ?, updated_at = ? WHERE id = ?"));
+                recordWarning.addBindValue(warning);
+                recordWarning.addBindValue(now);
+                recordWarning.addBindValue(sessionId);
+                if (!recordWarning.exec()) {
+                    db.rollback();
+                    throw std::runtime_error(recordWarning.lastError().text().toStdString());
+                }
+                if (!db.commit()) {
+                    const auto message = db.lastError().text();
+                    db.rollback();
+                    throw std::runtime_error(message.toStdString());
+                }
+                publishProgress(false);
+                continue;
             }
             if (!db.transaction()) {
                 throw std::runtime_error(db.lastError().text().toStdString());
@@ -1277,13 +1345,15 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
             const auto stillCurrent = m_databaseManager
                 && FolderPathMetadata::normalizedPathKey(m_databaseManager->databaseFilePath())
                     == FolderPathMetadata::normalizedPathKey(projectDatabasePath);
+            if (m_jobEngine) {
+                m_jobEngine->completeJobForProject(
+                    projectDatabasePath,
+                    jobId,
+                    QStringLiteral("%1 扫描完成，发现 %2 个文件")
+                        .arg(sourceRoot.name)
+                        .arg(batch.totalFiles));
+            }
             if (stillCurrent) {
-                if (m_jobEngine) {
-                    m_jobEngine->completeJob(jobId,
-                                             QStringLiteral("%1 扫描完成，发现 %2 个文件")
-                                                 .arg(sourceRoot.name)
-                                                 .arg(batch.totalFiles));
-                }
                 emit scanFinished(sourceRoot.id);
             }
             emit scanFinishedForProject(projectDatabasePath, sourceRoot.id);

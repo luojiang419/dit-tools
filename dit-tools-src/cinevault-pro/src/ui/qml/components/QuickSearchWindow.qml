@@ -178,19 +178,21 @@ Window {
 
     function activateCurrent(locateOnly) {
         clampSelection()
-        if (totalResultCount <= 0) {
+        var viewModel = materialCenterViewModel
+        if (totalResultCount <= 0 || !viewModel) {
             showMainWindow()
             return
         }
         if (selectedFlatIndex < folderResultCount) {
-            if (folderList.currentItem) {
-                folderList.currentItem.activate(locateOnly)
-            }
+            activateFolderResult(
+                        viewModel.quickSearchFolderKeyAt(selectedFlatIndex),
+                        locateOnly)
             return
         }
-        if (resultList.currentItem) {
-            resultList.currentItem.activate(locateOnly)
-        }
+        var resultIndex = selectedFlatIndex - folderResultCount
+        activatePrimaryResult(viewModel.quickSearchVideoKeyAt(resultIndex),
+                              resultIndex,
+                              locateOnly)
     }
 
     onTotalResultCountChanged: clampSelection()
@@ -467,6 +469,7 @@ Window {
                             ]
 
                             delegate: Button {
+                                id: filterButton
                                 required property var modelData
                                 readonly property bool selected: root.materialCenterViewModel
                                     && root.materialCenterViewModel.searchResultFilter === modelData.value
@@ -478,18 +481,18 @@ Window {
 
                                 background: Rectangle {
                                     radius: 9
-                                    color: parent.selected
+                                    color: filterButton.selected
                                         ? root.quickSelected
-                                        : (parent.hovered ? root.quickSurfaceHover : root.quickSurface)
+                                        : (filterButton.hovered ? root.quickSurfaceHover : root.quickSurface)
                                     border.width: 1
-                                    border.color: parent.selected ? root.quickSelectedLine : root.quickLine
+                                    border.color: filterButton.selected ? root.quickSelectedLine : root.quickLine
                                 }
 
                                 contentItem: Text {
                                     text: modelData.label
-                                    color: parent.selected ? root.quickText : root.quickMuted
+                                    color: filterButton.selected ? root.quickText : root.quickMuted
                                     font.pixelSize: 12
-                                    font.weight: parent.selected ? Font.DemiBold : Font.Normal
+                                    font.weight: filterButton.selected ? Font.DemiBold : Font.Normal
                                     horizontalAlignment: Text.AlignHCenter
                                     verticalAlignment: Text.AlignVCenter
                                 }

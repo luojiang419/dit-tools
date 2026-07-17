@@ -62,6 +62,16 @@ MetadataExtractionService::MetadataExtractionService(DatabaseManager *databaseMa
 {
 }
 
+MetadataExtractionService::~MetadataExtractionService()
+{
+    waitForIdle();
+}
+
+void MetadataExtractionService::waitForIdle()
+{
+    m_futures.waitForFinished();
+}
+
 void MetadataExtractionService::startForSourceRoot(qint64 sourceRootId)
 {
     if (!m_databaseManager
@@ -115,7 +125,7 @@ void MetadataExtractionService::startForSourceRoot(qint64 sourceRootId)
                                      jobId]() {
         runExtraction(sourceRootId, projectDatabasePath, activeKey, jobId);
     });
-    Q_UNUSED(future)
+    m_futures.addFuture(future);
 }
 
 QVector<AssetFile> MetadataExtractionService::fetchPendingAssets(QSqlDatabase &db,
@@ -170,16 +180,22 @@ void MetadataExtractionService::runExtraction(qint64 sourceRootId,
     auto db = m_databaseManager->openThreadConnectionForPath(projectDatabasePath,
                                                               connectionName,
                                                               &errorMessage);
+    const auto closeConnection = [&]() {
+        db.close();
+        db = QSqlDatabase();
+        m_databaseManager->closeThreadConnection(connectionName);
+    };
     if (!db.isOpen()) {
-        failJob(jobId, errorMessage);
+        failJob(projectDatabasePath, jobId, errorMessage);
+        closeConnection();
         releaseActiveKey(activeKey);
         return;
     }
 
     const auto assets = fetchPendingAssets(db, sourceRootId, &errorMessage);
     if (!errorMessage.isEmpty()) {
-        failJob(jobId, errorMessage);
-        m_databaseManager->closeThreadConnection(connectionName);
+        failJob(projectDatabasePath, jobId, errorMessage);
+        closeConnection();
         releaseActiveKey(activeKey);
         return;
     }
@@ -196,8 +212,8 @@ void MetadataExtractionService::runExtraction(qint64 sourceRootId,
         }
         const auto results = m_exifToolAdapter->extract(batch);
         if (!persistBatch(db, results, &errorMessage)) {
-            failJob(jobId, QStringLiteral("真实元数据写入失败：%1").arg(errorMessage));
-            m_databaseManager->closeThreadConnection(connectionName);
+            failJob(projectDatabasePath, jobId, QStringLiteral("真实元数据写入失败：%1").arg(errorMessage));
+            closeConnection();
             releaseActiveKey(activeKey);
             return;
         }
@@ -205,7 +221,8 @@ void MetadataExtractionService::runExtraction(qint64 sourceRootId,
             if (result.status != ProbeStatus::Success) ++failed;
         }
         processed += batch.size();
-        updateJob(jobId,
+        updateJob(projectDatabasePath,
+                  jobId,
                   progressFor(processed, assets.size()),
                   QStringLiteral("已读取 %1/%2 个文件，失败 %3 个")
                       .arg(processed).arg(assets.size()).arg(failed),
@@ -213,18 +230,21 @@ void MetadataExtractionService::runExtraction(qint64 sourceRootId,
     }
 
     if (assets.isEmpty()) {
-        completeJob(jobId, QStringLiteral("真实元数据已是最新状态"));
+        completeJob(projectDatabasePath, jobId, QStringLiteral("真实元数据已是最新状态"));
     } else if (failed == assets.size()) {
-        failJob(jobId, QStringLiteral("ExifTool 未能读取任何文件，请检查运行时或文件权限"));
+        failJob(projectDatabasePath, jobId, QStringLiteral("ExifTool 未能读取任何文件，请检查运行时或文件权限"));
     } else {
-        completeJob(jobId,
+        completeJob(projectDatabasePath,
+                    jobId,
                     failed > 0
                         ? QStringLiteral("真实元数据读取完成：成功 %1 个，失败 %2 个")
                               .arg(assets.size() - failed).arg(failed)
                         : QStringLiteral("真实元数据读取完成，共 %1 个文件").arg(assets.size()));
     }
-    m_databaseManager->closeThreadConnection(connectionName);
-    QMetaObject::invokeMethod(this, [this]() { emit metadataCatalogChanged(); }, Qt::QueuedConnection);
+    closeConnection();
+    QMetaObject::invokeMethod(this, [this, projectDatabasePath]() {
+        emit metadataCatalogChanged(projectDatabasePath);
+    }, Qt::QueuedConnection);
     releaseActiveKey(activeKey);
 }
 
@@ -296,27 +316,28 @@ bool MetadataExtractionService::persistBatch(QSqlDatabase &db,
     return true;
 }
 
-void MetadataExtractionService::updateJob(qint64 jobId,
+void MetadataExtractionService::updateJob(const QString &projectDatabasePath,
+                                          qint64 jobId,
                                           qint64 progress,
                                           const QString &detail,
                                           const JobProgressContext &context)
 {
-    QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, jobId, progress, detail, context]() {
-        engine->updateJob(jobId, progress, detail, context);
+    QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, projectDatabasePath, jobId, progress, detail, context]() {
+        engine->updateJobForProject(projectDatabasePath, jobId, progress, detail, context);
     }, Qt::QueuedConnection);
 }
 
-void MetadataExtractionService::completeJob(qint64 jobId, const QString &detail)
+void MetadataExtractionService::completeJob(const QString &projectDatabasePath, qint64 jobId, const QString &detail)
 {
-    QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, jobId, detail]() {
-        engine->completeJob(jobId, detail);
+    QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, projectDatabasePath, jobId, detail]() {
+        engine->completeJobForProject(projectDatabasePath, jobId, detail);
     }, Qt::QueuedConnection);
 }
 
-void MetadataExtractionService::failJob(qint64 jobId, const QString &message)
+void MetadataExtractionService::failJob(const QString &projectDatabasePath, qint64 jobId, const QString &message)
 {
-    QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, jobId, message]() {
-        engine->failJob(jobId, message);
+    QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, projectDatabasePath, jobId, message]() {
+        engine->failJobForProject(projectDatabasePath, jobId, message);
     }, Qt::QueuedConnection);
 }
 

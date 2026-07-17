@@ -65,6 +65,7 @@ class AppContext : public QObject {
 
 public:
     explicit AppContext(QObject *parent = nullptr);
+    ~AppContext() override;
 
     void expose(QQmlApplicationEngine &engine);
     void startInteractiveServices();

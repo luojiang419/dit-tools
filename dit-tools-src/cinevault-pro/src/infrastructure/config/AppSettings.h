@@ -77,6 +77,12 @@ public:
     QString pendingUpdateInstallerPath() const;
     void setPendingUpdateInstallerPath(const QString &value);
 
+    qint64 pendingUpdateInstallerSize() const;
+    void setPendingUpdateInstallerSize(qint64 value);
+
+    QString pendingUpdateInstallerSha256() const;
+    void setPendingUpdateInstallerSha256(const QString &value);
+
     QString downloadedUpdateVersion() const;
     void setDownloadedUpdateVersion(const QString &value);
     QString scheduledUpdateVersion() const;
@@ -85,6 +91,9 @@ public:
 
     bool autoInstallUpdates() const;
     void setAutoInstallUpdates(bool enabled);
+
+    int updatePolicy() const;
+    void setUpdatePolicy(int value);
 
     int updateDownloadMode() const;
     void setUpdateDownloadMode(int value);

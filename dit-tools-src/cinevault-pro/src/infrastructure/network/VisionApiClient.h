@@ -6,6 +6,8 @@
 
 class VisionApiClient {
 public:
+    static QString normalizedEndpoint(const QString &baseUrl);
+
     bool testConnection(const QString &baseUrl,
                         const QString &apiKey,
                         const QString &model,

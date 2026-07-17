@@ -1,6 +1,16 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(CineVault VERSION 0.1.97 LANGUAGES CXX)
+set(CINEVAULT_VERSION_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../../VERSION")
+if(NOT EXISTS "${CINEVAULT_VERSION_FILE}")
+    message(FATAL_ERROR "CineVault version source is missing: ${CINEVAULT_VERSION_FILE}")
+endif()
+file(STRINGS "${CINEVAULT_VERSION_FILE}" CINEVAULT_SOURCE_VERSION LIMIT_COUNT 1)
+string(STRIP "${CINEVAULT_SOURCE_VERSION}" CINEVAULT_SOURCE_VERSION)
+if(NOT CINEVAULT_SOURCE_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR "VERSION must contain one semantic version, got: ${CINEVAULT_SOURCE_VERSION}")
+endif()
+
+project(CineVault VERSION ${CINEVAULT_SOURCE_VERSION} LANGUAGES CXX)
 
 include(CTest)
 
@@ -22,7 +32,13 @@ set(FFMPEG_DEV_ROOT "" CACHE PATH "FFmpeg development package root directory")
 set(CINEVAULT_LOCAL_SEARCH_CACHE_ROOT "" CACHE PATH "Prepared local-search dependency cache")
 set(CINEVAULT_SEARCH_ASSISTANT_CACHE_ROOT "" CACHE PATH "Prepared search-assistant dependency cache")
 set(CINEVAULT_EXIFTOOL_CACHE_ROOT "" CACHE PATH "Prepared ExifTool dependency cache")
-set(CINEVAULT_APP_VERSION "${PROJECT_VERSION}" CACHE STRING "Application version injected into the runtime")
+if(DEFINED CINEVAULT_APP_VERSION
+   AND NOT CINEVAULT_APP_VERSION STREQUAL PROJECT_VERSION)
+    message(FATAL_ERROR
+        "CINEVAULT_APP_VERSION (${CINEVAULT_APP_VERSION}) must match VERSION (${PROJECT_VERSION})")
+endif()
+set(CINEVAULT_APP_VERSION "${PROJECT_VERSION}" CACHE STRING "Application version from VERSION" FORCE)
+set(CINEVAULT_UPDATE_SIGNER_SHA256 "" CACHE STRING "Pinned SHA-256 thumbprint for the trusted Windows update signer")
 
 if(QT_ROOT AND EXISTS "${QT_ROOT}")
     list(APPEND CMAKE_PREFIX_PATH "${QT_ROOT}")
@@ -395,6 +411,7 @@ else()
     src/application/SearchDocumentSyncService.cpp
     src/infrastructure/config/AppSettings.h
     src/infrastructure/config/AppSettings.cpp
+    src/infrastructure/security/WindowsCredentialStore.h
     src/infrastructure/logging/Logger.h
     src/infrastructure/logging/Logger.cpp
     src/infrastructure/db/DatabaseManager.h
@@ -592,6 +609,7 @@ target_compile_definitions(CineVault PRIVATE
     CINEVAULT_HAS_LOCAL_SEARCH_ASSISTANT=$<IF:$<BOOL:${CINEVAULT_HAS_LOCAL_SEARCH_ASSISTANT}>,1,0>
     CINEVAULT_HAS_BUNDLED_EXIFTOOL=$<IF:$<BOOL:${CINEVAULT_HAS_BUNDLED_EXIFTOOL}>,1,0>
     CINEVAULT_APP_VERSION="${CINEVAULT_APP_VERSION}"
+    CINEVAULT_UPDATE_SIGNER_SHA256="${CINEVAULT_UPDATE_SIGNER_SHA256}"
 )
 
 target_link_libraries(CineVault PRIVATE
@@ -770,6 +788,14 @@ if(BUILD_TESTING)
     target_link_libraries(SearchConfigurationTest PRIVATE Qt6::Core Qt6::Test)
     add_test(NAME SearchConfigurationTest COMMAND SearchConfigurationTest)
 
+    qt_add_executable(LoggerTest
+        tests/unit/LoggerTest.cpp
+        src/infrastructure/logging/Logger.cpp
+    )
+    target_include_directories(LoggerTest PRIVATE src)
+    target_link_libraries(LoggerTest PRIVATE Qt6::Concurrent Qt6::Core Qt6::Test)
+    add_test(NAME LoggerTest COMMAND LoggerTest)
+
     qt_add_executable(AppSettingsSearchTest
         tests/unit/AppSettingsSearchTest.cpp
         src/infrastructure/config/AppSettings.cpp
@@ -826,6 +852,33 @@ if(BUILD_TESTING)
     target_include_directories(SearchAssistantRouterTest PRIVATE src)
     target_link_libraries(SearchAssistantRouterTest PRIVATE Qt6::Core Qt6::Test)
     add_test(NAME SearchAssistantRouterTest COMMAND SearchAssistantRouterTest)
+
+    qt_add_executable(SearchAssistantClientRecoveryTest
+        tests/unit/SearchAssistantClientRecoveryTest.cpp
+        src/infrastructure/search/SearchAssistantClient.cpp
+        src/infrastructure/network/VisionResponseParser.cpp
+        src/core/search/NaturalLanguageQueryParser.cpp
+        src/core/search/SearchQueryUnderstanding.cpp
+    )
+    target_include_directories(SearchAssistantClientRecoveryTest PRIVATE src)
+    target_link_libraries(SearchAssistantClientRecoveryTest PRIVATE
+        Qt6::Core
+        Qt6::Network
+        Qt6::Test
+    )
+    add_test(NAME SearchAssistantClientRecoveryTest COMMAND SearchAssistantClientRecoveryTest)
+
+    qt_add_executable(LocalSearchAssistantRuntimeAsyncTest
+        tests/unit/LocalSearchAssistantRuntimeAsyncTest.cpp
+        src/infrastructure/search/LocalSearchAssistantRuntime.cpp
+    )
+    target_include_directories(LocalSearchAssistantRuntimeAsyncTest PRIVATE src)
+    target_link_libraries(LocalSearchAssistantRuntimeAsyncTest PRIVATE
+        Qt6::Core
+        Qt6::Network
+        Qt6::Test
+    )
+    add_test(NAME LocalSearchAssistantRuntimeAsyncTest COMMAND LocalSearchAssistantRuntimeAsyncTest)
 
     qt_add_executable(SearchResultFusionTest
         tests/unit/SearchResultFusionTest.cpp
@@ -893,6 +946,7 @@ if(BUILD_TESTING)
     target_include_directories(UpdateServiceTest PRIVATE src)
     target_compile_definitions(UpdateServiceTest PRIVATE
         CINEVAULT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+        CINEVAULT_UPDATE_SIGNER_SHA256="${CINEVAULT_UPDATE_SIGNER_SHA256}"
     )
     target_link_libraries(UpdateServiceTest PRIVATE Qt6::Core Qt6::Network Qt6::Test)
     add_test(NAME UpdateServiceTest COMMAND UpdateServiceTest)
@@ -1184,12 +1238,15 @@ if(BUILD_TESTING)
             ApplicationIdleMonitorTest
             BackgroundMonitoringTest
             SearchConfigurationTest
+            LoggerTest
             AppSettingsSearchTest
             QuickSearchControllerTest
             VisualAnalysisMetadataTest
             NaturalLanguageQueryParserTest
             SearchReliabilityEvaluatorTest
             SearchAssistantRouterTest
+            SearchAssistantClientRecoveryTest
+            LocalSearchAssistantRuntimeAsyncTest
             SearchResultFusionTest
             SearchQueryUnderstandingTest
             CaptureTimeResolverTest

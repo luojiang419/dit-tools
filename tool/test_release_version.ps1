@@ -49,4 +49,20 @@ try {
 }
 Assert-Equal $invalidVersionWasRejected $true 'Invalid version was not rejected.'
 
+$repositoryRoot = Split-Path -Parent $PSScriptRoot
+$rawSourceVersion = (Get-Content -LiteralPath (Join-Path $repositoryRoot 'VERSION') -Raw).Trim()
+Assert-Equal `
+    (Get-CineVaultSourceVersion -RepositoryRoot $repositoryRoot) `
+    $rawSourceVersion `
+    'The repository VERSION file was not read as the canonical application version.'
+
+$cmakeContents = Get-Content -LiteralPath (Join-Path $repositoryRoot 'dit-tools-src\cinevault-pro\CMakeLists.txt') -Raw
+$installerContents = Get-Content -LiteralPath (Join-Path $repositoryRoot 'installer\windows\cinevault.iss') -Raw
+$buildScriptContents = Get-Content -LiteralPath (Join-Path $repositoryRoot 'tool\build_windows.ps1') -Raw
+if ($cmakeContents -match 'project\(CineVault VERSION 0\.1\.' -or
+    $installerContents -match '#define\s+(AppVersion|VersionTag)\s+"v?\d' -or
+    $buildScriptContents -notmatch 'Get-CineVaultSourceVersion') {
+    throw 'A stale independent application version source still exists.'
+}
+
 Write-Host 'Release version tests passed.'

@@ -62,6 +62,7 @@ Rectangle {
             model: shellVm ? shellVm.workspaceTabs : []
 
             delegate: Button {
+                id: tabButton
                 readonly property bool tabEnabled: modelData.enabled === undefined || modelData.enabled
                 readonly property int badgeCount: modelData.badgeCount === undefined ? 0 : Number(modelData.badgeCount)
 
@@ -100,8 +101,8 @@ Rectangle {
                     }
                 }
                 contentItem: Text {
-                    text: parent.text
-                    color: parent.enabled
+                    text: tabButton.text
+                    color: tabButton.enabled
                            ? (shellVm.currentWorkspace === modelData.value ? Theme.text : Theme.muted)
                            : Theme.weak
                     font.pixelSize: 14

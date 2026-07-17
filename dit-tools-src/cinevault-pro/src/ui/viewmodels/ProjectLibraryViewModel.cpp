@@ -5,6 +5,7 @@
 #include "ui/models/ProjectLibraryListModel.h"
 
 #include <QApplication>
+#include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QInputDialog>
@@ -208,8 +209,9 @@ void ProjectLibraryViewModel::moveProject(const QString &databasePath)
 
 void ProjectLibraryViewModel::deleteProject(const QString &databasePath, bool available)
 {
+    const auto projectRoot = QFileInfo(databasePath).absolutePath();
     const auto message = available
-        ? QStringLiteral("确定将该项目移入系统回收站吗？\n\n项目库入口和素材管理中心索引会同步移除。")
+        ? QStringLiteral("确定将以下整个项目目录移入系统回收站吗？\n\n%1\n\n项目库入口和素材管理中心索引会同步移除。").arg(QDir::toNativeSeparators(projectRoot))
         : QStringLiteral("项目文件不可访问。\n\n确定只从项目库移除这个缺失入口吗？");
     if (!confirmQuestion(QStringLiteral("删除项目"), message)) {
         setLastMessage(QStringLiteral("已取消删除项目。"));

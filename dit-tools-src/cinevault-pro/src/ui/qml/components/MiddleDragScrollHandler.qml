@@ -3,9 +3,12 @@ import QtQuick
 DragHandler {
     id: handler
 
-    property Flickable flickable: null
-    property Flickable horizontalFlickable: flickable
-    property Flickable verticalFlickable: flickable
+    // ScrollView.contentItem is exposed as Item by Qt Controls even though the
+    // runtime object is a Flickable. Keep these handles dynamic so qmllint does
+    // not require an unsafe Item-to-Flickable assignment.
+    property var flickable: null
+    property var horizontalFlickable: flickable
+    property var verticalFlickable: flickable
     property real anchorViewportX: 0
     property real anchorViewportY: 0
     property real dragDistanceX: 0

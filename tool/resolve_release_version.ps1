@@ -5,6 +5,7 @@ param(
     [string]$MinimumVersion = 'v0.1.169',
     [string]$CommitSha = $env:GITHUB_SHA,
     [string]$GitHubOutput = $env:GITHUB_OUTPUT,
+    [string]$RepositoryRoot = (Split-Path -Parent $PSScriptRoot),
     [switch]$SkipExistingCommitCheck
 )
 
@@ -12,6 +13,9 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 . "$PSScriptRoot\version_helpers.ps1"
+
+$sourceVersion = Get-CineVaultSourceVersion -RepositoryRoot $RepositoryRoot
+$sourceVersionTag = Get-NormalizedCineVaultVersionTag -Version $sourceVersion
 
 function Write-WorkflowOutput {
     param(
@@ -58,8 +62,12 @@ if (-not $SkipExistingCommitCheck -and -not [string]::IsNullOrWhiteSpace($Commit
         if ($release.isDraft) {
             throw "Commit $CommitSha already has stale draft release $existingTag. Delete or publish it before retrying."
         }
+        if ($existingTag -cne $sourceVersionTag) {
+            throw "Commit tag $existingTag does not match repository VERSION $sourceVersionTag."
+        }
 
         Write-WorkflowOutput -Name 'should_publish' -Value 'false'
+        Write-WorkflowOutput -Name 'version_bump_required' -Value 'false'
         Write-WorkflowOutput -Name 'version_tag' -Value $existingTag
         Write-WorkflowOutput -Name 'app_version' -Value $existingTag.TrimStart('v')
         Write-Host "Commit $CommitSha is already published as $existingTag; release work will be skipped."
@@ -83,9 +91,24 @@ $versionTag = Get-NextCineVaultReleaseVersion `
     -MinimumVersion $MinimumVersion
 $appVersion = $versionTag.TrimStart('v')
 
-Write-WorkflowOutput -Name 'should_publish' -Value 'true'
-Write-WorkflowOutput -Name 'version_tag' -Value $versionTag
-Write-WorkflowOutput -Name 'app_version' -Value $appVersion
+$normalizedLatestVersion = Get-NormalizedCineVaultVersionTag -Version $LatestVersion
+$comparisonWithLatest = Compare-CineVaultVersions -Left $sourceVersionTag -Right $normalizedLatestVersion
+if ($comparisonWithLatest -eq 0) {
+    Write-WorkflowOutput -Name 'should_publish' -Value 'false'
+    Write-WorkflowOutput -Name 'version_bump_required' -Value 'true'
+    Write-WorkflowOutput -Name 'version_tag' -Value $versionTag
+    Write-WorkflowOutput -Name 'app_version' -Value $appVersion
+    Write-Host "Repository VERSION matches latest release; a version-only commit is required: $versionTag"
+    return
+}
+if ($sourceVersionTag -cne $versionTag) {
+    throw "Repository VERSION $sourceVersionTag must equal latest release $normalizedLatestVersion or the next release $versionTag."
+}
 
-Write-Host "Latest release: $LatestVersion"
-Write-Host "Next release:   $versionTag"
+Write-WorkflowOutput -Name 'should_publish' -Value 'true'
+Write-WorkflowOutput -Name 'version_bump_required' -Value 'false'
+Write-WorkflowOutput -Name 'version_tag' -Value $sourceVersionTag
+Write-WorkflowOutput -Name 'app_version' -Value $sourceVersion
+
+Write-Host "Latest release:    $normalizedLatestVersion"
+Write-Host "Repository VERSION: $sourceVersionTag"
