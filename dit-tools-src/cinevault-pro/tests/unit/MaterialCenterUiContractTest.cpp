@@ -251,7 +251,8 @@ private slots:
         QVERIFY(source.contains(QStringLiteral("understandQuery")));
         QVERIFY(!source.contains(QStringLiteral("rerankFrameCandidates")));
         QVERIFY(!source.contains(QStringLiteral("startFrameRerank")));
-        QVERIFY(source.contains(QStringLiteral("task.generation != m_searchGeneration")));
+        QVERIFY(source.contains(QStringLiteral("task.cacheKey != currentCacheKey")));
+        QVERIFY(!source.contains(QStringLiteral("task.generation != m_searchGeneration")));
     }
 
     void qmlConsumesSearchStateAndFolderActions()
@@ -497,7 +498,10 @@ private slots:
         QVERIFY2(!settingsQml.isEmpty() && !switchQml.isEmpty(),
                  "无法读取设置页主题开关源码");
 
-        QCOMPARE(settingsQml.count(QStringLiteral("ThemedSwitch {")), 4);
+        QCOMPARE(settingsQml.count(QStringLiteral("ThemedSwitch {")), 3);
+        QVERIFY(settingsQml.contains(QStringLiteral("自动更新（检测并下载后询问）")));
+        QVERIFY(settingsQml.contains(QStringLiteral("手动更新（仅点击检查时联网）")));
+        QVERIFY(settingsQml.contains(QStringLiteral("禁止更新（不联网、不提示）")));
         QVERIFY(switchQml.contains(QStringLiteral("color: control.enabled ? Theme.text : Theme.weak")));
         QVERIFY(switchQml.contains(QStringLiteral("palette.windowText: control.enabled ? Theme.text : Theme.weak")));
         QVERIFY(switchQml.contains(QStringLiteral("color: control.checked ? Theme.primaryBg : Theme.inputPressed")));

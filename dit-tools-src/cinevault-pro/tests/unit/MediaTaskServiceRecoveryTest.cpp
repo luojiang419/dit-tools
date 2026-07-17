@@ -341,6 +341,7 @@ void MediaTaskServiceRecoveryTest::newImportsGenerateThumbnailBeforeMetadataProb
     const auto metadataRowsBeforeThumbnail = metadataRowAvailable
         ? metadataCount.value(0).toLongLong()
         : qint64{-1};
+    metadataCount.finish();
     thumbnailEngine.resume();
 
     QVERIFY2(metadataQuerySucceeded, qPrintable(metadataCount.lastError().text()));

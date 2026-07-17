@@ -113,10 +113,10 @@ QStringList localProxyHosts()
 
 bool pathIsInside(const QString &path, const QString &root)
 {
-    auto normalizedPath = QDir::cleanPath(path);
-    auto normalizedRoot = QDir::cleanPath(root);
-    if (!normalizedRoot.endsWith(QDir::separator())) {
-        normalizedRoot.append(QDir::separator());
+    const auto normalizedPath = QDir::fromNativeSeparators(QDir::cleanPath(path));
+    auto normalizedRoot = QDir::fromNativeSeparators(QDir::cleanPath(root));
+    if (!normalizedRoot.endsWith(QLatin1Char('/'))) {
+        normalizedRoot.append(QLatin1Char('/'));
     }
 #if defined(Q_OS_WIN)
     return normalizedPath.startsWith(normalizedRoot, Qt::CaseInsensitive);
