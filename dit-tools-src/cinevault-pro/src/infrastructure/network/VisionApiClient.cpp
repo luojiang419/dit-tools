@@ -178,9 +178,7 @@ QString normalizeEndpoint(QString baseUrl)
     const QUrl parsedUrl(url);
     if (!parsedUrl.isValid() || parsedUrl.host().isEmpty()
         || (parsedUrl.scheme().compare(QStringLiteral("http"), Qt::CaseInsensitive) != 0
-            && parsedUrl.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) != 0)
-        || (parsedUrl.scheme().compare(QStringLiteral("http"), Qt::CaseInsensitive) == 0
-            && !isLoopbackHost(parsedUrl.host()))) {
+            && parsedUrl.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) != 0)) {
         return {};
     }
     if (url.endsWith(QLatin1Char('/'))) {
@@ -273,7 +271,7 @@ HttpResult postJson(const QString &endpoint,
 {
     if (endpoint.trimmed().isEmpty()) {
         HttpResult rejected;
-        rejected.errorMessage = QStringLiteral("非本机视觉接口必须使用 HTTPS，且不允许降级到 HTTP");
+        rejected.errorMessage = QStringLiteral("视觉接口地址无效，仅支持 HTTP 或 HTTPS");
         return rejected;
     }
     const auto requestBody = QJsonDocument(payload).toJson(QJsonDocument::Compact);
@@ -932,7 +930,7 @@ bool VisionApiClient::testConnection(const QString &baseUrl,
     if (endpoint.trimmed().isEmpty() || apiKey.trimmed().isEmpty() || model.trimmed().isEmpty()) {
         if (errorMessage) {
             *errorMessage = !baseUrl.trimmed().isEmpty() && endpoint.isEmpty()
-                ? QStringLiteral("非本机视觉接口必须使用 HTTPS，且不允许降级到 HTTP")
+                ? QStringLiteral("视觉接口地址无效，仅支持 HTTP 或 HTTPS")
                 : QStringLiteral("请先完整填写 Base URL、API Key 和模型名");
         }
         return false;

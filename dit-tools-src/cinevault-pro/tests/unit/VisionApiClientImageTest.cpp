@@ -254,7 +254,7 @@ private slots:
     void analyzeDimensions_fallsBackToTextWhenResponseFormatRejected();
     void testConnection_retriesTransientGatewayFailure();
     void testConnection_stopsAfterBoundedGatewayRetries();
-    void endpointPolicy_defaultsRemoteToHttpsAndAllowsLoopbackHttp();
+    void endpointPolicy_defaultsRemoteToHttpsAndAllowsExplicitHttp();
 };
 
 void VisionApiClientImageTest::analyzeFrame_requestsBoundEntitiesAndOcr()
@@ -581,7 +581,7 @@ void VisionApiClientImageTest::testConnection_stopsAfterBoundedGatewayRetries()
     QVERIFY(error.contains(QStringLiteral("已重试 1 次仍失败")));
 }
 
-void VisionApiClientImageTest::endpointPolicy_defaultsRemoteToHttpsAndAllowsLoopbackHttp()
+void VisionApiClientImageTest::endpointPolicy_defaultsRemoteToHttpsAndAllowsExplicitHttp()
 {
     QCOMPARE(VisionApiClient::normalizedEndpoint(QStringLiteral("api.example.com")),
              QStringLiteral("https://api.example.com/v1/chat/completions"));
@@ -589,7 +589,9 @@ void VisionApiClientImageTest::endpointPolicy_defaultsRemoteToHttpsAndAllowsLoop
              QStringLiteral("http://127.0.0.1:8080/v1/chat/completions"));
     QCOMPARE(VisionApiClient::normalizedEndpoint(QStringLiteral("http://localhost:8080/v1")),
              QStringLiteral("http://localhost:8080/v1/chat/completions"));
-    QVERIFY(VisionApiClient::normalizedEndpoint(QStringLiteral("http://api.example.com/v1")).isEmpty());
+    QCOMPARE(VisionApiClient::normalizedEndpoint(QStringLiteral("http://api.example.com/v1")),
+             QStringLiteral("http://api.example.com/v1/chat/completions"));
+    QVERIFY(VisionApiClient::normalizedEndpoint(QStringLiteral("ftp://api.example.com/v1")).isEmpty());
 }
 
 QTEST_MAIN(VisionApiClientImageTest)
