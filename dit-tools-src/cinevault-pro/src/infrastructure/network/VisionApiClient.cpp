@@ -171,6 +171,9 @@ QString normalizeEndpoint(QString baseUrl)
     }
     if (!url.startsWith(QStringLiteral("http://"), Qt::CaseInsensitive)
         && !url.startsWith(QStringLiteral("https://"), Qt::CaseInsensitive)) {
+        if (url.contains(QStringLiteral("://"))) {
+            return {};
+        }
         const QUrl candidate(QStringLiteral("https://") + url);
         url = (isLoopbackHost(candidate.host()) ? QStringLiteral("http://") : QStringLiteral("https://")) + url;
     }
