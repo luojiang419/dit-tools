@@ -1111,6 +1111,22 @@ void UpdateService::startInstallerDownload(const UpdateReleaseInfo &release, boo
         return;
     }
 
+    const QStorageInfo storage(platformUpdatesRoot);
+    const auto requiredSpace = release.installerSize
+            > (std::numeric_limits<qint64>::max() - kMinimumUpdateSpaceReserve) / 3
+        ? std::numeric_limits<qint64>::max()
+        : release.installerSize * 3 + kMinimumUpdateSpaceReserve;
+    if (storage.isValid() && storage.isReady() && storage.bytesAvailable() < requiredSpace) {
+        setBusy(false);
+        setStatusMessage(QStringLiteral("更新所需磁盘空间不足：至少需要 %1 GiB 可用空间。")
+                             .arg(static_cast<double>(requiredSpace)
+                                      / (1024.0 * 1024.0 * 1024.0),
+                                  0,
+                                  'f',
+                                  1));
+        return;
+    }
+
     m_manualCheck = manual;
     m_downloadVersionTag = release.versionTag;
     m_downloadSourceUrl = release.installerUrl;
@@ -1356,17 +1372,6 @@ void UpdateService::finishDownloadProcess(int exitCode, QProcess::ExitStatus exi
         resetDownloadState();
         setBusy(false);
         setStatusMessage(QStringLiteral("下载更新包失败：安装包大小与发布资产不一致。"));
-        return;
-    }
-
-    const QStorageInfo storage(platformUpdatesRoot);
-    const auto requiredSpace = release.installerSize > (std::numeric_limits<qint64>::max() - kMinimumUpdateSpaceReserve) / 3
-        ? std::numeric_limits<qint64>::max()
-        : release.installerSize * 3 + kMinimumUpdateSpaceReserve;
-    if (storage.isValid() && storage.isReady() && storage.bytesAvailable() < requiredSpace) {
-        setBusy(false);
-        setStatusMessage(QStringLiteral("更新所需磁盘空间不足：至少需要 %1 GiB 可用空间。")
-                             .arg(static_cast<double>(requiredSpace) / (1024.0 * 1024.0 * 1024.0), 0, 'f', 1));
         return;
     }
 
