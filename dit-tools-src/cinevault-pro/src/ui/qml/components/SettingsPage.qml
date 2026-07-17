@@ -21,6 +21,8 @@ Item {
     property int draftThumbnailFrameIndex: 3
     property int draftContactSheetFrameCount: 24
     property int draftAnalysisTimeoutSec: 60
+    property bool draftDocumentAutoAnalysisEnabled: false
+    property bool draftPhotoshopAutoAnalysisEnabled: false
     property int draftThemeMode: Theme.modeSystem
     property int draftUpdatePolicy: 0
     property int draftUpdateDownloadMode: 0
@@ -55,6 +57,8 @@ Item {
             draftThumbnailFrameIndex = viewModel.thumbnailFrameIndex
             draftContactSheetFrameCount = viewModel.contactSheetFrameCount
             draftAnalysisTimeoutSec = viewModel.analysisTimeoutSec
+            draftDocumentAutoAnalysisEnabled = viewModel.documentAutoAnalysisEnabled
+            draftPhotoshopAutoAnalysisEnabled = viewModel.photoshopAutoAnalysisEnabled
             draftThemeMode = viewModel.themeMode
             draftUpdatePolicy = viewModel.updatePolicy
             draftUpdateDownloadMode = viewModel.updateDownloadMode
@@ -183,6 +187,8 @@ Item {
                             root.draftThumbnailFrameIndex,
                             root.draftContactSheetFrameCount,
                             root.draftAnalysisTimeoutSec,
+                            root.draftDocumentAutoAnalysisEnabled,
+                            root.draftPhotoshopAutoAnalysisEnabled,
                             root.draftUpdatePolicy,
                             root.draftUpdateDownloadMode,
                             root.draftUpdateManualProxyUrl)
@@ -684,6 +690,65 @@ Item {
                                 to: 600
                                 value: root.draftAnalysisTimeoutSec
                                 onValueModified: root.draftAnalysisTimeoutSec = value
+                            }
+                        }
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 9
+
+                            Text {
+                                text: "空闲自动解析文件类型"
+                                color: Theme.text
+                                font.pixelSize: 16
+                                font.weight: Font.DemiBold
+                            }
+
+                            Text {
+                                Layout.fillWidth: true
+                                text: "图片和视频默认开启。文档与 PSD/PSB 文件默认仅建立索引；勾选并保存后，软件会在电脑空闲时自动解析已有和新增素材。"
+                                color: Theme.muted
+                                font.pixelSize: 12
+                                wrapMode: Text.Wrap
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 22
+
+                                RowLayout {
+                                    spacing: 8
+
+                                    ThemedSwitch {
+                                        objectName: "documentAutoAnalysisSwitch"
+                                        checked: root.draftDocumentAutoAnalysisEnabled
+                                        onToggled: root.draftDocumentAutoAnalysisEnabled = checked
+                                    }
+
+                                    Text {
+                                        text: "文档"
+                                        color: Theme.text
+                                        font.pixelSize: root.bodyFontSize
+                                    }
+                                }
+
+                                RowLayout {
+                                    spacing: 8
+
+                                    ThemedSwitch {
+                                        objectName: "photoshopAutoAnalysisSwitch"
+                                        checked: root.draftPhotoshopAutoAnalysisEnabled
+                                        onToggled: root.draftPhotoshopAutoAnalysisEnabled = checked
+                                    }
+
+                                    Text {
+                                        text: "PSD 文件（Adobe 图片文件）"
+                                        color: Theme.text
+                                        font.pixelSize: root.bodyFontSize
+                                    }
+                                }
+
+                                Item { Layout.fillWidth: true }
                             }
                         }
 

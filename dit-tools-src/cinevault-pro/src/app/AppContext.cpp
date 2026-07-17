@@ -118,6 +118,7 @@ AppContext::AppContext(QObject *parent)
           m_projectService,
           m_globalDatabaseManager,
           m_videoAnalysisService,
+          &m_settings,
           m_sourceChangeMonitor,
           m_systemIdleMonitor,
           this))
@@ -197,6 +198,10 @@ AppContext::AppContext(QObject *parent)
             m_searchDocumentSyncService, &SearchDocumentSyncService::scheduleFullSync);
     connect(m_settingsViewModel, &SettingsViewModel::searchSettingsChanged,
             m_materialCenterViewModel, &MaterialCenterViewModel::reload);
+    connect(m_settingsViewModel,
+            &SettingsViewModel::searchSettingsChanged,
+            m_backgroundMaintenanceCoordinator,
+            &BackgroundMaintenanceCoordinator::applyAnalysisSettings);
     connect(m_materialCenterViewModel,
             &MaterialCenterViewModel::quickSearchNavigationRequested,
             m_shellViewModel,

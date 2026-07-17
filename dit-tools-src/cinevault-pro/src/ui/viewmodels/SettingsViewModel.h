@@ -30,6 +30,8 @@ class SettingsViewModel : public QObject {
     Q_PROPERTY(int thumbnailFrameIndex READ thumbnailFrameIndex WRITE setThumbnailFrameIndex NOTIFY settingsChanged)
     Q_PROPERTY(int contactSheetFrameCount READ contactSheetFrameCount WRITE setContactSheetFrameCount NOTIFY settingsChanged)
     Q_PROPERTY(int analysisTimeoutSec READ analysisTimeoutSec WRITE setAnalysisTimeoutSec NOTIFY settingsChanged)
+    Q_PROPERTY(bool documentAutoAnalysisEnabled READ documentAutoAnalysisEnabled NOTIFY settingsChanged)
+    Q_PROPERTY(bool photoshopAutoAnalysisEnabled READ photoshopAutoAnalysisEnabled NOTIFY settingsChanged)
     Q_PROPERTY(int themeMode READ themeMode WRITE setThemeMode NOTIFY settingsChanged)
     Q_PROPERTY(int closeButtonBehavior READ closeButtonBehavior WRITE setCloseButtonBehavior NOTIFY settingsChanged)
     Q_PROPERTY(bool updateBusy READ updateBusy NOTIFY settingsChanged)
@@ -79,6 +81,8 @@ public:
     void setContactSheetFrameCount(int value);
     int analysisTimeoutSec() const;
     void setAnalysisTimeoutSec(int value);
+    bool documentAutoAnalysisEnabled() const;
+    bool photoshopAutoAnalysisEnabled() const;
     int themeMode() const;
     void setThemeMode(int value);
     int closeButtonBehavior() const;
@@ -124,6 +128,8 @@ public:
                                   int thumbnailFrameIndex,
                                    int contactSheetFrameCount,
                                    int analysisTimeoutSec,
+                                   bool documentAutoAnalysisEnabled,
+                                   bool photoshopAutoAnalysisEnabled,
                                    int updatePolicy,
                                    int updateDownloadMode,
                                   const QString &updateManualProxyUrl);

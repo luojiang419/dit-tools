@@ -7,6 +7,7 @@
 #include <QSet>
 
 class GlobalDatabaseManager;
+class AppSettings;
 class ImportService;
 class LibraryQueryService;
 class ProjectService;
@@ -20,10 +21,11 @@ class BackgroundMaintenanceCoordinator final : public QObject {
 public:
     explicit BackgroundMaintenanceCoordinator(ImportService *importService,
                                               LibraryQueryService *libraryQueryService,
-                                              ProjectService *projectService,
-                                              GlobalDatabaseManager *globalDatabaseManager,
-                                              VideoAnalysisService *videoAnalysisService,
-                                              SourceChangeMonitor *sourceChangeMonitor,
+                                               ProjectService *projectService,
+                                               GlobalDatabaseManager *globalDatabaseManager,
+                                               VideoAnalysisService *videoAnalysisService,
+                                               AppSettings *settings,
+                                               SourceChangeMonitor *sourceChangeMonitor,
                                               SystemIdleMonitor *systemIdleMonitor,
                                               QObject *parent = nullptr);
 
@@ -34,6 +36,9 @@ public:
     [[nodiscard]] bool isSystemIdle() const;
     [[nodiscard]] int pendingSourceCount() const;
     [[nodiscard]] QString statusText() const;
+
+public slots:
+    void applyAnalysisSettings();
 
 signals:
     void stateChanged();
@@ -53,6 +58,7 @@ private:
     ProjectService *m_projectService = nullptr;
     GlobalDatabaseManager *m_globalDatabaseManager = nullptr;
     VideoAnalysisService *m_videoAnalysisService = nullptr;
+    AppSettings *m_settings = nullptr;
     SourceChangeMonitor *m_sourceChangeMonitor = nullptr;
     SystemIdleMonitor *m_systemIdleMonitor = nullptr;
     QHash<qint64, SourceRoot> m_sourceRoots;

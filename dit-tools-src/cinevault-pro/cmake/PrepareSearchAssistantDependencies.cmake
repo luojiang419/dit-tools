@@ -21,6 +21,9 @@ if(_output_is_in_source)
 endif()
 
 set(_lock_file "${CMAKE_CURRENT_LIST_DIR}/search-assistant-dependencies.lock.json")
+if(NOT DEFINED INCLUDE_MODEL)
+    set(INCLUDE_MODEL OFF)
+endif()
 file(READ "${_lock_file}" _lock_json)
 file(SHA256 "${_lock_file}" _lock_sha256)
 string(JSON _runtime_version GET "${_lock_json}" dependencies runtime version)
@@ -37,6 +40,11 @@ foreach(_index RANGE 0 ${_last_artifact})
     string(JSON _relative_path GET "${_lock_json}" artifacts ${_index} installPath)
     string(JSON _expected_size GET "${_lock_json}" artifacts ${_index} size)
     string(JSON _expected_hash GET "${_lock_json}" artifacts ${_index} sha256)
+
+    if(_id STREQUAL "qwen3-0.6b-q8-model" AND NOT INCLUDE_MODEL)
+        message(STATUS "Skipping Qwen model; this build uses the model-free release policy")
+        continue()
+    endif()
 
     set(_destination "${_output_root}/${_relative_path}")
     cmake_path(GET _destination PARENT_PATH _destination_dir)
@@ -90,8 +98,11 @@ foreach(_index RANGE 0 ${_last_artifact})
     endif()
 endforeach()
 
-if(NOT DEFINED _runtime_archive OR NOT DEFINED _model_path)
-    message(FATAL_ERROR "The search-assistant lock is missing required artifacts")
+if(NOT DEFINED _runtime_archive)
+    message(FATAL_ERROR "The search-assistant lock is missing the required runtime artifact")
+endif()
+if(INCLUDE_MODEL AND NOT DEFINED _model_path)
+    message(FATAL_ERROR "The search-assistant lock is missing the requested model artifact")
 endif()
 
 set(_runtime_root "${_output_root}/runtimes/llama-${_runtime_version}-win-vulkan-x64")
@@ -112,7 +123,7 @@ else()
     message(STATUS "Using extracted llama.cpp runtime: ${_runtime_root}")
 endif()
 
-if(NOT EXISTS "${_model_path}")
+if(INCLUDE_MODEL AND NOT EXISTS "${_model_path}")
     message(FATAL_ERROR "The prepared search-assistant model is missing: ${_model_path}")
 endif()
 
@@ -120,5 +131,5 @@ file(WRITE "${_output_root}/search-assistant-dependencies.ready"
     "schema=1\n"
     "lock_sha256=${_lock_sha256}\n"
     "runtime_root=${_runtime_root}\n"
-    "model_path=${_model_path}\n")
+    "includes_model=${INCLUDE_MODEL}\n")
 message(STATUS "Search-assistant dependency cache is ready: ${_output_root}")

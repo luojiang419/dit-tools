@@ -9,10 +9,15 @@
 
 #include <QDir>
 #include <QFile>
+#include <QScopeGuard>
 #include <QSignalSpy>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QTemporaryDir>
+
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#endif
 
 namespace {
 void writeFile(const QString &path, const QByteArray &content)
@@ -155,6 +160,83 @@ class ImportServiceLegacyRescanTest : public QObject {
     Q_OBJECT
 
 private slots:
+    void lockedFile_isIndexedAsUnreadableAndDoesNotFailVolumeScan()
+    {
+#ifndef Q_OS_WIN
+        QSKIP("此回归测试依赖 Windows 独占共享锁语义");
+#else
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        const auto projectDb = QDir(temp.path()).filePath(QStringLiteral("locked-file.cvdb"));
+        const auto sourcePath = QDir(temp.path()).filePath(QStringLiteral("VolumeX"));
+        const auto lockedPath = QDir(sourcePath).filePath(QStringLiteral("System/locked.mp4"));
+        writeFile(lockedPath, "locked-video");
+        writeFile(QDir(sourcePath).filePath(QStringLiteral("Media/readable.jpg")), "readable-image");
+
+        auto lockedHandle = CreateFileW(reinterpret_cast<LPCWSTR>(lockedPath.utf16()),
+                                        GENERIC_READ | GENERIC_WRITE,
+                                        0,
+                                        nullptr,
+                                        OPEN_EXISTING,
+                                        FILE_ATTRIBUTE_NORMAL,
+                                        nullptr);
+        QVERIFY(lockedHandle != INVALID_HANDLE_VALUE);
+        const auto closeLockedHandle = qScopeGuard([&lockedHandle]() {
+            if (lockedHandle != INVALID_HANDLE_VALUE) {
+                CloseHandle(lockedHandle);
+            }
+        });
+
+        DatabaseManager databaseManager;
+        QString errorMessage;
+        QVERIFY2(databaseManager.openProjectDatabase(projectDb, &errorMessage), qPrintable(errorMessage));
+        const auto sourceRootId = insertSourceRoot(databaseManager.database(), QStringLiteral("VolumeX"), sourcePath);
+        QVERIFY(sourceRootId > 0);
+
+        JobEngine jobEngine(&databaseManager);
+        ScanEngine scanEngine(&databaseManager, &jobEngine, nullptr, nullptr);
+        QSignalSpy scanFinished(&scanEngine, &ScanEngine::scanFinished);
+        QSignalSpy scanFailed(&scanEngine, &ScanEngine::scanFailed);
+        const auto jobId = jobEngine.createJob(JobType::Scan,
+                                               QStringLiteral("扫描锁定文件"),
+                                               QStringLiteral("验证锁定文件自动跳过"),
+                                               sourceRootId);
+        scanEngine.startScan(sourceRootById(databaseManager.database(), sourceRootId), jobId);
+        scanEngine.waitForIdle();
+        QCoreApplication::processEvents();
+
+        QCOMPARE(scanFailed.count(), 0);
+        QCOMPARE(scanFinished.count(), 1);
+        QSqlQuery lockedAsset(databaseManager.database());
+        lockedAsset.prepare(QStringLiteral("SELECT is_readable FROM asset_file WHERE name = 'locked.mp4'"));
+        QVERIFY2(lockedAsset.exec() && lockedAsset.next(), qPrintable(lockedAsset.lastError().text()));
+        QCOMPARE(lockedAsset.value(0).toInt(), 0);
+        lockedAsset.finish();
+        const auto lockedSource = sourceRootById(databaseManager.database(), sourceRootId);
+        QCOMPARE(lockedSource.status, QStringLiteral("warning"));
+        QVERIFY(lockedSource.warningCount >= 1);
+
+        CloseHandle(lockedHandle);
+        lockedHandle = INVALID_HANDLE_VALUE;
+        scanFinished.clear();
+        const auto retryJobId = jobEngine.createJob(JobType::Scan,
+                                                    QStringLiteral("重扫已解锁文件"),
+                                                    QStringLiteral("验证恢复读取"),
+                                                    sourceRootId);
+        scanEngine.startScan(sourceRootById(databaseManager.database(), sourceRootId), retryJobId);
+        scanEngine.waitForIdle();
+        QCoreApplication::processEvents();
+
+        QCOMPARE(scanFailed.count(), 0);
+        QCOMPARE(scanFinished.count(), 1);
+        QSqlQuery readableAsset(databaseManager.database());
+        readableAsset.prepare(QStringLiteral("SELECT is_readable FROM asset_file WHERE name = 'locked.mp4'"));
+        QVERIFY2(readableAsset.exec() && readableAsset.next(), qPrintable(readableAsset.lastError().text()));
+        QCOMPARE(readableAsset.value(0).toInt(), 1);
+        QCOMPARE(sourceRootById(databaseManager.database(), sourceRootId).warningCount, qint64{0});
+#endif
+    }
+
     void atomicRescan_failureKeepsPreviousCatalogAndSuccessfulRetryPreservesIdentity()
     {
         QTemporaryDir temp;

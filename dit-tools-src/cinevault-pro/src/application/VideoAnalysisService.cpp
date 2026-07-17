@@ -183,6 +183,15 @@ bool canAnalyzeAsset(AssetType assetType, const QString &extension)
         || isSupportedTextAsset(assetType, extension);
 }
 
+bool isPhotoshopAsset(const GlobalVideoAsset &asset)
+{
+    if (asset.assetType != AssetType::Image) {
+        return false;
+    }
+    const auto extension = asset.extension.trimmed().toLower();
+    return extension == QStringLiteral("psd") || extension == QStringLiteral("psb");
+}
+
 bool loadVideoAsset(QSqlDatabase &db, const QString &videoKey, GlobalVideoAsset *asset, QString *errorMessage)
 {
     QSqlQuery query(db);
@@ -1584,7 +1593,8 @@ bool VideoAnalysisService::validateReadyForEnqueue(const QString &videoKey, QStr
         }
         return false;
     }
-    if (asset.assetType == AssetType::Video && (!m_ffmpegAdapter || !m_ffmpegAdapter->isAvailable())) {
+    if ((asset.assetType == AssetType::Video || isPhotoshopAsset(asset))
+        && (!m_ffmpegAdapter || !m_ffmpegAdapter->isAvailable())) {
         if (errorMessage) {
             *errorMessage = m_ffmpegAdapter
                 ? m_ffmpegAdapter->unavailableReason()
@@ -2469,11 +2479,39 @@ void VideoAnalysisService::startNextAnalysis()
             }
 
             updateRunning(20,
-                          QStringLiteral("正在转换图片为 JPG 并提交视觉解析"),
-                          analysisProgressContext(1, 3, QStringLiteral("提交图片解析"), 0, 1, QStringLiteral("张")));
+                           QStringLiteral("正在转换图片为 JPG 并提交视觉解析"),
+                           analysisProgressContext(1, 3, QStringLiteral("提交图片解析"), 0, 1, QStringLiteral("张")));
+            auto analysisImagePath = asset.absolutePath;
+            if (isPhotoshopAsset(asset)) {
+                ThumbnailRequest conversionRequest;
+                conversionRequest.assetId = asset.assetId;
+                conversionRequest.sourcePath = asset.absolutePath;
+                conversionRequest.cachePath = QDir(Paths::projectFrameCacheDirectory(
+                                                        asset.projectDatabasePath,
+                                                        job.videoKey))
+                                                  .filePath(QStringLiteral("photoshop_preview.jpg"));
+                conversionRequest.assetType = AssetType::Image;
+                conversionRequest.frameIndex = 1;
+                conversionRequest.maxWidth = 4096;
+                conversionRequest.maxHeight = 4096;
+                const auto conversion = m_ffmpegAdapter->generateThumbnail(conversionRequest);
+                if (!conversion.success) {
+                    const auto message = QStringLiteral("PSD 文件转换为 JPG 失败：%1")
+                                             .arg(conversion.errorMessage);
+                    updateAssetState(db,
+                                     job.videoKey,
+                                     VideoAnalysisStatus::Failed,
+                                     ConfirmationStatus::Pending,
+                                     message,
+                                     nullptr);
+                    finishFailure(message, &db, false);
+                    return;
+                }
+                analysisImagePath = conversion.outputPath;
+            }
             int httpStatusCode = 0;
             QString imageError;
-            const auto analysis = m_visionApiClient->analyzeFrame(asset.absolutePath,
+            const auto analysis = m_visionApiClient->analyzeFrame(analysisImagePath,
                                                                   asset.fileName,
                                                                   config.baseUrl,
                                                                   config.apiKey,
@@ -2490,7 +2528,7 @@ void VideoAnalysisService::startNextAnalysis()
             FrameAnalysisRecord imageFrame;
             imageFrame.videoKey = job.videoKey;
             imageFrame.frameNumber = 1;
-            imageFrame.imagePath = asset.absolutePath;
+            imageFrame.imagePath = analysisImagePath;
             imageFrame.retryCount = 1;
             imageFrame.lastHttpStatus = httpStatusCode;
             imageFrame.lastAttemptAt = nowIso();
@@ -2542,7 +2580,7 @@ void VideoAnalysisService::startNextAnalysis()
             QSqlQuery clearPlan(db);
             clearPlan.prepare(QStringLiteral("DELETE FROM video_analysis_plan WHERE video_key = ?"));
             clearPlan.addBindValue(job.videoKey);
-            const ExtractedFrame imagePlanFrame{1, 0, asset.absolutePath};
+            const ExtractedFrame imagePlanFrame{1, 0, analysisImagePath};
             if (!execQuery(clearFrames, &errorMessage)
                 || !execQuery(clearPlan, &errorMessage)
                 || !insertFrameRow(db, job.videoKey, imagePlanFrame, &errorMessage)

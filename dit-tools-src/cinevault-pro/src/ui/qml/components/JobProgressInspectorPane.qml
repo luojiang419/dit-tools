@@ -231,6 +231,8 @@ Rectangle {
             id: detailScroll
             Layout.fillWidth: true
             Layout.fillHeight: true
+            contentWidth: availableWidth
+            contentHeight: detailColumn.implicitHeight
             clip: true
 
             MiddleDragScrollHandler {
@@ -243,6 +245,7 @@ Rectangle {
             }
 
             ColumnLayout {
+                id: detailColumn
                 width: detailScroll.availableWidth
                 spacing: 10
 

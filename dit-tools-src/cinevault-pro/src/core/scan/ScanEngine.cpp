@@ -14,6 +14,7 @@
 #include <QDir>
 #include <QDirIterator>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QFileInfo>
 #include <QHash>
 #include <QMetaObject>
@@ -24,14 +25,22 @@
 #include <QSqlQuery>
 #include <QStringList>
 #include <QThread>
+#include <QVector>
 
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <stdexcept>
 #include <system_error>
+#include <utility>
 
 namespace {
+bool canOpenFileForRead(const QString &path)
+{
+    QFile file(path);
+    return file.open(QIODevice::ReadOnly);
+}
+
 QString toIsoString(const std::filesystem::file_time_type &fileTime)
 {
     using namespace std::chrono;
@@ -671,7 +680,8 @@ void ScanEngine::runScan(SourceRoot sourceRoot,
                 if (metadataError) {
                     ++batch.warningCount;
                 }
-                file.readable = QFileInfo(absolutePath).isReadable();
+                file.readable = QFileInfo(absolutePath).isReadable()
+                    && canOpenFileForRead(absolutePath);
                 files.append(file);
 
                 const auto parentRelativePath = FolderPathMetadata::parentRelativePath(file.relativePath);
@@ -934,6 +944,7 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
             item.absolutePath = next.value(1).toString();
             item.relativePath = next.value(2).toString();
             item.depth = next.value(3).toInt();
+            next.finish();
 
             const QFileInfo directoryInfo(item.absolutePath);
             if (!directoryInfo.isDir() || !directoryInfo.isReadable()) {
@@ -1012,6 +1023,29 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
                 publishProgress(false);
                 continue;
             }
+            struct DirectoryEntry {
+                QString absolutePath;
+                QString relativePath;
+                QFileInfo info;
+                bool readable = false;
+            };
+            QVector<DirectoryEntry> directoryEntries;
+            QDirIterator entryIterator(
+                item.absolutePath,
+                QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System | QDir::NoSymLinks,
+                QDirIterator::NoIteratorFlags);
+            while (entryIterator.hasNext()) {
+                DirectoryEntry entry;
+                entry.absolutePath = entryIterator.next();
+                entry.info = QFileInfo(entry.absolutePath);
+                entry.relativePath = FolderPathMetadata::normalizeRelativePath(
+                    FolderPathMetadata::relativePathFromRoot(sourceRoot.path, entry.absolutePath));
+                entry.readable = entry.info.isFile()
+                    && entry.info.isReadable()
+                    && canOpenFileForRead(entry.absolutePath);
+                directoryEntries.append(std::move(entry));
+            }
+
             if (!db.transaction()) {
                 throw std::runtime_error(db.lastError().text().toStdString());
             }
@@ -1047,14 +1081,10 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
                 "asset_type, size_bytes, modified_at, is_readable, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
 
-            QDirIterator entries(item.absolutePath,
-                                 QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System | QDir::NoSymLinks,
-                                 QDirIterator::NoIteratorFlags);
-            while (entries.hasNext()) {
-                const auto absolutePath = entries.next();
-                const QFileInfo info(absolutePath);
-                const auto relativePath = FolderPathMetadata::normalizeRelativePath(
-                    FolderPathMetadata::relativePathFromRoot(sourceRoot.path, absolutePath));
+            for (const auto &entry : std::as_const(directoryEntries)) {
+                const auto &absolutePath = entry.absolutePath;
+                const auto &relativePath = entry.relativePath;
+                const auto &info = entry.info;
                 if (info.isDir()) {
                     const auto folder = makeFolderNode(sourceRoot, rootFolderName, absolutePath, relativePath);
                     stageFolder.addBindValue(sessionId);
@@ -1101,7 +1131,7 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
                     stageFile.addBindValue(static_cast<int>(FileTypeService::classify(info.fileName())));
                     stageFile.addBindValue(info.size());
                     stageFile.addBindValue(info.lastModified().toString(Qt::ISODate));
-                    stageFile.addBindValue(info.isReadable() ? 1 : 0);
+                    stageFile.addBindValue(entry.readable ? 1 : 0);
                     stageFile.addBindValue(now);
                     if (!stageFile.exec()) {
                         const auto message = stageFile.lastError().text();
@@ -1152,6 +1182,7 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
             throw std::runtime_error(maxDepthQuery.lastError().text().toStdString());
         }
         const auto maxDepth = maxDepthQuery.value(0).toInt();
+        maxDepthQuery.finish();
 
         if (!db.transaction()) {
             throw std::runtime_error(db.lastError().text().toStdString());
@@ -1224,6 +1255,7 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
         audioCount = typeCounts.value(1).toLongLong();
         imageCount = typeCounts.value(2).toLongLong();
         otherCount = typeCounts.value(3).toLongLong();
+        typeCounts.finish();
 
         const auto sessionLiteral = QString::number(sessionId);
         if (!db.transaction()) {

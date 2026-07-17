@@ -25,7 +25,8 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 option(CINEVAULT_BUILD_MINIMAL_GUI "Build the milestone A minimal GUI shell" ON)
 option(CINEVAULT_ENABLE_FFMPEG "Enable FFmpeg-backed media modules" OFF)
 option(CINEVAULT_ENABLE_LOCAL_SEARCH "Enable offline BGE and USearch semantic search" OFF)
-option(CINEVAULT_ENABLE_LOCAL_SEARCH_ASSISTANT "Bundle the offline text query assistant" OFF)
+option(CINEVAULT_ENABLE_LOCAL_SEARCH_ASSISTANT "Enable the offline text query assistant" OFF)
+option(CINEVAULT_BUNDLE_SEARCH_ASSISTANT_MODEL "Copy the Qwen model into build and install payloads" OFF)
 option(CINEVAULT_ENABLE_EXIFTOOL "Bundle ExifTool for embedded media metadata" ON)
 set(QT_ROOT "" CACHE PATH "Qt 6 kit root directory")
 set(FFMPEG_DEV_ROOT "" CACHE PATH "FFmpeg development package root directory")
@@ -87,6 +88,11 @@ if(CINEVAULT_ENABLE_EXIFTOOL AND NOT CINEVAULT_BUILD_MINIMAL_GUI AND WIN32)
 endif()
 
 set(CINEVAULT_HAS_LOCAL_SEARCH_ASSISTANT OFF)
+if(CINEVAULT_BUNDLE_SEARCH_ASSISTANT_MODEL
+   AND NOT CINEVAULT_ENABLE_LOCAL_SEARCH_ASSISTANT)
+    message(FATAL_ERROR
+        "CINEVAULT_BUNDLE_SEARCH_ASSISTANT_MODEL requires CINEVAULT_ENABLE_LOCAL_SEARCH_ASSISTANT")
+endif()
 if(CINEVAULT_ENABLE_LOCAL_SEARCH_ASSISTANT AND NOT CINEVAULT_BUILD_MINIMAL_GUI)
     if(NOT WIN32)
         message(FATAL_ERROR "The locked search-assistant runtime currently supports Windows x64 only")
@@ -137,8 +143,11 @@ if(CINEVAULT_ENABLE_LOCAL_SEARCH_ASSISTANT AND NOT CINEVAULT_BUILD_MINIMAL_GUI)
         "${CINEVAULT_SEARCH_ASSISTANT_CACHE_ROOT}/models/qwen3-0.6b")
     set(CINEVAULT_SEARCH_ASSISTANT_REQUIRED_FILES
         "${CINEVAULT_SEARCH_ASSISTANT_RUNTIME_ROOT}/llama-server.exe"
-        "${CINEVAULT_SEARCH_ASSISTANT_MODEL_ROOT}/${CINEVAULT_SEARCH_ASSISTANT_MODEL_FILE}"
     )
+    if(CINEVAULT_BUNDLE_SEARCH_ASSISTANT_MODEL)
+        list(APPEND CINEVAULT_SEARCH_ASSISTANT_REQUIRED_FILES
+            "${CINEVAULT_SEARCH_ASSISTANT_MODEL_ROOT}/${CINEVAULT_SEARCH_ASSISTANT_MODEL_FILE}")
+    endif()
     foreach(_required_file IN LISTS CINEVAULT_SEARCH_ASSISTANT_REQUIRED_FILES)
         if(NOT EXISTS "${_required_file}")
             message(FATAL_ERROR "Prepared search-assistant cache is incomplete: ${_required_file}")
@@ -644,21 +653,26 @@ endif()
 if(CINEVAULT_HAS_LOCAL_SEARCH_ASSISTANT)
     set(CINEVAULT_INSTALLED_ASSISTANT_RUNTIME_ROOT
         "$<TARGET_FILE_DIR:CineVault>/search-assistant")
-    set(CINEVAULT_INSTALLED_ASSISTANT_MODEL_ROOT
-        "$<TARGET_FILE_DIR:CineVault>/data/models/qwen3-0.6b")
     add_custom_command(TARGET CineVault POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory
                 "${CINEVAULT_INSTALLED_ASSISTANT_RUNTIME_ROOT}"
         COMMAND ${CMAKE_COMMAND} -E copy_directory
                 "${CINEVAULT_SEARCH_ASSISTANT_RUNTIME_ROOT}"
                 "${CINEVAULT_INSTALLED_ASSISTANT_RUNTIME_ROOT}"
-        COMMAND ${CMAKE_COMMAND} -E make_directory
-                "${CINEVAULT_INSTALLED_ASSISTANT_MODEL_ROOT}"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${CINEVAULT_SEARCH_ASSISTANT_MODEL_ROOT}/${CINEVAULT_SEARCH_ASSISTANT_MODEL_FILE}"
-                "${CINEVAULT_INSTALLED_ASSISTANT_MODEL_ROOT}/${CINEVAULT_SEARCH_ASSISTANT_MODEL_FILE}"
         VERBATIM
     )
+    if(CINEVAULT_BUNDLE_SEARCH_ASSISTANT_MODEL)
+        set(CINEVAULT_INSTALLED_ASSISTANT_MODEL_ROOT
+            "$<TARGET_FILE_DIR:CineVault>/data/models/qwen3-0.6b")
+        add_custom_command(TARGET CineVault POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                    "${CINEVAULT_INSTALLED_ASSISTANT_MODEL_ROOT}"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${CINEVAULT_SEARCH_ASSISTANT_MODEL_ROOT}/${CINEVAULT_SEARCH_ASSISTANT_MODEL_FILE}"
+                    "${CINEVAULT_INSTALLED_ASSISTANT_MODEL_ROOT}/${CINEVAULT_SEARCH_ASSISTANT_MODEL_FILE}"
+            VERBATIM
+        )
+    endif()
 endif()
 
 if(CINEVAULT_HAS_BUNDLED_EXIFTOOL)
@@ -707,9 +721,11 @@ endif()
 if(CINEVAULT_HAS_LOCAL_SEARCH_ASSISTANT)
     install(DIRECTORY "${CINEVAULT_SEARCH_ASSISTANT_RUNTIME_ROOT}/"
             DESTINATION "search-assistant")
-    install(FILES
-            "${CINEVAULT_SEARCH_ASSISTANT_MODEL_ROOT}/${CINEVAULT_SEARCH_ASSISTANT_MODEL_FILE}"
-            DESTINATION "data/models/qwen3-0.6b")
+    if(CINEVAULT_BUNDLE_SEARCH_ASSISTANT_MODEL)
+        install(FILES
+                "${CINEVAULT_SEARCH_ASSISTANT_MODEL_ROOT}/${CINEVAULT_SEARCH_ASSISTANT_MODEL_FILE}"
+                DESTINATION "data/models/qwen3-0.6b")
+    endif()
 endif()
 
 if(CINEVAULT_HAS_FFMPEG)
@@ -889,7 +905,8 @@ if(BUILD_TESTING)
     target_link_libraries(SearchResultFusionTest PRIVATE Qt6::Core Qt6::Test)
     add_test(NAME SearchResultFusionTest COMMAND SearchResultFusionTest)
 
-    if(CINEVAULT_HAS_LOCAL_SEARCH_ASSISTANT)
+    if(CINEVAULT_HAS_LOCAL_SEARCH_ASSISTANT
+       AND CINEVAULT_BUNDLE_SEARCH_ASSISTANT_MODEL)
         qt_add_executable(SearchAssistantIntegrationTest
             tests/unit/SearchAssistantIntegrationTest.cpp
             src/infrastructure/search/LocalSearchAssistantRuntime.cpp

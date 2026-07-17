@@ -7,6 +7,7 @@
 #include "application/SystemIdleMonitor.h"
 #include "application/VideoAnalysisService.h"
 #include "domain/Enums.h"
+#include "infrastructure/config/AppSettings.h"
 #include "infrastructure/db/GlobalDatabaseManager.h"
 
 #include <QFileInfo>
@@ -23,6 +24,7 @@ BackgroundMaintenanceCoordinator::BackgroundMaintenanceCoordinator(
     ProjectService *projectService,
     GlobalDatabaseManager *globalDatabaseManager,
     VideoAnalysisService *videoAnalysisService,
+    AppSettings *settings,
     SourceChangeMonitor *sourceChangeMonitor,
     SystemIdleMonitor *systemIdleMonitor,
     QObject *parent)
@@ -32,6 +34,7 @@ BackgroundMaintenanceCoordinator::BackgroundMaintenanceCoordinator(
     , m_projectService(projectService)
     , m_globalDatabaseManager(globalDatabaseManager)
     , m_videoAnalysisService(videoAnalysisService)
+    , m_settings(settings)
     , m_sourceChangeMonitor(sourceChangeMonitor)
     , m_systemIdleMonitor(systemIdleMonitor)
 {
@@ -155,6 +158,14 @@ int BackgroundMaintenanceCoordinator::pendingSourceCount() const
 QString BackgroundMaintenanceCoordinator::statusText() const
 {
     return m_statusText;
+}
+
+void BackgroundMaintenanceCoordinator::applyAnalysisSettings()
+{
+    m_analysisDispatchBlocked = false;
+    if (m_running && m_systemIdleMonitor->isIdle()) {
+        QTimer::singleShot(0, this, &BackgroundMaintenanceCoordinator::processNext);
+    }
 }
 
 void BackgroundMaintenanceCoordinator::handleProjectChanged()
@@ -286,15 +297,26 @@ void BackgroundMaintenanceCoordinator::dispatchNextAnalysis()
     }
 
     const auto project = m_projectService->currentProject();
+    const auto documentEnabled = m_settings && m_settings->documentAutoAnalysisEnabled();
+    const auto photoshopEnabled = m_settings && m_settings->photoshopAutoAnalysisEnabled();
     QSqlQuery query(m_globalDatabaseManager->database());
     query.prepare(QStringLiteral(
         "SELECT video_key FROM global_video_asset "
         "WHERE project_uuid = ? AND is_available = 1 AND analysis_status = ? "
-        "ORDER BY CASE WHEN asset_type IN (?, ?) THEN 0 ELSE 1 END, updated_at, video_key LIMIT 1"));
+        "AND (asset_type = ? "
+        "OR (asset_type = ? AND LOWER(COALESCE(extension, '')) NOT IN ('psd', 'psb')) "
+        "OR (? = 1 AND asset_type IN (?, ?)) "
+        "OR (? = 1 AND asset_type = ? AND LOWER(COALESCE(extension, '')) IN ('psd', 'psb'))) "
+        "ORDER BY updated_at, video_key LIMIT 1"));
     query.addBindValue(project.id);
     query.addBindValue(static_cast<int>(VideoAnalysisStatus::Pending));
+    query.addBindValue(static_cast<int>(AssetType::Video));
+    query.addBindValue(static_cast<int>(AssetType::Image));
+    query.addBindValue(documentEnabled ? 1 : 0);
     query.addBindValue(static_cast<int>(AssetType::Document));
     query.addBindValue(static_cast<int>(AssetType::Subtitle));
+    query.addBindValue(photoshopEnabled ? 1 : 0);
+    query.addBindValue(static_cast<int>(AssetType::Image));
     if (!query.exec()) {
         m_analysisDispatchBlocked = true;
         setStatusText(QStringLiteral("查询待解析素材失败：%1").arg(query.lastError().text()));

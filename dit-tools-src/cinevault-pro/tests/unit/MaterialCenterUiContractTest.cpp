@@ -498,7 +498,7 @@ private slots:
         QVERIFY2(!settingsQml.isEmpty() && !switchQml.isEmpty(),
                  "无法读取设置页主题开关源码");
 
-        QCOMPARE(settingsQml.count(QStringLiteral("ThemedSwitch {")), 3);
+        QCOMPARE(settingsQml.count(QStringLiteral("ThemedSwitch {")), 5);
         QVERIFY(settingsQml.contains(QStringLiteral("自动更新（检测并下载后询问）")));
         QVERIFY(settingsQml.contains(QStringLiteral("手动更新（仅点击检查时联网）")));
         QVERIFY(settingsQml.contains(QStringLiteral("禁止更新（不联网、不提示）")));
@@ -902,6 +902,36 @@ private slots:
         QVERIFY(finishAnalysis.contains(
             QStringLiteral("enqueueConfiguredDimensionsIfNeeded(videoKey")));
         QVERIFY(!coordinator.contains(QStringLiteral("电脑已空闲 30 分钟")));
+    }
+
+    void taskInspectorScrollAndOptionalAnalysisTypesAreWired()
+    {
+        const auto inspector = sourceFile(
+            QStringLiteral("src/ui/qml/components/JobProgressInspectorPane.qml"));
+        const auto settingsQml = sourceFile(
+            QStringLiteral("src/ui/qml/components/SettingsPage.qml"));
+        const auto settingsHeader = sourceFile(
+            QStringLiteral("src/infrastructure/config/AppSettings.h"));
+        const auto coordinator = sourceFile(
+            QStringLiteral("src/application/BackgroundMaintenanceCoordinator.cpp"));
+        const auto analysisService = sourceFile(
+            QStringLiteral("src/application/VideoAnalysisService.cpp"));
+        QVERIFY2(!inspector.isEmpty() && !settingsQml.isEmpty() && !settingsHeader.isEmpty()
+                     && !coordinator.isEmpty() && !analysisService.isEmpty(),
+                 "无法读取任务详情或可选解析类型契约源码");
+
+        QVERIFY(inspector.contains(QStringLiteral("id: detailColumn")));
+        QVERIFY(inspector.contains(QStringLiteral("contentHeight: detailColumn.implicitHeight")));
+        QVERIFY(settingsQml.contains(QStringLiteral("documentAutoAnalysisSwitch")));
+        QVERIFY(settingsQml.contains(QStringLiteral("photoshopAutoAnalysisSwitch")));
+        QVERIFY(settingsQml.contains(QStringLiteral("PSD 文件（Adobe 图片文件）")));
+        QVERIFY(settingsHeader.contains(QStringLiteral("documentAutoAnalysisEnabled() const")));
+        QVERIFY(settingsHeader.contains(QStringLiteral("photoshopAutoAnalysisEnabled() const")));
+        QVERIFY(coordinator.contains(QStringLiteral("documentAutoAnalysisEnabled()")));
+        QVERIFY(coordinator.contains(QStringLiteral("photoshopAutoAnalysisEnabled()")));
+        QVERIFY(coordinator.contains(QStringLiteral("NOT IN ('psd', 'psb')")));
+        QVERIFY(analysisService.contains(QStringLiteral("photoshop_preview.jpg")));
+        QVERIFY(analysisService.contains(QStringLiteral("PSD 文件转换为 JPG 失败")));
     }
 
     void searchAssistantPreloadsAndUnloadsAfterConfigurableAppIdleTime()

@@ -138,7 +138,7 @@ try {
 
         $assistantCacheRoot = Join-Path $env:LOCALAPPDATA "CineVault\BuildCache\search-assistant-v1"
         $assistantPrepareScript = Join-Path $projectRoot "cmake\PrepareSearchAssistantDependencies.cmake"
-        Invoke-VcVarsCommand "cmake -DOUTPUT_ROOT=`"$assistantCacheRoot`" -P `"$assistantPrepareScript`""
+        Invoke-VcVarsCommand "cmake -DOUTPUT_ROOT=`"$assistantCacheRoot`" -DINCLUDE_MODEL=OFF -P `"$assistantPrepareScript`""
     }
     Invoke-VcVarsCommand "cmake --preset $configurePreset -DCINEVAULT_APP_VERSION=$appVersion -DCINEVAULT_UPDATE_SIGNER_SHA256=$normalizedUpdateSignerSha256"
     Invoke-VcVarsCommand "cmake --build --preset $buildPreset --config $Configuration"
@@ -198,6 +198,7 @@ $deployedExe = Join-Path $stagingDir "CineVault.exe"
 
 $onnxRuntimeSource = Join-Path $buildDir "onnxruntime.dll"
 $modelsSource = Join-Path $buildDir "data\models"
+$localSearchModelRoot = Join-Path $modelsSource "bge-small-zh-v1.5"
 $localSearchModelSource = Join-Path $modelsSource "bge-small-zh-v1.5\onnx\model_quantized.onnx"
 $hasOnnxRuntime = Test-Path -LiteralPath $onnxRuntimeSource -PathType Leaf
 $hasLocalSearchModel = Test-Path -LiteralPath $localSearchModelSource -PathType Leaf
@@ -206,24 +207,19 @@ if ($hasOnnxRuntime -xor $hasLocalSearchModel) {
 }
 if ($hasOnnxRuntime -and $hasLocalSearchModel) {
     Copy-Item -LiteralPath $onnxRuntimeSource -Destination $stagingDir -Force
+    $modelsTarget = Join-Path $stagingDir "data\models"
+    New-Item -ItemType Directory -Force -Path $modelsTarget | Out-Null
+    Copy-Item -LiteralPath $localSearchModelRoot -Destination $modelsTarget -Recurse -Force
 }
 
 $assistantRuntimeSource = Join-Path $buildDir "search-assistant"
 $assistantExecutableSource = Join-Path $assistantRuntimeSource "llama-server.exe"
-$assistantModelSource = Join-Path $modelsSource "qwen3-0.6b\Qwen3-0.6B-Q8_0.gguf"
 $hasAssistantRuntime = Test-Path -LiteralPath $assistantExecutableSource -PathType Leaf
-$hasAssistantModel = Test-Path -LiteralPath $assistantModelSource -PathType Leaf
-if ($hasAssistantRuntime -xor $hasAssistantModel) {
-    throw "Search-assistant assets are incomplete in the build directory. Expected both search-assistant/llama-server.exe and the Qwen GGUF model."
+if (($RealWorkflow -or $EnableFfmpeg) -and -not $hasAssistantRuntime) {
+    throw "Search-assistant runtime is missing from the build directory."
 }
-if ($hasAssistantRuntime -and $hasAssistantModel) {
+if ($hasAssistantRuntime) {
     Copy-Item -LiteralPath $assistantRuntimeSource -Destination $stagingDir -Recurse -Force
-}
-
-if ($hasLocalSearchModel -or $hasAssistantModel) {
-    $localSearchDataTarget = Join-Path $stagingDir "data"
-    New-Item -ItemType Directory -Force -Path $localSearchDataTarget | Out-Null
-    Copy-Item -LiteralPath $modelsSource -Destination $localSearchDataTarget -Recurse -Force
 }
 
 $exifToolSource = Join-Path $buildDir "exiftool"
@@ -282,6 +278,9 @@ if ($forbiddenInstallerFiles) {
     $forbiddenList = ($forbiddenInstallerFiles.FullName | Sort-Object) -join [Environment]::NewLine
     throw "Installer staging contains mutable user data and publishing was blocked:`n$forbiddenList"
 }
+
+& (Join-Path $context.RepoRoot "tool\assert_model_free_payload.ps1") `
+    -PayloadRoot $stagingDir
 
 & (Join-Path $context.RepoRoot "tool\test_cinevault_startup.ps1") `
     -ApplicationPath $deployedExe

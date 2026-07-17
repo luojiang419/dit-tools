@@ -65,6 +65,12 @@ public:
     int analysisTimeoutSec() const;
     void setAnalysisTimeoutSec(int value);
 
+    bool documentAutoAnalysisEnabled() const;
+    void setDocumentAutoAnalysisEnabled(bool enabled);
+
+    bool photoshopAutoAnalysisEnabled() const;
+    void setPhotoshopAutoAnalysisEnabled(bool enabled);
+
     int themeMode() const;
     void setThemeMode(int value);
 

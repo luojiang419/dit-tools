@@ -42,7 +42,7 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Excludes: "data\*"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#SourceDir}\data\models\*"; DestDir: "{app}\data\models"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourceDir}\data\models\*"; DestDir: "{app}\data\models"; Excludes: "qwen3-0.6b\*,*.gguf"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\影资管家"; Filename: "{app}\CineVault.exe"

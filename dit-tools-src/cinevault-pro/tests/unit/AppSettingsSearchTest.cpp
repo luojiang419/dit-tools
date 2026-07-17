@@ -38,6 +38,8 @@ private slots:
         QVERIFY(!settings.hasQuickSearchWindowPosition());
         QVERIFY(!settings.startAtLogin());
         QCOMPARE(settings.closeButtonBehavior(), 0);
+        QVERIFY(!settings.documentAutoAnalysisEnabled());
+        QVERIFY(!settings.photoshopAutoAnalysisEnabled());
     }
 
     void searchAndQuickSearchSettingsPersist()
@@ -122,6 +124,20 @@ private slots:
         restored.setCustomAnalysisDimensions({});
         restored.sync();
         QVERIFY(restored.customAnalysisDimensions().isEmpty());
+    }
+
+    void optionalAutoAnalysisTypesPersist()
+    {
+        {
+            AppSettings settings;
+            settings.setDocumentAutoAnalysisEnabled(true);
+            settings.setPhotoshopAutoAnalysisEnabled(true);
+            settings.sync();
+        }
+
+        AppSettings restored;
+        QVERIFY(restored.documentAutoAnalysisEnabled());
+        QVERIFY(restored.photoshopAutoAnalysisEnabled());
     }
 
 private:

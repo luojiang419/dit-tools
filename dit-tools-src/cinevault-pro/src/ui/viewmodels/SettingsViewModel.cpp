@@ -366,6 +366,16 @@ void SettingsViewModel::setAnalysisTimeoutSec(int value)
     emit settingsChanged();
 }
 
+bool SettingsViewModel::documentAutoAnalysisEnabled() const
+{
+    return m_settings && m_settings->documentAutoAnalysisEnabled();
+}
+
+bool SettingsViewModel::photoshopAutoAnalysisEnabled() const
+{
+    return m_settings && m_settings->photoshopAutoAnalysisEnabled();
+}
+
 int SettingsViewModel::themeMode() const
 {
     return m_settings ? m_settings->themeMode() : 0;
@@ -616,6 +626,8 @@ void SettingsViewModel::saveAndApply(const QString &visionBaseUrl,
                                      int thumbnailFrameIndex,
                                      int contactSheetFrameCount,
                                      int analysisTimeoutSec,
+                                     bool documentAutoAnalysisEnabled,
+                                     bool photoshopAutoAnalysisEnabled,
                                      int updatePolicy,
                                      int updateDownloadMode,
                                      const QString &updateManualProxyUrl)
@@ -671,6 +683,8 @@ void SettingsViewModel::saveAndApply(const QString &visionBaseUrl,
     m_settings->setThumbnailFrameIndex(thumbnailFrameIndex);
     m_settings->setContactSheetFrameCount(contactSheetFrameCount);
     m_settings->setAnalysisTimeoutSec(analysisTimeoutSec);
+    m_settings->setDocumentAutoAnalysisEnabled(documentAutoAnalysisEnabled);
+    m_settings->setPhotoshopAutoAnalysisEnabled(photoshopAutoAnalysisEnabled);
     m_settings->setUpdatePolicy(updatePolicy);
     m_settings->setUpdateDownloadMode(updateDownloadMode);
     m_settings->setUpdateManualProxyUrl(updateManualProxyUrl);

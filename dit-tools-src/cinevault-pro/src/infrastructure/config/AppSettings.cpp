@@ -28,6 +28,8 @@ constexpr auto kFrameIntervalKey = "materialCenter/frameInterval";
 constexpr auto kThumbnailFrameIndexKey = "materialCenter/thumbnailFrameIndex";
 constexpr auto kContactSheetFrameCountKey = "materialCenter/contactSheetFrameCount";
 constexpr auto kAnalysisTimeoutSecKey = "materialCenter/analysisTimeoutSec";
+constexpr auto kDocumentAutoAnalysisEnabledKey = "materialCenter/documentAutoAnalysisEnabled";
+constexpr auto kPhotoshopAutoAnalysisEnabledKey = "materialCenter/photoshopAutoAnalysisEnabled";
 constexpr auto kThemeModeKey = "ui/themeMode";
 constexpr auto kCloseButtonBehaviorKey = "ui/closeButtonBehavior";
 constexpr auto kPendingUpdateVersionKey = "updates/pendingVersion";
@@ -394,6 +396,26 @@ int AppSettings::analysisTimeoutSec() const
 void AppSettings::setAnalysisTimeoutSec(int value)
 {
     m_settings->setValue(QLatin1String(kAnalysisTimeoutSecKey), qMax(5, value));
+}
+
+bool AppSettings::documentAutoAnalysisEnabled() const
+{
+    return m_settings->value(QLatin1String(kDocumentAutoAnalysisEnabledKey), false).toBool();
+}
+
+void AppSettings::setDocumentAutoAnalysisEnabled(bool enabled)
+{
+    m_settings->setValue(QLatin1String(kDocumentAutoAnalysisEnabledKey), enabled);
+}
+
+bool AppSettings::photoshopAutoAnalysisEnabled() const
+{
+    return m_settings->value(QLatin1String(kPhotoshopAutoAnalysisEnabledKey), false).toBool();
+}
+
+void AppSettings::setPhotoshopAutoAnalysisEnabled(bool enabled)
+{
+    m_settings->setValue(QLatin1String(kPhotoshopAutoAnalysisEnabledKey), enabled);
 }
 
 int AppSettings::themeMode() const

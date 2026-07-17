@@ -225,7 +225,8 @@ QVector<GlobalVideoAsset> fetchProjectAssets(QSqlDatabase &projectDb, const Proj
         "COALESCE(em.lens_model, ''), COALESCE(em.width, 0), COALESCE(em.height, 0), COALESCE(em.frame_rate, 0), "
         "COALESCE(em.video_codec, ''), COALESCE(em.color_space, ''), COALESCE(em.sample_rate, 0), "
         "COALESCE(em.channels, 0), COALESCE(em.timecode, ''), COALESCE(em.search_text, ''), "
-        "CASE WHEN COALESCE(th.status, 0) = 1 THEN COALESCE(th.image_path, '') ELSE '' END, COALESCE(th.status, 0) "
+        "CASE WHEN COALESCE(th.status, 0) = 1 THEN COALESCE(th.image_path, '') ELSE '' END, COALESCE(th.status, 0), "
+        "af.is_readable "
         "FROM asset_file af "
         "LEFT JOIN source_root sr ON sr.id = af.source_root_id "
         "LEFT JOIN media_metadata mm ON mm.asset_id = af.id "
@@ -297,7 +298,7 @@ QVector<GlobalVideoAsset> fetchProjectAssets(QSqlDatabase &projectDb, const Proj
         if (!sourceAvailability.contains(sourceKey)) {
             sourceAvailability.insert(sourceKey, QFileInfo(sourceRootPath).isDir());
         }
-        asset.available = sourceAvailability.value(sourceKey);
+        asset.available = sourceAvailability.value(sourceKey) && query.value(30).toInt() == 1;
         assets.append(asset);
     }
     return assets;

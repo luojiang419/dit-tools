@@ -53,6 +53,9 @@ jobs:
       - name: 验证 Windows 工具链路径解析
         run: ./tool/test_windows_toolchain.ps1
 
+      - name: 验证无 Qwen 发布包门禁
+        run: ./tool/test_model_free_payload.ps1
+
       - name: 验证 GitHub Actions 工作流
         run: |
           $archiveName = "actionlint_$env:ACTIONLINT_VERSION`_windows_amd64.zip"
@@ -176,7 +179,7 @@ jobs:
 
           (Join-Path $env:QT_ROOT "bin") | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
-      - name: 恢复模型与本地搜索依赖缓存
+      - name: 恢复本地搜索与助手运行时缓存
         if: steps.scope.outputs.should_build == 'true'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -318,40 +321,6 @@ jobs:
               -InstallRoot (Join-Path $env:RUNNER_TEMP "cinevault-installed-$tag") `
               -AllowInstallerRegistration
 
-      - name: 准备验证分支 GPU 测试包
-        if: steps.scope.outputs.is_production != 'true' && steps.scope.outputs.should_build == 'true'
-        run: |
-          $buildRoot = Resolve-Path "dit-tools-src/cinevault-pro/build/windows-msvc-release-real"
-          $bundleRoot = Join-Path (Resolve-Path "output") "gpu-test"
-          New-Item -ItemType Directory -Force -Path $bundleRoot | Out-Null
-          $testExecutable = Get-ChildItem -LiteralPath $buildRoot -Recurse -Filter SearchAssistantIntegrationTest.exe -File |
-              Where-Object { $_.FullName -notmatch '\\CMakeFiles\\' } |
-              Select-Object -First 1
-          if ($null -eq $testExecutable) {
-              throw "未找到 SearchAssistantIntegrationTest.exe。"
-          }
-          Copy-Item -LiteralPath $testExecutable.FullName -Destination $bundleRoot -Force
-          Copy-Item -LiteralPath (Join-Path $buildRoot "search-assistant") -Destination $bundleRoot -Recurse -Force
-          $modelTarget = Join-Path $bundleRoot "data\models"
-          New-Item -ItemType Directory -Force -Path $modelTarget | Out-Null
-          Copy-Item -LiteralPath (Join-Path $buildRoot "data\models\qwen3-0.6b") -Destination $modelTarget -Recurse -Force
-          & (Join-Path $env:QT_ROOT "bin\windeployqt.exe") `
-              --release `
-              --no-translations `
-              (Join-Path $bundleRoot "SearchAssistantIntegrationTest.exe")
-          if ($LASTEXITCODE -ne 0) {
-              throw "GPU 测试包 Qt 部署失败。"
-          }
-          $manifestLines = Get-ChildItem -LiteralPath $bundleRoot -Recurse -File |
-              Where-Object { $_.Name -cne "manifest.sha256" } |
-              Sort-Object FullName |
-              ForEach-Object {
-                  $relativePath = [System.IO.Path]::GetRelativePath($bundleRoot, $_.FullName).Replace('\', '/')
-                  $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-                  "$hash *$relativePath"
-              }
-          Set-Content -LiteralPath (Join-Path $bundleRoot "manifest.sha256") -Value $manifestLines -Encoding ASCII
-
       - name: 上传验证分支产物
         if: steps.scope.outputs.is_production != 'true' && steps.scope.outputs.should_build == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -360,7 +329,6 @@ jobs:
           path: |
             output/${{ steps.version.outputs.version_tag }}/CineVault-Setup-${{ steps.version.outputs.version_tag }}.exe
             output/${{ steps.version.outputs.version_tag }}/CineVault-Setup-${{ steps.version.outputs.version_tag }}.exe.sha256
-            output/gpu-test/**
           if-no-files-found: error
           retention-days: 3
           compression-level: 6
@@ -376,7 +344,7 @@ jobs:
               -f "tag_name=$tag" `
               -f "target_commitish=$env:GITHUB_SHA" `
               -f "name=影资管家 $tag" `
-              -f "body=Windows x64 自动构建安装包；使用与本地一致的未签名构建流程，发布前已通过完整测试、安装启动检查、版本检查和 SHA-256 校验。客户端会在精确匹配 GitHub Release 资产并验证大小与 SHA-256 后启动安装；Windows 仍可能显示 SmartScreen 或 UAC 提示。" `
+              -f "body=Windows x64 自动构建安装包；从本版本起不再随安装包重复分发 Qwen3 0.6B 模型，覆盖安装会保留旧版本已有模型。发布前已通过完整测试、安装启动检查、版本检查和 SHA-256 校验。客户端会在精确匹配 GitHub Release 资产并验证大小与 SHA-256 后启动安装；Windows 仍可能显示 SmartScreen 或 UAC 提示。" `
               -F draft=true `
               -F prerelease=false `
               -F generate_release_notes=true | ConvertFrom-Json
