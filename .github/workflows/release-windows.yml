@@ -105,45 +105,6 @@ jobs:
               throw "版本源推送失败，可能存在并发 push，请重试。"
           }
 
-      - name: 导入发布签名证书并派生信任指纹
-        if: steps.scope.outputs.is_production == 'true' && steps.version.outputs.should_publish == 'true'
-        env:
-          SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
-          SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:SIGNING_CERTIFICATE_BASE64) -or
-              [string]::IsNullOrWhiteSpace($env:SIGNING_CERTIFICATE_PASSWORD)) {
-              throw "正式发布缺少 Windows Authenticode 证书 Secrets。"
-          }
-          $pfxPath = Join-Path $env:RUNNER_TEMP "cinevault-release-signing.pfx"
-          try {
-              $pfxBytes = [Convert]::FromBase64String($env:SIGNING_CERTIFICATE_BASE64)
-          } catch {
-              throw "WINDOWS_SIGNING_CERTIFICATE_BASE64 不是有效 Base64。"
-          }
-          [System.IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
-          $securePassword = ConvertTo-SecureString $env:SIGNING_CERTIFICATE_PASSWORD -AsPlainText -Force
-          $importedCertificates = @(Import-PfxCertificate `
-              -FilePath $pfxPath `
-              -CertStoreLocation Cert:\CurrentUser\My `
-              -Password $securePassword)
-          $certificate = $importedCertificates | Where-Object HasPrivateKey | Select-Object -First 1
-          if ($null -eq $certificate -or -not $certificate.HasPrivateKey) {
-              throw "签名证书导入失败或不含私钥。"
-          }
-          $signerSha1 = $certificate.Thumbprint.Replace(' ', '').ToLowerInvariant()
-          $signerSha256 = $certificate.GetCertHashString('SHA256').Replace(' ', '').ToLowerInvariant()
-          if ($signerSha1 -notmatch '^[0-9a-f]{40}$' -or $signerSha256 -notmatch '^[0-9a-f]{64}$') {
-              throw "无法从签名证书派生有效指纹。"
-          }
-          "CINEVAULT_SIGNING_CERT_SHA1=$signerSha1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "CINEVAULT_UPDATE_SIGNER_SHA256=$signerSha256" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "CINEVAULT_SIGNING_PFX_PATH=$pfxPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          $importedThumbprints = @($importedCertificates | ForEach-Object {
-              $_.Thumbprint.Replace(' ', '').ToLowerInvariant()
-          }) -join ','
-          "CINEVAULT_IMPORTED_CERT_SHA1=$importedThumbprints" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
       - name: 恢复 Qt 缓存
         if: steps.scope.outputs.should_build == 'true'
         id: qt-cache
@@ -302,14 +263,9 @@ jobs:
       - name: 构建正式安装包
         if: steps.scope.outputs.should_build == 'true'
         run: |
-          $buildParameters = @{
-              RealWorkflow = $true
-              Version = "${{ steps.version.outputs.version_tag }}"
-          }
-          if ("${{ steps.scope.outputs.is_production }}" -ceq "true") {
-              $buildParameters.RequireSigning = $true
-          }
-          & ./tool/build_windows.ps1 @buildParameters
+          ./tool/build_windows.ps1 `
+              -RealWorkflow `
+              -Version "${{ steps.version.outputs.version_tag }}"
 
       - name: 运行完整自动化测试
         if: steps.scope.outputs.should_build == 'true'
@@ -349,14 +305,9 @@ jobs:
         id: artifact
         run: |
           $tag = "${{ steps.version.outputs.version_tag }}"
-          $verifyParameters = @{
-              VersionTag = $tag
-              InstallerPath = "output/$tag/CineVault-Setup-$tag.exe"
-          }
-          if ("${{ steps.scope.outputs.is_production }}" -ceq "true") {
-              $verifyParameters.RequireSignature = $true
-          }
-          & ./tool/verify_release_artifact.ps1 @verifyParameters
+          ./tool/verify_release_artifact.ps1 `
+              -VersionTag $tag `
+              -InstallerPath "output/$tag/CineVault-Setup-$tag.exe"
 
       - name: 安装并验证正式安装包可启动
         if: steps.scope.outputs.should_build == 'true'
@@ -425,7 +376,7 @@ jobs:
               -f "tag_name=$tag" `
               -f "target_commitish=$env:GITHUB_SHA" `
               -f "name=影资管家 $tag" `
-              -f "body=Windows x64 自动构建安装包；发布前已通过完整测试、版本检查和 SHA-256 校验。" `
+              -f "body=Windows x64 自动构建安装包；使用与本地一致的未签名构建流程，发布前已通过完整测试、安装启动检查、版本检查和 SHA-256 校验。Windows 可能显示 SmartScreen 提示；客户端不会自动提权执行此未签名安装包，请手动下载安装。" `
               -F draft=true `
               -F prerelease=false `
               -F generate_release_notes=true | ConvertFrom-Json
@@ -575,25 +526,3 @@ jobs:
               }
           }
           exit 0
-
-      - name: 清理临时签名证书
-        if: always() && steps.scope.outputs.is_production == 'true' && steps.version.outputs.should_publish == 'true'
-        run: |
-          $importedCertificateSha1Values = @(([string]$env:CINEVAULT_IMPORTED_CERT_SHA1).Split(',', [System.StringSplitOptions]::RemoveEmptyEntries))
-          foreach ($certificateSha1 in $importedCertificateSha1Values) {
-              if ($certificateSha1 -match '^[0-9a-f]{40}$') {
-                  $certificatePath = "Cert:\CurrentUser\My\$certificateSha1"
-                  $certificate = Get-Item -LiteralPath $certificatePath -ErrorAction SilentlyContinue
-                  if ($null -ne $certificate -and
-                      $certificate.Thumbprint.Replace(' ', '').ToLowerInvariant() -ceq $certificateSha1) {
-                      Remove-Item -LiteralPath $certificatePath -Force
-                  }
-              }
-          }
-          $pfxPath = $env:CINEVAULT_SIGNING_PFX_PATH
-          $expectedPfxPath = Join-Path $env:RUNNER_TEMP "cinevault-release-signing.pfx"
-          if (-not [string]::IsNullOrWhiteSpace($pfxPath) -and
-              [System.IO.Path]::GetFullPath($pfxPath) -ceq [System.IO.Path]::GetFullPath($expectedPfxPath) -and
-              (Test-Path -LiteralPath $pfxPath -PathType Leaf)) {
-              Remove-Item -LiteralPath $pfxPath -Force
-          }
