@@ -1420,12 +1420,33 @@ VideoAnalysisService::VideoAnalysisService(GlobalDatabaseManager *globalDatabase
 
 VideoAnalysisService::~VideoAnalysisService()
 {
+    beginShutdown();
     waitForIdle();
 }
 
 void VideoAnalysisService::waitForIdle()
 {
     m_futures.waitForFinished();
+}
+
+void VideoAnalysisService::cancelPendingWork(const QString &reason)
+{
+    m_analysisQueue.clear();
+    m_dimensionAnalysisQueue.clear();
+    m_queuedVideoKeys.clear();
+    m_dimensionAnalysisKeys.clear();
+    m_batchCurrentDetail = reason.trimmed();
+    notifyBatchChanged();
+    emit analysisQueueChanged(m_currentVideoKey, 0);
+}
+
+void VideoAnalysisService::beginShutdown()
+{
+    if (m_shuttingDown) {
+        return;
+    }
+    m_shuttingDown = true;
+    cancelPendingWork(QStringLiteral("应用正在退出，未开始的解析任务已保存待恢复"));
 }
 
 bool VideoAnalysisService::hasBatchSummary() const
@@ -1555,6 +1576,12 @@ bool VideoAnalysisService::hasPendingAnalysisWork() const
 
 bool VideoAnalysisService::validateReadyForEnqueue(const QString &videoKey, QString *errorMessage) const
 {
+    if (m_shuttingDown) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("应用正在退出，已停止派发新的解析任务。");
+        }
+        return false;
+    }
     const auto normalizedKey = videoKey.trimmed();
     if (normalizedKey.isEmpty()) {
         if (errorMessage) {
@@ -1942,6 +1969,12 @@ bool VideoAnalysisService::analyzeDimensions(const QString &videoKey,
                                              const QStringList &dimensions,
                                              QString *errorMessage)
 {
+    if (m_shuttingDown) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("应用正在退出，已停止派发新的解析任务。");
+        }
+        return false;
+    }
     const auto normalizedKey = videoKey.trimmed();
     if (normalizedKey.isEmpty()) {
         if (errorMessage) {
@@ -2070,6 +2103,7 @@ bool VideoAnalysisService::startDimensionAnalysisNow(const QString &videoKey,
                 emit dimensionAnalysisProgressChanged(normalizedKey, false, detail, error);
                 if (success) {
                     emit catalogChanged();
+                    emit searchDocumentChanged(normalizedKey);
                 }
                 m_analysisRunning = false;
                 emit analysisQueueChanged(m_currentVideoKey, m_analysisQueue.size());
@@ -2431,7 +2465,7 @@ void VideoAnalysisService::startNextAnalysis()
             }
             failJob(jobProjectDatabasePath, jobId, normalizedMessage);
             reportAnalysisProgress(job.videoKey, lastProgress, normalizedMessage, JobState::Failed, normalizedMessage);
-            notifyCatalogChanged();
+            notifyCatalogChanged(job.videoKey);
             QMetaObject::invokeMethod(this, [this, videoKey = job.videoKey]() {
                 finishCurrentAnalysis(videoKey, false);
             }, Qt::QueuedConnection);
@@ -2446,7 +2480,7 @@ void VideoAnalysisService::startNextAnalysis()
         auto finishSuccess = [&](const QString &successMessage) {
             completeJob(jobProjectDatabasePath, jobId, successMessage);
             reportAnalysisProgress(job.videoKey, 100, successMessage, JobState::Completed);
-            notifyCatalogChanged();
+            notifyCatalogChanged(job.videoKey);
             QMetaObject::invokeMethod(this, [this, videoKey = job.videoKey]() {
                 finishCurrentAnalysis(videoKey, true);
             }, Qt::QueuedConnection);
@@ -3249,7 +3283,7 @@ void VideoAnalysisService::startNextAnalysis()
             }
         }
 
-        notifyCatalogChanged();
+        notifyCatalogChanged(job.videoKey);
         QMetaObject::invokeMethod(this, [this, videoKey = job.videoKey]() {
             finishCurrentAnalysis(videoKey, true);
         }, Qt::QueuedConnection);
@@ -3436,9 +3470,10 @@ void VideoAnalysisService::failJob(const QString &projectDatabasePath, qint64 jo
     }, Qt::QueuedConnection);
 }
 
-void VideoAnalysisService::notifyCatalogChanged()
+void VideoAnalysisService::notifyCatalogChanged(const QString &videoKey)
 {
-    QMetaObject::invokeMethod(this, [this]() {
+    QMetaObject::invokeMethod(this, [this, videoKey]() {
         emit catalogChanged();
+        emit searchDocumentChanged(videoKey);
     }, Qt::QueuedConnection);
 }

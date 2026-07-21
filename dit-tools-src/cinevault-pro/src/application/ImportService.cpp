@@ -3,6 +3,7 @@
 #include "application/JobService.h"
 #include "core/jobs/JobEngine.h"
 #include "core/scan/ScanEngine.h"
+#include "core/scan/ScanPathPolicy.h"
 #include "infrastructure/db/DatabaseManager.h"
 #include "shared/FolderPathMetadata.h"
 
@@ -11,6 +12,7 @@
 #include <QFileInfo>
 #include <QSqlError>
 #include <QSqlQuery>
+#include <QTimer>
 
 namespace {
 SourceRoot readSourceRoot(const QSqlQuery &query)
@@ -96,20 +98,40 @@ bool ImportService::importDirectory(const QString &directoryPath, QString *error
         }
         return false;
     }
+    if (ScanPathPolicy::isExcludedPath(normalizedPath,
+                                       normalizedPath,
+                                       m_databaseManager->databaseFilePath())) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral(
+                "该路径属于系统临时区、应用缓存、项目生成目录或卷影副本，不能作为素材源：%1")
+                                .arg(normalizedPath);
+        }
+        return false;
+    }
 
-    const auto normalizedPathKey = FolderPathMetadata::normalizedPathKey(normalizedPath);
     QSqlQuery duplicateQuery(m_databaseManager->database());
     duplicateQuery.prepare(QStringLiteral("SELECT path FROM source_root"));
     if (duplicateQuery.exec()) {
         while (duplicateQuery.next()) {
-            if (FolderPathMetadata::normalizedPathKey(duplicateQuery.value(0).toString()) != normalizedPathKey) {
+            const auto existingPath = duplicateQuery.value(0).toString();
+            if (!ScanPathPolicy::pathsOverlap(existingPath, normalizedPath)) {
                 continue;
             }
             if (errorMessage) {
-                *errorMessage = QStringLiteral("素材源已存在：%1").arg(normalizedPath);
+                *errorMessage = QStringLiteral(
+                    "素材源与已有素材源存在父子目录重叠，不能重复建立索引：%1")
+                                    .arg(existingPath);
             }
             return false;
         }
+    }
+    if (ScanPathPolicy::isLinkOrReparsePoint(normalizedPath)) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral(
+                "素材源是符号链接、目录联接或挂载点。为避免循环扫描，默认不跟随此路径：%1")
+                                .arg(normalizedPath);
+        }
+        return false;
     }
 
     const auto now = QDateTime::currentDateTime().toString(Qt::ISODate);
@@ -139,6 +161,7 @@ bool ImportService::importDirectory(const QString &directoryPath, QString *error
     if (!startSourceScan(sourceRoot,
                          QStringLiteral("扫描"),
                          QStringLiteral("准备扫描目录"),
+                         {},
                          errorMessage)) {
         QSqlQuery cleanup(m_databaseManager->database());
         cleanup.prepare(QStringLiteral("DELETE FROM source_root WHERE id = ?"));
@@ -210,7 +233,11 @@ bool ImportService::rescanSourceRoot(qint64 sourceRootId,
     const auto detail = reason.trimmed().isEmpty()
         ? QStringLiteral("正在重新扫描素材源")
         : reason.trimmed();
-    if (!startSourceScan(sourceRoot, QStringLiteral("更新索引"), detail, errorMessage)) {
+    if (!startSourceScan(sourceRoot,
+                         QStringLiteral("更新索引"),
+                         detail,
+                         {},
+                         errorMessage)) {
         return false;
     }
     m_lastMessage = QStringLiteral("已开始后台更新索引：%1").arg(sourceRoot.name);
@@ -218,9 +245,68 @@ bool ImportService::rescanSourceRoot(qint64 sourceRootId,
     return true;
 }
 
+bool ImportService::rescanSourceDirectories(qint64 sourceRootId,
+                                            const QStringList &changedPaths,
+                                            bool forceFullScan,
+                                            const QString &reason,
+                                            QString *errorMessage)
+{
+    if (forceFullScan) {
+        return rescanSourceRoot(sourceRootId, reason, errorMessage);
+    }
+    if (!m_databaseManager || !m_databaseManager->hasOpenProject()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("当前没有打开的项目。");
+        }
+        return false;
+    }
+
+    QSqlQuery query(m_databaseManager->database());
+    query.prepare(QStringLiteral(
+        "SELECT id, name, path, status, total_files, total_folders, total_size_bytes, video_count, audio_count, image_count, other_count, warning_count, COALESCE(scan_version, 0) "
+        "FROM source_root WHERE id = ?"));
+    query.addBindValue(sourceRootId);
+    if (!query.exec() || !query.next()) {
+        if (errorMessage) {
+            *errorMessage = query.lastError().text().trimmed().isEmpty()
+                ? QStringLiteral("素材源不存在或已移除。")
+                : query.lastError().text();
+        }
+        return false;
+    }
+    const auto sourceRoot = readSourceRoot(query);
+    const auto dirtyDirectories = ScanPathPolicy::normalizeDirtyDirectories(
+        sourceRoot.path,
+        changedPaths,
+        m_databaseManager->databaseFilePath());
+    if (dirtyDirectories.isEmpty()) {
+        QTimer::singleShot(0, this, [this, sourceRootId]() {
+            emit sourceScanFinished(sourceRootId);
+        });
+        return true;
+    }
+
+    const auto detail = reason.trimmed().isEmpty()
+        ? QStringLiteral("正在定向更新变化目录")
+        : reason.trimmed();
+    if (!startSourceScan(sourceRoot,
+                         QStringLiteral("定向更新索引"),
+                         detail,
+                         dirtyDirectories,
+                         errorMessage)) {
+        return false;
+    }
+    m_lastMessage = QStringLiteral("已开始定向更新 %1 个变化目录：%2")
+                        .arg(dirtyDirectories.size())
+                        .arg(sourceRoot.name);
+    emit importStateChanged();
+    return true;
+}
+
 bool ImportService::startSourceScan(const SourceRoot &sourceRoot,
                                     const QString &titlePrefix,
                                     const QString &detail,
+                                    const QStringList &dirtyDirectoryPaths,
                                     QString *errorMessage)
 {
     if (!m_jobService || !m_jobService->engine() || !m_scanEngine) {
@@ -249,7 +335,7 @@ bool ImportService::startSourceScan(const SourceRoot &sourceRoot,
                                                          sourceRoot.id,
                                                          sourceRootJobSubject(sourceRoot),
                                                          scanProgressContext());
-    m_scanEngine->startScan(sourceRoot, jobId);
+    m_scanEngine->startScan(sourceRoot, jobId, dirtyDirectoryPaths);
     return true;
 }
 
@@ -302,6 +388,7 @@ void ImportService::resumeInterruptedScans()
         if (startSourceScan(sourceRoot,
                             QStringLiteral("恢复扫描"),
                             QStringLiteral("从上次保存的目录检查点继续建立索引"),
+                            {},
                             &errorMessage)) {
             ++resumed;
         }
@@ -352,7 +439,8 @@ void ImportService::rescanLegacySourceRoots()
     for (const auto &sourceRoot : legacyRoots) {
         startSourceScan(sourceRoot,
                         QStringLiteral("补扫历史素材源"),
-                        QStringLiteral("正在升级旧素材目录索引为全部文件"));
+                        QStringLiteral("正在升级旧素材目录索引为全部文件"),
+                        {});
     }
 
     m_lastMessage = QStringLiteral("已开始补扫 %1 个历史素材源，完成后素材管理中心会显示全部文件。").arg(legacyRoots.size());

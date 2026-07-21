@@ -1,12 +1,13 @@
 #include "application/SourceChangeMonitor.h"
 
-#include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
 #include <QMetaObject>
 #include <QPointer>
 
+#include <algorithm>
 #include <array>
+#include <cstddef>
 #include <stop_token>
 #include <thread>
 #include <utility>
@@ -22,6 +23,24 @@ struct SourceChangeMonitor::WatchRegistration {
 };
 
 namespace {
+constexpr qsizetype MaximumChangedPathsPerBatch = 4096;
+
+QString normalizedAbsolutePath(const QString &path)
+{
+    return QDir::cleanPath(QFileInfo(path).absoluteFilePath());
+}
+
+bool isPathInside(const QString &candidatePath, const QString &rootPath)
+{
+    auto candidate = QDir::fromNativeSeparators(normalizedAbsolutePath(candidatePath));
+    auto root = QDir::fromNativeSeparators(normalizedAbsolutePath(rootPath));
+#ifdef Q_OS_WIN
+    candidate = candidate.toCaseFolded();
+    root = root.toCaseFolded();
+#endif
+    return candidate == root || candidate.startsWith(root + QLatin1Char('/'));
+}
+
 #ifdef Q_OS_WIN
 QString windowsErrorMessage(DWORD errorCode)
 {
@@ -61,6 +80,13 @@ QString extendedWindowsPath(const QString &sourcePath)
 SourceChangeMonitor::SourceChangeMonitor(QObject *parent)
     : QObject(parent)
 {
+    qRegisterMetaType<SourceChangeBatch>();
+    m_debounceTimer.setSingleShot(true);
+    m_debounceTimer.setInterval(1500);
+    connect(&m_debounceTimer,
+            &QTimer::timeout,
+            this,
+            &SourceChangeMonitor::flushPendingChanges);
 }
 
 SourceChangeMonitor::~SourceChangeMonitor()
@@ -175,6 +201,7 @@ void SourceChangeMonitor::setSourceRoots(const QVector<SourceRoot> &sourceRoots)
                 }
 
                 DWORD transferred = 0;
+                bool overflowed = false;
                 if (!GetOverlappedResult(directoryHandle, &overlapped, &transferred, FALSE)) {
                     const auto errorCode = GetLastError();
                     if (errorCode == ERROR_OPERATION_ABORTED && stopToken.stop_requested()) {
@@ -190,11 +217,59 @@ void SourceChangeMonitor::setSourceRoots(const QVector<SourceRoot> &sourceRoots)
                         }
                         break;
                     }
+                    overflowed = true;
+                }
+
+                QStringList changedPaths;
+                if (!overflowed && transferred > 0) {
+                    DWORD offset = 0;
+                    while (offset < transferred) {
+                        constexpr auto headerSize = offsetof(FILE_NOTIFY_INFORMATION, FileName);
+                        if (transferred - offset < headerSize) {
+                            overflowed = true;
+                            changedPaths.clear();
+                            break;
+                        }
+                        const auto *notification = reinterpret_cast<const FILE_NOTIFY_INFORMATION *>(
+                            buffer.data() + offset);
+                        if (notification->FileNameLength > transferred - offset - headerSize) {
+                            overflowed = true;
+                            changedPaths.clear();
+                            break;
+                        }
+                        const auto nameLength = static_cast<qsizetype>(
+                            notification->FileNameLength / sizeof(wchar_t));
+                        const auto relativePath = QDir::fromNativeSeparators(
+                            QString::fromWCharArray(notification->FileName, nameLength));
+                        if (!relativePath.trimmed().isEmpty()) {
+                            changedPaths.append(QDir(sourcePath).absoluteFilePath(relativePath));
+                        }
+                        if (notification->NextEntryOffset == 0) {
+                            break;
+                        }
+                        if (notification->NextEntryOffset > transferred - offset) {
+                            overflowed = true;
+                            changedPaths.clear();
+                            break;
+                        }
+                        offset += notification->NextEntryOffset;
+                    }
+                } else if (transferred == 0) {
+                    overflowed = true;
                 }
 
                 if (self) {
-                    QMetaObject::invokeMethod(self, [self, sourceRootId, sourcePath]() {
-                        if (self) self->postChange(sourceRootId, sourcePath);
+                    QMetaObject::invokeMethod(self, [self,
+                                                     sourceRootId,
+                                                     sourcePath,
+                                                     changedPaths,
+                                                     overflowed]() {
+                        if (self) {
+                            self->postChanges(sourceRootId,
+                                              sourcePath,
+                                              changedPaths,
+                                              overflowed);
+                        }
                     }, Qt::QueuedConnection);
                 }
             }
@@ -227,7 +302,8 @@ void SourceChangeMonitor::stop()
         }
     }
     m_watches.clear();
-    m_lastNotificationMs.clear();
+    m_debounceTimer.stop();
+    m_pendingChanges.clear();
 }
 
 int SourceChangeMonitor::watchedSourceCount() const
@@ -235,16 +311,66 @@ int SourceChangeMonitor::watchedSourceCount() const
     return static_cast<int>(m_watches.size());
 }
 
-void SourceChangeMonitor::postChange(qint64 sourceRootId, const QString &sourcePath)
+#ifdef CINEVAULT_TESTING
+void SourceChangeMonitor::recordChangesForTesting(qint64 sourceRootId,
+                                                  const QString &sourcePath,
+                                                  const QStringList &changedPaths,
+                                                  bool overflowed)
 {
-    constexpr qint64 kDebounceMs = 1500;
-    const auto now = QDateTime::currentMSecsSinceEpoch();
-    const auto previous = m_lastNotificationMs.value(sourceRootId, 0);
-    if (previous > 0 && now - previous < kDebounceMs) {
+    postChanges(sourceRootId, sourcePath, changedPaths, overflowed);
+}
+#endif
+
+void SourceChangeMonitor::postChanges(qint64 sourceRootId,
+                                      const QString &sourcePath,
+                                      const QStringList &changedPaths,
+                                      bool overflowed)
+{
+    if (sourceRootId <= 0 || sourcePath.trimmed().isEmpty()) {
         return;
     }
-    m_lastNotificationMs.insert(sourceRootId, now);
-    emit sourceChanged(sourceRootId, sourcePath);
+
+    auto &pending = m_pendingChanges[sourceRootId];
+    pending.sourcePath = normalizedAbsolutePath(sourcePath);
+    pending.overflowed = pending.overflowed || overflowed;
+    if (!pending.overflowed) {
+        for (const auto &changedPath : changedPaths) {
+            const auto absolutePath = normalizedAbsolutePath(changedPath);
+            const auto parentPath = QFileInfo(absolutePath).absolutePath();
+            for (const auto &candidate : {absolutePath, parentPath}) {
+                if (isPathInside(candidate, pending.sourcePath)) {
+                    pending.changedPaths.insert(normalizedAbsolutePath(candidate));
+                }
+            }
+            if (pending.changedPaths.size() > MaximumChangedPathsPerBatch) {
+                pending.changedPaths.clear();
+                pending.overflowed = true;
+                break;
+            }
+        }
+    }
+    if (pending.overflowed) {
+        pending.changedPaths.clear();
+    }
+    m_debounceTimer.start();
+}
+
+void SourceChangeMonitor::flushPendingChanges()
+{
+    auto pendingChanges = std::exchange(m_pendingChanges, QHash<qint64, PendingChanges>{});
+    QList<qint64> sourceRootIds = pendingChanges.keys();
+    std::sort(sourceRootIds.begin(), sourceRootIds.end());
+    for (const auto sourceRootId : std::as_const(sourceRootIds)) {
+        const auto pending = pendingChanges.value(sourceRootId);
+        SourceChangeBatch batch;
+        batch.sourceRootId = sourceRootId;
+        batch.sourcePath = pending.sourcePath;
+        batch.changedPaths = pending.changedPaths.values();
+        std::sort(batch.changedPaths.begin(), batch.changedPaths.end());
+        batch.overflowed = pending.overflowed;
+        emit sourceChangesDetected(batch);
+        emit sourceChanged(sourceRootId, pending.sourcePath);
+    }
 }
 
 void SourceChangeMonitor::postUnavailable(qint64 sourceRootId,

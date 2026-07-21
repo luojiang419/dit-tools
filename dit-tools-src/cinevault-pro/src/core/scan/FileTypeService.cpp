@@ -1,9 +1,11 @@
 #include "core/scan/FileTypeService.h"
 
+#include "core/thumbnail/RawFormatRegistry.h"
+
 #include <QFileInfo>
 #include <QSet>
 
-AssetType FileTypeService::classify(const QString &fileName)
+AssetType FileTypeService::classify(const QString &fileName, QByteArrayView header)
 {
     static const QSet<QString> videoExt = {QStringLiteral("mov"), QStringLiteral("mp4"), QStringLiteral("mxf"), QStringLiteral("avi"), QStringLiteral("mkv")};
     static const QSet<QString> audioExt = {QStringLiteral("wav"), QStringLiteral("mp3"), QStringLiteral("aac"), QStringLiteral("flac"), QStringLiteral("aif"), QStringLiteral("aiff")};
@@ -18,10 +20,7 @@ AssetType FileTypeService::classify(const QString &fileName)
         QStringLiteral("jp2"), QStringLiteral("j2k"), QStringLiteral("jpf"), QStringLiteral("jpx"), QStringLiteral("jpm"),
         QStringLiteral("jxl"), QStringLiteral("exr"), QStringLiteral("hdr"), QStringLiteral("pic"),
         QStringLiteral("tga"), QStringLiteral("icb"), QStringLiteral("vda"), QStringLiteral("vst"),
-        QStringLiteral("svg"), QStringLiteral("svgz"), QStringLiteral("ico"),
-        QStringLiteral("dng"), QStringLiteral("raw"), QStringLiteral("arw"), QStringLiteral("cr2"), QStringLiteral("cr3"),
-        QStringLiteral("nef"), QStringLiteral("nrw"), QStringLiteral("raf"), QStringLiteral("rw2"), QStringLiteral("orf"),
-        QStringLiteral("pef"), QStringLiteral("srw"), QStringLiteral("x3f")
+        QStringLiteral("svg"), QStringLiteral("svgz"), QStringLiteral("ico")
     };
     static const QSet<QString> subtitleExt = {QStringLiteral("srt"), QStringLiteral("ass"), QStringLiteral("vtt")};
     static const QSet<QString> projectExt = {QStringLiteral("prproj"), QStringLiteral("drp"), QStringLiteral("aep"), QStringLiteral("fcpproj")};
@@ -31,6 +30,10 @@ AssetType FileTypeService::classify(const QString &fileName)
         QStringLiteral("xls"), QStringLiteral("xlsx"), QStringLiteral("ppt"), QStringLiteral("pptx")
     };
     static const QSet<QString> archiveExt = {QStringLiteral("zip"), QStringLiteral("rar"), QStringLiteral("7z"), QStringLiteral("tar"), QStringLiteral("gz")};
+
+    if (RawFormatRegistry::find(fileName, header)) {
+        return AssetType::Image;
+    }
 
     const auto ext = QFileInfo(fileName).suffix().toLower();
     if (ext.isEmpty()) {

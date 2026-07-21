@@ -1,7 +1,10 @@
 #include "application/MetadataExtractionService.h"
 
+#include "application/IndexingWorkCoordinator.h"
+
 #include "core/jobs/JobEngine.h"
 #include "infrastructure/db/DatabaseManager.h"
+#include "infrastructure/monitoring/PerformanceTelemetry.h"
 #include "shared/FolderPathMetadata.h"
 #include "shared/ScopedBackgroundThreadPriority.h"
 
@@ -17,7 +20,7 @@
 
 
 namespace {
-qint64 progressFor(int processed, int total)
+qint64 progressFor(qint64 processed, qint64 total)
 {
     return total <= 0
         ? 100
@@ -26,7 +29,7 @@ qint64 progressFor(int processed, int total)
                          qint64{100});
 }
 
-JobProgressContext extractionProgress(int current, int total)
+JobProgressContext extractionProgress(qint64 current, qint64 total)
 {
     JobProgressContext context;
     context.currentStep = 1;
@@ -72,6 +75,11 @@ void MetadataExtractionService::waitForIdle()
     m_futures.waitForFinished();
 }
 
+void MetadataExtractionService::setWorkCoordinator(IndexingWorkCoordinator *workCoordinator)
+{
+    m_workCoordinator = workCoordinator;
+}
+
 void MetadataExtractionService::startForSourceRoot(qint64 sourceRootId)
 {
     if (!m_databaseManager
@@ -98,15 +106,6 @@ void MetadataExtractionService::startForSourceRoot(qint64 sourceRootId)
         return;
     }
 
-    QString fetchError;
-    auto projectDb = m_databaseManager->database();
-    const auto pendingAssets = fetchPendingAssets(projectDb,
-                                                  sourceRootId,
-                                                  &fetchError);
-    if (!fetchError.isEmpty() || pendingAssets.isEmpty()) {
-        return;
-    }
-
     m_activeKeys.insert(activeKey);
     const auto jobId = m_jobEngine->createJob(
         JobType::Metadata,
@@ -116,20 +115,26 @@ void MetadataExtractionService::startForSourceRoot(qint64 sourceRootId)
             : m_exifToolAdapter->unavailableReason(),
         sourceRootId,
         sourceSubject(sourceRootId, sourceName, sourcePath),
-        extractionProgress(0, pendingAssets.size()));
+        extractionProgress(0, 0));
 
+    const auto workGeneration = m_workCoordinator
+        ? m_workCoordinator->currentGeneration()
+        : quint64{0};
     auto future = QtConcurrent::run([this,
                                      sourceRootId,
                                      projectDatabasePath,
                                      activeKey,
-                                     jobId]() {
-        runExtraction(sourceRootId, projectDatabasePath, activeKey, jobId);
+                                     jobId,
+                                     workGeneration]() {
+        runExtraction(sourceRootId, projectDatabasePath, activeKey, jobId, workGeneration);
     });
     m_futures.addFuture(future);
 }
 
 QVector<AssetFile> MetadataExtractionService::fetchPendingAssets(QSqlDatabase &db,
                                                                  qint64 sourceRootId,
+                                                                 qint64 lastAssetId,
+                                                                 qsizetype limit,
                                                                  QString *errorMessage) const
 {
     QVector<AssetFile> assets;
@@ -138,13 +143,15 @@ QVector<AssetFile> MetadataExtractionService::fetchPendingAssets(QSqlDatabase &d
         "SELECT af.id, af.source_root_id, af.name, af.extension, af.absolute_path, af.relative_path, "
         "af.parent_path, af.asset_type, af.size_bytes, af.modified_at, af.is_readable "
         "FROM asset_file af LEFT JOIN embedded_metadata em ON em.asset_id = af.id "
-        "WHERE af.source_root_id = ? AND af.asset_type IN (?, ?, ?) AND af.is_readable = 1 "
+        "WHERE af.source_root_id = ? AND af.id > ? AND af.asset_type IN (?, ?, ?) AND af.is_readable = 1 "
         "AND (em.asset_id IS NULL OR em.fingerprint_size <> af.size_bytes "
-        "OR em.fingerprint_modified <> af.modified_at) ORDER BY af.id"));
+        "OR em.fingerprint_modified <> af.modified_at) ORDER BY af.id LIMIT ?"));
     query.addBindValue(sourceRootId);
+    query.addBindValue(lastAssetId);
     query.addBindValue(static_cast<int>(AssetType::Video));
     query.addBindValue(static_cast<int>(AssetType::Audio));
     query.addBindValue(static_cast<int>(AssetType::Image));
+    query.addBindValue(qMax<qsizetype>(1, limit));
     if (!query.exec()) {
         if (errorMessage) *errorMessage = query.lastError().text();
         return assets;
@@ -167,12 +174,42 @@ QVector<AssetFile> MetadataExtractionService::fetchPendingAssets(QSqlDatabase &d
     return assets;
 }
 
+qint64 MetadataExtractionService::countPendingAssets(QSqlDatabase &db,
+                                                     qint64 sourceRootId,
+                                                     QString *errorMessage) const
+{
+    QSqlQuery query(db);
+    query.prepare(QStringLiteral(
+        "SELECT COUNT(*) FROM asset_file af "
+        "LEFT JOIN embedded_metadata em ON em.asset_id = af.id "
+        "WHERE af.source_root_id = ? AND af.asset_type IN (?, ?, ?) AND af.is_readable = 1 "
+        "AND (em.asset_id IS NULL OR em.fingerprint_size <> af.size_bytes "
+        "OR em.fingerprint_modified <> af.modified_at)"));
+    query.addBindValue(sourceRootId);
+    query.addBindValue(static_cast<int>(AssetType::Video));
+    query.addBindValue(static_cast<int>(AssetType::Audio));
+    query.addBindValue(static_cast<int>(AssetType::Image));
+    if (!query.exec() || !query.next()) {
+        if (errorMessage) {
+            *errorMessage = query.lastError().text();
+        }
+        return -1;
+    }
+    return query.value(0).toLongLong();
+}
+
 void MetadataExtractionService::runExtraction(qint64 sourceRootId,
                                               const QString &projectDatabasePath,
                                               const QString &activeKey,
-                                              qint64 jobId)
+                                              qint64 jobId,
+                                              quint64 workGeneration)
 {
     const ScopedBackgroundThreadPriority backgroundPriority;
+    auto &telemetry = PerformanceTelemetry::global();
+    const auto stageStartedAtMs = telemetry.beginStage(
+        QStringLiteral("metadata"),
+        QStringLiteral("exiftool"),
+        {{QStringLiteral("source_root_id"), sourceRootId}});
     const auto connectionName = QStringLiteral("embedded_metadata_%1_%2")
                                     .arg(sourceRootId)
                                     .arg(reinterpret_cast<quintptr>(QThread::currentThreadId()));
@@ -192,55 +229,129 @@ void MetadataExtractionService::runExtraction(qint64 sourceRootId,
         return;
     }
 
-    const auto assets = fetchPendingAssets(db, sourceRootId, &errorMessage);
-    if (!errorMessage.isEmpty()) {
+    const auto total = countPendingAssets(db, sourceRootId, &errorMessage);
+    if (total < 0 || !errorMessage.isEmpty()) {
         failJob(projectDatabasePath, jobId, errorMessage);
+        telemetry.finishStage(
+            QStringLiteral("metadata"), QStringLiteral("exiftool"), stageStartedAtMs,
+            QStringLiteral("failed"), {{QStringLiteral("error"), errorMessage}});
         closeConnection();
         releaseActiveKey(activeKey);
         return;
     }
 
-    constexpr qsizetype kBatchSize = 32;
-    int processed = 0;
-    int failed = 0;
-    for (qsizetype offset = 0; offset < assets.size(); offset += kBatchSize) {
-        const auto count = qMin(kBatchSize, assets.size() - offset);
-        QVector<AssetFile> batch;
-        batch.reserve(count);
-        for (qsizetype index = 0; index < count; ++index) {
-            batch.append(assets.at(offset + index));
-        }
-        const auto results = m_exifToolAdapter->extract(batch);
-        if (!persistBatch(db, results, &errorMessage)) {
-            failJob(projectDatabasePath, jobId, QStringLiteral("真实元数据写入失败：%1").arg(errorMessage));
+    constexpr qsizetype PageSize = 128;
+    constexpr qsizetype ExifToolBatchSize = 32;
+    qint64 processed = 0;
+    qint64 failed = 0;
+    qint64 lastAssetId = 0;
+    while (true) {
+        const auto assets = fetchPendingAssets(
+            db, sourceRootId, lastAssetId, PageSize, &errorMessage);
+        if (!errorMessage.isEmpty()) {
+            failJob(projectDatabasePath, jobId, errorMessage);
+            telemetry.setQueueDepth(QStringLiteral("metadata.exif_assets"), 0);
+            telemetry.finishStage(
+                QStringLiteral("metadata"), QStringLiteral("exiftool"), stageStartedAtMs,
+                QStringLiteral("failed"), {{QStringLiteral("error"), errorMessage}});
             closeConnection();
             releaseActiveKey(activeKey);
             return;
         }
-        for (const auto &result : results) {
-            if (result.status != ProbeStatus::Success) ++failed;
+        if (assets.isEmpty()) {
+            break;
         }
-        processed += batch.size();
-        updateJob(projectDatabasePath,
-                  jobId,
-                  progressFor(processed, assets.size()),
-                  QStringLiteral("已读取 %1/%2 个文件，失败 %3 个")
-                      .arg(processed).arg(assets.size()).arg(failed),
-                  extractionProgress(processed, assets.size()));
+        telemetry.setQueueDepth(QStringLiteral("metadata.exif_assets"), assets.size());
+        lastAssetId = assets.constLast().id;
+        for (qsizetype offset = 0; offset < assets.size(); offset += ExifToolBatchSize) {
+            const auto count = qMin(ExifToolBatchSize, assets.size() - offset);
+            QVector<AssetFile> batch;
+            batch.reserve(count);
+            for (qsizetype index = 0; index < count; ++index) {
+                batch.append(assets.at(offset + index));
+            }
+            QVector<EmbeddedMetadataResult> results;
+            {
+                IndexingWorkCoordinator::Lease heavyIoLease;
+                if (m_workCoordinator) {
+                    heavyIoLease = m_workCoordinator->acquire({
+                        IndexingWorkCoordinator::Resource::HeavyIo,
+                        IndexingWorkCoordinator::Priority::Background,
+                        true,
+                        workGeneration});
+                }
+                if (m_workCoordinator && !heavyIoLease) {
+                    failJob(projectDatabasePath,
+                            jobId,
+                            QStringLiteral("真实元数据任务因项目切换、队列拥塞或应用退出而取消"));
+                    telemetry.setQueueDepth(QStringLiteral("metadata.exif_assets"), 0);
+                    closeConnection();
+                    releaseActiveKey(activeKey);
+                    return;
+                }
+                results = m_exifToolAdapter->extract(batch);
+            }
+            IndexingWorkCoordinator::Lease writerLease;
+            if (m_workCoordinator) {
+                writerLease = m_workCoordinator->acquire({
+                    IndexingWorkCoordinator::Resource::SqliteWriter,
+                    IndexingWorkCoordinator::Priority::Background,
+                    false,
+                    workGeneration});
+            }
+            if (m_workCoordinator && !writerLease) {
+                failJob(projectDatabasePath,
+                        jobId,
+                        QStringLiteral("真实元数据写入因项目切换、队列拥塞或应用退出而取消"));
+                telemetry.setQueueDepth(QStringLiteral("metadata.exif_assets"), 0);
+                closeConnection();
+                releaseActiveKey(activeKey);
+                return;
+            }
+            if (!persistBatch(db, results, &errorMessage)) {
+                failJob(projectDatabasePath, jobId, QStringLiteral("真实元数据写入失败：%1").arg(errorMessage));
+                telemetry.setQueueDepth(QStringLiteral("metadata.exif_assets"), 0);
+                telemetry.finishStage(
+                    QStringLiteral("metadata"), QStringLiteral("exiftool"), stageStartedAtMs,
+                    QStringLiteral("failed"), {{QStringLiteral("error"), errorMessage}});
+                closeConnection();
+                releaseActiveKey(activeKey);
+                return;
+            }
+            for (const auto &result : results) {
+                if (result.status != ProbeStatus::Success) {
+                    ++failed;
+                }
+            }
+            processed += batch.size();
+            updateJob(projectDatabasePath,
+                      jobId,
+                      progressFor(processed, total),
+                      QStringLiteral("已读取 %1/%2 个文件，失败 %3 个")
+                          .arg(processed).arg(total).arg(failed),
+                      extractionProgress(processed, total));
+        }
+        telemetry.setQueueDepth(QStringLiteral("metadata.exif_assets"), 0);
     }
 
-    if (assets.isEmpty()) {
+    if (processed == 0) {
         completeJob(projectDatabasePath, jobId, QStringLiteral("真实元数据已是最新状态"));
-    } else if (failed == assets.size()) {
+    } else if (failed == processed) {
         failJob(projectDatabasePath, jobId, QStringLiteral("ExifTool 未能读取任何文件，请检查运行时或文件权限"));
     } else {
         completeJob(projectDatabasePath,
                     jobId,
                     failed > 0
                         ? QStringLiteral("真实元数据读取完成：成功 %1 个，失败 %2 个")
-                              .arg(assets.size() - failed).arg(failed)
-                        : QStringLiteral("真实元数据读取完成，共 %1 个文件").arg(assets.size()));
+                              .arg(processed - failed).arg(failed)
+                        : QStringLiteral("真实元数据读取完成，共 %1 个文件").arg(processed));
     }
+    telemetry.finishStage(
+        QStringLiteral("metadata"),
+        QStringLiteral("exiftool"),
+        stageStartedAtMs,
+        failed == processed && processed > 0 ? QStringLiteral("failed") : QStringLiteral("ok"),
+        {{QStringLiteral("processed"), processed}, {QStringLiteral("failed"), failed}});
     closeConnection();
     QMetaObject::invokeMethod(this, [this, projectDatabasePath]() {
         emit metadataCatalogChanged(projectDatabasePath);

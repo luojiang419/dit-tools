@@ -1,15 +1,16 @@
 #pragma once
 
+#include "application/LibraryQueryService.h"
 #include "domain/Entities.h"
 
+#include <QFutureSynchronizer>
 #include <QObject>
+#include <QTimer>
 #include <QUrl>
 #include <QVector>
 #include <optional>
 
 class AssetListModel;
-class LibraryQueryService;
-
 class LibraryWorkspaceViewModel : public QObject {
     Q_OBJECT
     Q_PROPERTY(AssetListModel* model READ model CONSTANT)
@@ -31,9 +32,13 @@ class LibraryWorkspaceViewModel : public QObject {
     Q_PROPERTY(bool selectedPreviewIsVideo READ selectedPreviewIsVideo NOTIFY selectionChanged)
     Q_PROPERTY(bool selectedPreviewIsImage READ selectedPreviewIsImage NOTIFY selectionChanged)
     Q_PROPERTY(bool selectedPreviewIsDocument READ selectedPreviewIsDocument NOTIFY selectionChanged)
+    Q_PROPERTY(bool loading READ loading NOTIFY paginationChanged)
+    Q_PROPERTY(bool hasMore READ hasMore NOTIFY paginationChanged)
+    Q_PROPERTY(int loadedAssetCount READ loadedAssetCount NOTIFY paginationChanged)
 
 public:
     explicit LibraryWorkspaceViewModel(LibraryQueryService *libraryQueryService, QObject *parent = nullptr);
+    ~LibraryWorkspaceViewModel() override;
 
     AssetListModel *model() const;
     int viewMode() const;
@@ -54,12 +59,18 @@ public:
     bool selectedPreviewIsVideo() const;
     bool selectedPreviewIsImage() const;
     bool selectedPreviewIsDocument() const;
+    bool loading() const;
+    bool hasMore() const;
+    int loadedAssetCount() const;
+    void waitForIdle();
 
     void setViewMode(int viewMode);
     void setFavoritesOnly(bool favoritesOnly);
     void resetForProject();
 
     Q_INVOKABLE void reload();
+    Q_INVOKABLE void scheduleReload();
+    Q_INVOKABLE void loadMore();
     Q_INVOKABLE void setSearchText(const QString &searchText);
     Q_INVOKABLE void setSourceFilter(qint64 sourceRootId);
     Q_INVOKABLE void setAssetTypeFilter(int assetType);
@@ -77,12 +88,24 @@ signals:
     void filtersChanged();
     void statusChanged();
     void selectionChanged();
+    void paginationChanged();
     void assetSelected(qint64 assetId);
 
 private:
     AssetFile assetById(qint64 assetId) const;
     AssetFile selectedAsset() const;
-    void refresh();
+    LibraryAssetPageRequest queryRequest(bool includeCursor) const;
+    void beginResetQuery();
+    void startPageQuery(quint64 generation, bool firstPage);
+    void startCountQuery(quint64 generation);
+    void applyPageResult(quint64 generation,
+                         bool firstPage,
+                         const LibraryAssetPageResult &result);
+    void applyCountResult(quint64 generation,
+                          const LibraryAssetCountResult &result);
+    void updateDerivedState();
+    void setLoading(bool loading);
+    void setHasMore(bool hasMore);
 
     LibraryQueryService *m_libraryQueryService = nullptr;
     AssetListModel *m_model = nullptr;
@@ -98,4 +121,14 @@ private:
     qint64 m_readyCount = 0;
     qint64 m_pendingCount = 0;
     qint64 m_issueCount = 0;
+    QTimer m_catalogReloadTimer;
+    QTimer m_searchReloadTimer;
+    QTimer m_countQueryTimer;
+    QFutureSynchronizer<void> m_futures;
+    quint64 m_queryGeneration = 0;
+    quint64 m_pendingCountGeneration = 0;
+    bool m_loading = false;
+    bool m_hasMore = false;
+    bool m_countPending = false;
+    QString m_queryError;
 };

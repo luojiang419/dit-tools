@@ -365,6 +365,107 @@ private slots:
                  2);
     }
 
+    void projectV8_changeLogCoalescesEntityUpdatesAndRepairsTriggers()
+    {
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        const auto databasePath = QDir(temp.path()).filePath(QStringLiteral("catalog-v8.cvdb"));
+
+        DatabaseManager manager;
+        QString errorMessage;
+        QVERIFY2(manager.openProjectDatabase(databasePath, &errorMessage), qPrintable(errorMessage));
+        QCOMPARE(manager.schemaVersion(), DatabaseManager::CurrentSchemaVersion);
+
+        auto db = manager.database();
+        QSqlQuery write(db);
+        QVERIFY2(write.exec(QStringLiteral(
+                     "INSERT INTO source_root "
+                     "(name, path, status, created_at, updated_at) "
+                     "VALUES ('Card', 'C:/Card', 'ok', '2026-07-21T10:00:00', '2026-07-21T10:00:00')")),
+                 qPrintable(write.lastError().text()));
+        const auto sourceRootId = write.lastInsertId().toLongLong();
+        write.prepare(QStringLiteral(
+            "INSERT INTO folder_node "
+            "(source_root_id, name, absolute_path, relative_path, created_at) "
+            "VALUES (?, 'Card', 'C:/Card', '', '2026-07-21T10:00:00')"));
+        write.addBindValue(sourceRootId);
+        QVERIFY2(write.exec(), qPrintable(write.lastError().text()));
+        const auto folderId = write.lastInsertId().toLongLong();
+        write.prepare(QStringLiteral(
+            "INSERT INTO asset_file "
+            "(source_root_id, name, extension, absolute_path, relative_path, parent_path, asset_type, "
+            "size_bytes, modified_at, is_readable, created_at) "
+            "VALUES (?, 'clip.mov', 'mov', 'C:/Card/clip.mov', 'clip.mov', 'C:/Card', 1, 10, "
+            "'2026-07-21T10:00:00', 1, '2026-07-21T10:00:00')"));
+        write.addBindValue(sourceRootId);
+        QVERIFY2(write.exec(), qPrintable(write.lastError().text()));
+        const auto assetId = write.lastInsertId().toLongLong();
+
+        write.prepare(QStringLiteral(
+            "UPDATE asset_file SET size_bytes = size_bytes + 1, modified_at = '2026-07-21T10:01:00' WHERE id = ?"));
+        write.addBindValue(assetId);
+        QVERIFY2(write.exec(), qPrintable(write.lastError().text()));
+        write.prepare(QStringLiteral(
+            "INSERT INTO media_metadata (asset_id, probe_status, updated_at) VALUES (?, 1, '2026-07-21T10:02:00')"));
+        write.addBindValue(assetId);
+        QVERIFY2(write.exec(), qPrintable(write.lastError().text()));
+        write.prepare(QStringLiteral(
+            "INSERT INTO embedded_metadata (asset_id, status, search_text, updated_at) "
+            "VALUES (?, 1, 'camera metadata', '2026-07-21T10:03:00')"));
+        write.addBindValue(assetId);
+        QVERIFY2(write.exec(), qPrintable(write.lastError().text()));
+        write.prepare(QStringLiteral(
+            "INSERT INTO thumbnail (asset_id, status, image_path, updated_at) "
+            "VALUES (?, 1, 'thumb.jpg', '2026-07-21T10:04:00')"));
+        write.addBindValue(assetId);
+        QVERIFY2(write.exec(), qPrintable(write.lastError().text()));
+        write.prepare(QStringLiteral(
+            "UPDATE folder_node SET name = 'CardRenamed', absolute_path = 'C:/CardRenamed', "
+            "relative_path = 'CardRenamed' WHERE id = ?"));
+        write.addBindValue(folderId);
+        QVERIFY2(write.exec(), qPrintable(write.lastError().text()));
+
+        QSqlQuery changes(db);
+        QVERIFY2(changes.exec(QStringLiteral(
+                     "SELECT entity_type, entity_id, operation, change_mask, entity_key, previous_entity_key "
+                     "FROM catalog_change_log ORDER BY entity_type")),
+                 qPrintable(changes.lastError().text()));
+        QVERIFY(changes.next());
+        QCOMPARE(changes.value(0).toInt(), 1);
+        QCOMPARE(changes.value(1).toLongLong(), assetId);
+        QCOMPARE(changes.value(2).toInt(), 1);
+        QCOMPARE(changes.value(3).toInt(), 1 | 2 | 4);
+        QVERIFY(changes.next());
+        QCOMPARE(changes.value(0).toInt(), 2);
+        QCOMPARE(changes.value(1).toLongLong(), folderId);
+        QCOMPARE(changes.value(2).toInt(), 1);
+        QCOMPARE(changes.value(3).toInt(), 8);
+        QVERIFY(!changes.next());
+
+        QSqlQuery monotonic(db);
+        QVERIFY2(monotonic.exec(QStringLiteral(
+                     "SELECT next_log_id, pending_change_count, requires_full_rebuild "
+                     "FROM catalog_change_state WHERE singleton_id = 1")),
+                 qPrintable(monotonic.lastError().text()));
+        QVERIFY(monotonic.next());
+        QVERIFY(monotonic.value(0).toLongLong() >= 7);
+        QCOMPARE(monotonic.value(1).toInt(), 2);
+        QCOMPARE(monotonic.value(2).toInt(), 1);
+
+        QVERIFY2(write.exec(QStringLiteral("DROP TRIGGER catalog_change_thumbnail_update")),
+                 qPrintable(write.lastError().text()));
+        manager.closeProjectDatabase();
+        QVERIFY2(manager.openProjectDatabase(databasePath, &errorMessage), qPrintable(errorMessage));
+        QSqlQuery repaired(manager.database());
+        QVERIFY2(repaired.exec(QStringLiteral(
+                     "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' "
+                     "AND name = 'catalog_change_thumbnail_update'")),
+                 qPrintable(repaired.lastError().text()));
+        QVERIFY(repaired.next());
+        QCOMPARE(repaired.value(0).toInt(), 1);
+        manager.closeProjectDatabase();
+    }
+
     void globalV7ToV10_createsBackupAndFolderSchema()
     {
         removeGlobalDatabaseFiles();
@@ -405,6 +506,7 @@ private slots:
             QVERIFY(names.contains(QStringLiteral("recursive_file_count")));
             QVERIFY(names.contains(QStringLiteral("normalized_date")));
             QVERIFY(names.contains(QStringLiteral("is_available")));
+            QVERIFY(names.contains(QStringLiteral("sync_generation")));
 
             QSqlQuery assetColumns(db);
             QVERIFY2(assetColumns.exec(QStringLiteral("PRAGMA table_info(global_video_asset)")),
@@ -418,6 +520,16 @@ private slots:
             QVERIFY(assetColumnNames.contains(QStringLiteral("capture_time_source")));
             QVERIFY(assetColumnNames.contains(QStringLiteral("capture_time_confidence")));
             QVERIFY(assetColumnNames.contains(QStringLiteral("embedded_metadata_text")));
+            QVERIFY(assetColumnNames.contains(QStringLiteral("sync_generation")));
+
+            QSqlQuery registryColumns(db);
+            QVERIFY2(registryColumns.exec(QStringLiteral("PRAGMA table_info(project_registry)")),
+                     qPrintable(registryColumns.lastError().text()));
+            QStringList registryColumnNames;
+            while (registryColumns.next()) {
+                registryColumnNames.append(registryColumns.value(1).toString());
+            }
+            QVERIFY(registryColumnNames.contains(QStringLiteral("active_sync_generation")));
 
             const auto backupPath = DatabaseMigration::backupFilePath(
                 globalDatabasePath(),

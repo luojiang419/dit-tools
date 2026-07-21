@@ -241,66 +241,30 @@ bool SemanticSearchIndexService::rebuildLocked(const QString &reason, QString *e
         return false;
     }
 
-    struct RebuildDocument {
-        qint64 id = 0;
-        QString contentText;
-        QString contentHash;
-        QVector<float> embedding;
-    };
-    QVector<RebuildDocument> documents;
-    QVector<qint64> emptyDocumentIds;
     auto db = m_globalDatabaseManager->database();
-    {
-        QSqlQuery query(db);
-        if (!query.exec(QStringLiteral("SELECT id, content_text FROM search_document ORDER BY id"))) {
-            const auto message = QStringLiteral("读取语义文档失败：%1").arg(query.lastError().text());
-            recordFailureLocked(message);
-            if (errorMessage) *errorMessage = message;
-            return false;
-        }
-        while (query.next()) {
-            RebuildDocument document;
-            document.id = query.value(0).toLongLong();
-            document.contentText = normalizedDocumentText(query.value(1).toString());
-            if (document.id <= 0 || document.contentText.isEmpty()) {
-                emptyDocumentIds.append(document.id);
-                continue;
-            }
-            document.contentHash = contentHash(document.contentText);
-            documents.append(std::move(document));
-        }
+    qint64 validDocumentCount = 0;
+    QSqlQuery count(db);
+    if (!count.exec(QStringLiteral(
+            "SELECT COUNT(*) FROM search_document "
+            "WHERE id > 0 AND TRIM(COALESCE(content_text, '')) != ''"))
+        || !count.next()) {
+        const auto message = QStringLiteral("读取语义文档数量失败：%1")
+                                 .arg(count.lastError().text());
+        recordFailureLocked(message);
+        if (errorMessage) *errorMessage = message;
+        return false;
     }
+    validDocumentCount = count.value(0).toLongLong();
+    count.finish();
 
     SemanticVectorIndex rebuiltIndex;
     QString indexError;
     if (!rebuiltIndex.reset(cinevault::searchconfig::kEmbeddingDimensions, &indexError)
-        || !rebuiltIndex.reserve(documents.size(), &indexError)) {
+        || !rebuiltIndex.reserve(static_cast<qsizetype>(validDocumentCount), &indexError)) {
         const auto message = QStringLiteral("创建 USearch 重建索引失败：%1").arg(indexError);
         recordFailureLocked(message);
         if (errorMessage) *errorMessage = message;
         return false;
-    }
-    QStringList documentTexts;
-    documentTexts.reserve(documents.size());
-    for (const auto &document : std::as_const(documents)) {
-        documentTexts.append(document.contentText);
-    }
-    const auto embeddings = m_embeddingModel.embedDocuments(documentTexts, {}, &modelError);
-    if (embeddings.size() != documents.size()) {
-        const auto message = QStringLiteral("批量生成语义文档向量失败：%1").arg(modelError);
-        recordFailureLocked(message);
-        if (errorMessage) *errorMessage = message;
-        return false;
-    }
-    for (qsizetype index = 0; index < documents.size(); ++index) {
-        auto &document = documents[index];
-        document.embedding = embeddings.at(index);
-        if (!rebuiltIndex.add(static_cast<quint64>(document.id), document.embedding, &indexError)) {
-            const auto message = QStringLiteral("写入 USearch 重建索引失败：%1").arg(indexError);
-            recordFailureLocked(message);
-            if (errorMessage) *errorMessage = message;
-            return false;
-        }
     }
 
     if (!ensureIndexDirectoryLocked(errorMessage)) {
@@ -320,14 +284,11 @@ bool SemanticSearchIndexService::rebuildLocked(const QString &reason, QString *e
     };
 
     QSqlQuery deleteEmpty(db);
-    deleteEmpty.prepare(QStringLiteral("DELETE FROM search_document WHERE id = ?"));
-    for (const auto id : emptyDocumentIds) {
-        deleteEmpty.bindValue(0, id);
-        if (!deleteEmpty.exec()) {
-            return rollbackFailure(QStringLiteral("清理空语义文档失败：%1")
-                                       .arg(deleteEmpty.lastError().text()));
-        }
-        deleteEmpty.finish();
+    if (!deleteEmpty.exec(QStringLiteral(
+            "DELETE FROM search_document WHERE id <= 0 "
+            "OR TRIM(COALESCE(content_text, '')) = ''"))) {
+        return rollbackFailure(QStringLiteral("清理空语义文档失败：%1")
+                                   .arg(deleteEmpty.lastError().text()));
     }
 
     const auto timestamp = currentTimestamp();
@@ -335,18 +296,87 @@ bool SemanticSearchIndexService::rebuildLocked(const QString &reason, QString *e
     updateDocument.prepare(QStringLiteral(
         "UPDATE search_document SET content_hash = ?, content_text = ?, model_id = ?, "
         "index_schema_version = ?, indexed_at = ? WHERE id = ?"));
-    for (const auto &document : documents) {
-        updateDocument.bindValue(0, document.contentHash);
-        updateDocument.bindValue(1, document.contentText);
-        updateDocument.bindValue(2, currentModelId());
-        updateDocument.bindValue(3, cinevault::searchconfig::kSearchIndexSchemaVersion);
-        updateDocument.bindValue(4, timestamp);
-        updateDocument.bindValue(5, document.id);
-        if (!updateDocument.exec()) {
-            return rollbackFailure(QStringLiteral("更新语义文档映射失败：%1")
-                                       .arg(updateDocument.lastError().text()));
+    QSqlQuery deleteNormalizedEmpty(db);
+    deleteNormalizedEmpty.prepare(QStringLiteral("DELETE FROM search_document WHERE id = ?"));
+
+    struct RebuildDocument {
+        qint64 id = 0;
+        QString contentText;
+        QString contentHash;
+    };
+    constexpr qsizetype RebuildPageSize = 256;
+    qint64 lastDocumentId = 0;
+    while (true) {
+        QSqlQuery page(db);
+        page.prepare(QStringLiteral(
+            "SELECT id, content_text FROM search_document WHERE id > ? "
+            "ORDER BY id LIMIT ?"));
+        page.addBindValue(lastDocumentId);
+        page.addBindValue(RebuildPageSize);
+        if (!page.exec()) {
+            return rollbackFailure(QStringLiteral("分页读取语义文档失败：%1")
+                                       .arg(page.lastError().text()));
         }
-        updateDocument.finish();
+        QVector<RebuildDocument> documents;
+        documents.reserve(RebuildPageSize);
+        QStringList documentTexts;
+        documentTexts.reserve(RebuildPageSize);
+        QVector<qint64> normalizedEmptyIds;
+        bool hadRows = false;
+        while (page.next()) {
+            hadRows = true;
+            RebuildDocument document;
+            document.id = page.value(0).toLongLong();
+            document.contentText = normalizedDocumentText(page.value(1).toString());
+            document.contentHash = contentHash(document.contentText);
+            lastDocumentId = document.id;
+            if (document.id <= 0 || document.contentText.isEmpty()) {
+                normalizedEmptyIds.append(document.id);
+                continue;
+            }
+            documentTexts.append(document.contentText);
+            documents.append(std::move(document));
+        }
+        page.finish();
+        for (const auto documentId : std::as_const(normalizedEmptyIds)) {
+            deleteNormalizedEmpty.bindValue(0, documentId);
+            if (!deleteNormalizedEmpty.exec()) {
+                return rollbackFailure(QStringLiteral("清理规范化后空语义文档失败：%1")
+                                           .arg(deleteNormalizedEmpty.lastError().text()));
+            }
+            deleteNormalizedEmpty.finish();
+        }
+        if (!hadRows) {
+            break;
+        }
+        if (documents.isEmpty()) {
+            continue;
+        }
+
+        const auto embeddings = m_embeddingModel.embedDocuments(documentTexts, {}, &modelError);
+        if (embeddings.size() != documents.size()) {
+            return rollbackFailure(QStringLiteral("批量生成语义文档向量失败：%1")
+                                       .arg(modelError));
+        }
+        for (qsizetype index = 0; index < documents.size(); ++index) {
+            const auto &document = documents.at(index);
+            if (!rebuiltIndex.add(
+                    static_cast<quint64>(document.id), embeddings.at(index), &indexError)) {
+                return rollbackFailure(QStringLiteral("写入 USearch 重建索引失败：%1")
+                                           .arg(indexError));
+            }
+            updateDocument.bindValue(0, document.contentHash);
+            updateDocument.bindValue(1, document.contentText);
+            updateDocument.bindValue(2, currentModelId());
+            updateDocument.bindValue(3, cinevault::searchconfig::kSearchIndexSchemaVersion);
+            updateDocument.bindValue(4, timestamp);
+            updateDocument.bindValue(5, document.id);
+            if (!updateDocument.exec()) {
+                return rollbackFailure(QStringLiteral("更新语义文档映射失败：%1")
+                                           .arg(updateDocument.lastError().text()));
+            }
+            updateDocument.finish();
+        }
     }
 
     if (!rebuiltIndex.save(m_indexFilePath, &indexError)) {
@@ -424,11 +454,26 @@ bool SemanticSearchIndexService::applyChanges(const QVector<SearchDocumentInput>
 
     auto db = m_globalDatabaseManager->database();
     QHash<QString, ExistingDocument> existingDocuments;
-    {
+    QStringList requestedDocumentKeys = normalizedUpserts.keys();
+    for (const auto &key : std::as_const(normalizedRemovals)) {
+        if (!normalizedUpserts.contains(key)) {
+            requestedDocumentKeys.append(key);
+        }
+    }
+    constexpr qsizetype ExistingDocumentPageSize = 500;
+    for (qsizetype offset = 0; offset < requestedDocumentKeys.size(); offset += ExistingDocumentPageSize) {
+        const auto pageSize = qMin(ExistingDocumentPageSize, requestedDocumentKeys.size() - offset);
+        QStringList placeholders;
+        placeholders.fill(QStringLiteral("?"), pageSize);
         QSqlQuery query(db);
-        if (!query.exec(QStringLiteral(
+        query.prepare(QStringLiteral(
                 "SELECT id, document_key, document_type, entity_key, content_hash, content_text, "
-                "source_updated_at, model_id, index_schema_version, indexed_at FROM search_document"))) {
+                "source_updated_at, model_id, index_schema_version, indexed_at FROM search_document "
+                "WHERE document_key IN (%1)").arg(placeholders.join(QLatin1Char(','))));
+        for (qsizetype index = 0; index < pageSize; ++index) {
+            query.addBindValue(requestedDocumentKeys.at(offset + index));
+        }
+        if (!query.exec()) {
             if (errorMessage) {
                 *errorMessage = QStringLiteral("读取现有语义文档失败：%1").arg(query.lastError().text());
             }

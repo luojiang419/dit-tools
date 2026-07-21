@@ -590,6 +590,14 @@ bool GlobalDatabaseManager::initializeSchema(QSqlDatabase &db, bool databaseExis
         }
         version = 13;
     }
+    if (version < 14) {
+        if (!migrateToVersion14(db, errorMessage)) {
+            return rollback();
+        }
+        version = 14;
+    } else if (!ensureCatalogGenerationSchemaCompatibility(db, errorMessage)) {
+        return rollback();
+    }
 
     if (!db.commit()) {
         if (errorMessage) {
@@ -611,6 +619,7 @@ bool GlobalDatabaseManager::createSchema(QSqlDatabase &db, QString *errorMessage
                        "project_database_path TEXT NOT NULL,"
                        "last_synced_at TEXT,"
                        "sync_status TEXT NOT NULL DEFAULT 'pending',"
+                       "active_sync_generation INTEGER NOT NULL DEFAULT 0,"
                        "error_message TEXT"
                        ");"),
         QStringLiteral("CREATE TABLE IF NOT EXISTS global_video_asset ("
@@ -643,6 +652,7 @@ bool GlobalDatabaseManager::createSchema(QSqlDatabase &db, QString *errorMessage
                        "embedded_metadata_text TEXT NOT NULL DEFAULT '',"
                        "source_text TEXT NOT NULL DEFAULT '',"
                        "error_message TEXT,"
+                       "sync_generation INTEGER NOT NULL DEFAULT 0,"
                        "last_synced_at TEXT NOT NULL DEFAULT '',"
                        "updated_at TEXT NOT NULL DEFAULT '',"
                        "FOREIGN KEY(project_uuid) REFERENCES project_registry(project_uuid) ON DELETE CASCADE"
@@ -668,6 +678,7 @@ bool GlobalDatabaseManager::createSchema(QSqlDatabase &db, QString *errorMessage
                        "normalized_date TEXT NOT NULL DEFAULT '',"
                        "date_anchor TEXT NOT NULL DEFAULT '',"
                        "is_available INTEGER NOT NULL DEFAULT 1,"
+                       "sync_generation INTEGER NOT NULL DEFAULT 0,"
                        "last_synced_at TEXT NOT NULL DEFAULT '',"
                        "updated_at TEXT NOT NULL DEFAULT '',"
                        "FOREIGN KEY(project_uuid) REFERENCES project_registry(project_uuid) ON DELETE CASCADE"
@@ -1001,6 +1012,60 @@ bool GlobalDatabaseManager::migrateToVersion13(QSqlDatabase &db, QString *errorM
         return false;
     }
     return setSchemaVersion(db, 13, errorMessage);
+}
+
+bool GlobalDatabaseManager::migrateToVersion14(QSqlDatabase &db, QString *errorMessage)
+{
+    if (!ensureCatalogGenerationSchemaCompatibility(db, errorMessage)) {
+        return false;
+    }
+    if (!executeBatch(db,
+                      {QStringLiteral("UPDATE global_video_asset SET sync_generation = 1 "
+                                      "WHERE sync_generation = 0;"),
+                       QStringLiteral("UPDATE global_folder_node SET sync_generation = 1 "
+                                      "WHERE sync_generation = 0;"),
+                       QStringLiteral("UPDATE project_registry SET active_sync_generation = 1 "
+                                      "WHERE active_sync_generation = 0 AND ("
+                                      "EXISTS (SELECT 1 FROM global_video_asset a "
+                                      "WHERE a.project_uuid = project_registry.project_uuid) OR "
+                                      "EXISTS (SELECT 1 FROM global_folder_node f "
+                                      "WHERE f.project_uuid = project_registry.project_uuid));")},
+                      errorMessage)) {
+        return false;
+    }
+    return setSchemaVersion(db, 14, errorMessage);
+}
+
+bool GlobalDatabaseManager::ensureCatalogGenerationSchemaCompatibility(
+    QSqlDatabase &db,
+    QString *errorMessage)
+{
+    if (!ensureColumns(db,
+                       QStringLiteral("project_registry"),
+                       {{QStringLiteral("active_sync_generation"),
+                         QStringLiteral("active_sync_generation INTEGER NOT NULL DEFAULT 0")}},
+                       errorMessage)
+        || !ensureColumns(db,
+                          QStringLiteral("global_video_asset"),
+                          {{QStringLiteral("sync_generation"),
+                            QStringLiteral("sync_generation INTEGER NOT NULL DEFAULT 0")}},
+                          errorMessage)
+        || !ensureColumns(db,
+                          QStringLiteral("global_folder_node"),
+                          {{QStringLiteral("sync_generation"),
+                            QStringLiteral("sync_generation INTEGER NOT NULL DEFAULT 0")}},
+                          errorMessage)) {
+        return false;
+    }
+    return executeBatch(
+        db,
+        {QStringLiteral("CREATE INDEX IF NOT EXISTS idx_global_video_project_generation "
+                        "ON global_video_asset(project_uuid, sync_generation);"),
+         QStringLiteral("CREATE INDEX IF NOT EXISTS idx_global_folder_project_generation "
+                        "ON global_folder_node(project_uuid, sync_generation);"),
+         QStringLiteral("CREATE INDEX IF NOT EXISTS idx_global_video_project_path "
+                        "ON global_video_asset(project_uuid, absolute_path COLLATE NOCASE);")},
+        errorMessage);
 }
 
 bool GlobalDatabaseManager::ensureCaptureTimeSchemaCompatibility(QSqlDatabase &db,

@@ -78,6 +78,60 @@ bool ensureColumns(QSqlDatabase &db,
     }
     return true;
 }
+
+QString createCatalogChangeTrigger(const QString &triggerName,
+                                   const QString &tableName,
+                                   const QString &eventName,
+                                   const QString &entityType,
+                                   const QString &entityId,
+                                   const QString &entityKey,
+                                   const QString &previousEntityKey,
+                                   const QString &sourceRootId,
+                                   const QString &previousSourceRootId,
+                                   int operation,
+                                   int changeMask,
+                                   const QString &condition = QStringLiteral("1"))
+{
+    auto statement = QStringLiteral(
+        "CREATE TRIGGER %1 AFTER %2 ON %3 WHEN %4 BEGIN "
+        "UPDATE catalog_change_state SET next_log_id = next_log_id + 1 WHERE singleton_id = 1; "
+        "INSERT INTO catalog_change_log "
+        "(log_id, entity_type, entity_id, entity_key, previous_entity_key, source_root_id, "
+        "previous_source_root_id, operation, change_mask, updated_at) "
+        "VALUES ((SELECT next_log_id FROM catalog_change_state WHERE singleton_id = 1), "
+        "%5, %6, %7, %8, %9, %10, %11, %12, CURRENT_TIMESTAMP) "
+        "ON CONFLICT(entity_type, entity_id) DO UPDATE SET "
+        "log_id = excluded.log_id, "
+        "entity_key = excluded.entity_key, "
+        "previous_entity_key = CASE "
+        "WHEN catalog_change_log.operation = 1 THEN catalog_change_log.previous_entity_key "
+        "WHEN catalog_change_log.previous_entity_key = '' THEN excluded.previous_entity_key "
+        "ELSE catalog_change_log.previous_entity_key END, "
+        "source_root_id = excluded.source_root_id, "
+        "previous_source_root_id = CASE "
+        "WHEN catalog_change_log.operation = 1 THEN catalog_change_log.previous_source_root_id "
+        "WHEN catalog_change_log.previous_source_root_id = 0 THEN excluded.previous_source_root_id "
+        "ELSE catalog_change_log.previous_source_root_id END, "
+        "operation = CASE "
+        "WHEN catalog_change_log.operation = 1 AND excluded.operation = 2 THEN 1 "
+        "WHEN catalog_change_log.operation = 3 AND excluded.operation = 1 THEN 2 "
+        "ELSE excluded.operation END, "
+        "change_mask = catalog_change_log.change_mask | excluded.change_mask, "
+        "updated_at = excluded.updated_at; END")
+                         .arg(triggerName)
+                         .arg(eventName)
+                         .arg(tableName)
+                         .arg(condition)
+                         .arg(entityType)
+                         .arg(entityId)
+                         .arg(entityKey)
+                         .arg(previousEntityKey)
+                         .arg(sourceRootId)
+                         .arg(previousSourceRootId)
+                         .arg(operation)
+                         .arg(changeMask);
+    return statement;
+}
 }
 
 DatabaseManager::DatabaseManager(QObject *parent)
@@ -277,6 +331,15 @@ bool DatabaseManager::initializeSchema(QSqlDatabase &db, bool databaseExistedBef
         }
         version = 7;
     } else if (!ensureJobHistorySchemaCompatibility(db, errorMessage)) {
+        return rollback();
+    }
+
+    if (version < 8) {
+        if (!migrateToVersion8(db, errorMessage)) {
+            return rollback();
+        }
+        version = 8;
+    } else if (!ensureCatalogChangeLogSchemaCompatibility(db, errorMessage)) {
         return rollback();
     }
 
@@ -1004,6 +1067,169 @@ bool DatabaseManager::ensureJobHistorySchemaCompatibility(QSqlDatabase &db,
                         {QStringLiteral(
                             "CREATE INDEX IF NOT EXISTS idx_job_updated_at ON job(updated_at DESC, id DESC)")},
                         errorMessage);
+}
+
+bool DatabaseManager::migrateToVersion8(QSqlDatabase &db, QString *errorMessage) const
+{
+    if (!ensureCatalogChangeLogSchemaCompatibility(db, errorMessage)) {
+        return false;
+    }
+    return setSchemaVersion(db, 8, errorMessage);
+}
+
+bool DatabaseManager::ensureCatalogChangeLogSchemaCompatibility(QSqlDatabase &db,
+                                                                 QString *errorMessage) const
+{
+    const QStringList schemaStatements = {
+        QStringLiteral(
+            "CREATE TABLE IF NOT EXISTS catalog_change_state ("
+            "singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),"
+            "next_log_id INTEGER NOT NULL DEFAULT 0,"
+            "requires_full_rebuild INTEGER NOT NULL DEFAULT 1,"
+            "pending_change_count INTEGER NOT NULL DEFAULT 0)"),
+        QStringLiteral(
+            "INSERT OR IGNORE INTO catalog_change_state "
+            "(singleton_id, next_log_id, requires_full_rebuild, pending_change_count) VALUES (1, 0, 1, 0)"),
+        QStringLiteral(
+            "CREATE TABLE IF NOT EXISTS catalog_change_log ("
+            "log_id INTEGER PRIMARY KEY,"
+            "entity_type INTEGER NOT NULL,"
+            "entity_id INTEGER NOT NULL,"
+            "entity_key TEXT NOT NULL DEFAULT '',"
+            "previous_entity_key TEXT NOT NULL DEFAULT '',"
+            "source_root_id INTEGER NOT NULL DEFAULT 0,"
+            "previous_source_root_id INTEGER NOT NULL DEFAULT 0,"
+            "operation INTEGER NOT NULL,"
+            "change_mask INTEGER NOT NULL DEFAULT 0,"
+            "updated_at TEXT NOT NULL DEFAULT '',"
+            "UNIQUE(entity_type, entity_id))"),
+        QStringLiteral(
+            "CREATE INDEX IF NOT EXISTS idx_catalog_change_log_watermark "
+            "ON catalog_change_log(log_id)"),
+        QStringLiteral(
+            "CREATE INDEX IF NOT EXISTS idx_catalog_change_log_entity "
+            "ON catalog_change_log(entity_type, entity_id)"),
+        QStringLiteral("DROP TRIGGER IF EXISTS catalog_change_count_insert"),
+        QStringLiteral("DROP TRIGGER IF EXISTS catalog_change_count_delete"),
+        QStringLiteral(
+            "CREATE TRIGGER catalog_change_count_insert AFTER INSERT ON catalog_change_log BEGIN "
+            "UPDATE catalog_change_state SET "
+            "pending_change_count = pending_change_count + 1, "
+            "requires_full_rebuild = CASE WHEN pending_change_count + 1 > 100000 "
+            "THEN 1 ELSE requires_full_rebuild END WHERE singleton_id = 1; END"),
+        QStringLiteral(
+            "CREATE TRIGGER catalog_change_count_delete AFTER DELETE ON catalog_change_log BEGIN "
+            "UPDATE catalog_change_state SET pending_change_count = MAX(0, pending_change_count - 1) "
+            "WHERE singleton_id = 1; END")
+    };
+    if (!executeBatch(db, schemaStatements, errorMessage)) {
+        return false;
+    }
+
+    const QStringList triggerNames = {
+        QStringLiteral("catalog_change_asset_insert"),
+        QStringLiteral("catalog_change_asset_update"),
+        QStringLiteral("catalog_change_asset_delete"),
+        QStringLiteral("catalog_change_folder_insert"),
+        QStringLiteral("catalog_change_folder_update"),
+        QStringLiteral("catalog_change_folder_delete"),
+        QStringLiteral("catalog_change_media_insert"),
+        QStringLiteral("catalog_change_media_update"),
+        QStringLiteral("catalog_change_media_delete"),
+        QStringLiteral("catalog_change_embedded_insert"),
+        QStringLiteral("catalog_change_embedded_update"),
+        QStringLiteral("catalog_change_embedded_delete"),
+        QStringLiteral("catalog_change_thumbnail_insert"),
+        QStringLiteral("catalog_change_thumbnail_update"),
+        QStringLiteral("catalog_change_thumbnail_delete")
+    };
+    QStringList triggerStatements;
+    for (const auto &triggerName : triggerNames) {
+        triggerStatements.append(QStringLiteral("DROP TRIGGER IF EXISTS %1").arg(triggerName));
+    }
+
+    constexpr int Added = 1;
+    constexpr int Updated = 2;
+    constexpr int Removed = 3;
+    constexpr int AssetCore = 1;
+    constexpr int AssetMetadata = 2;
+    constexpr int Thumbnail = 4;
+    constexpr int Folder = 8;
+    triggerStatements.append({
+        createCatalogChangeTrigger(QStringLiteral("catalog_change_asset_insert"),
+                                   QStringLiteral("asset_file"), QStringLiteral("INSERT"),
+                                   QStringLiteral("1"), QStringLiteral("NEW.id"),
+                                   QStringLiteral("NEW.absolute_path"), QStringLiteral("''"),
+                                   QStringLiteral("NEW.source_root_id"), QStringLiteral("0"),
+                                   Added, AssetCore),
+        createCatalogChangeTrigger(QStringLiteral("catalog_change_asset_update"),
+                                   QStringLiteral("asset_file"), QStringLiteral("UPDATE"),
+                                   QStringLiteral("1"), QStringLiteral("NEW.id"),
+                                   QStringLiteral("NEW.absolute_path"), QStringLiteral("OLD.absolute_path"),
+                                   QStringLiteral("NEW.source_root_id"), QStringLiteral("OLD.source_root_id"),
+                                   Updated, AssetCore),
+        createCatalogChangeTrigger(QStringLiteral("catalog_change_asset_delete"),
+                                   QStringLiteral("asset_file"), QStringLiteral("DELETE"),
+                                   QStringLiteral("1"), QStringLiteral("OLD.id"),
+                                   QStringLiteral("OLD.absolute_path"), QStringLiteral("OLD.absolute_path"),
+                                   QStringLiteral("OLD.source_root_id"), QStringLiteral("OLD.source_root_id"),
+                                   Removed, AssetCore),
+        createCatalogChangeTrigger(QStringLiteral("catalog_change_folder_insert"),
+                                   QStringLiteral("folder_node"), QStringLiteral("INSERT"),
+                                   QStringLiteral("2"), QStringLiteral("NEW.id"),
+                                   QStringLiteral("NEW.relative_path"), QStringLiteral("''"),
+                                   QStringLiteral("NEW.source_root_id"), QStringLiteral("0"),
+                                   Added, Folder),
+        createCatalogChangeTrigger(QStringLiteral("catalog_change_folder_update"),
+                                   QStringLiteral("folder_node"), QStringLiteral("UPDATE"),
+                                   QStringLiteral("2"), QStringLiteral("NEW.id"),
+                                   QStringLiteral("NEW.relative_path"), QStringLiteral("OLD.relative_path"),
+                                   QStringLiteral("NEW.source_root_id"), QStringLiteral("OLD.source_root_id"),
+                                   Updated, Folder),
+        createCatalogChangeTrigger(QStringLiteral("catalog_change_folder_delete"),
+                                   QStringLiteral("folder_node"), QStringLiteral("DELETE"),
+                                   QStringLiteral("2"), QStringLiteral("OLD.id"),
+                                   QStringLiteral("OLD.relative_path"), QStringLiteral("OLD.relative_path"),
+                                   QStringLiteral("OLD.source_root_id"), QStringLiteral("OLD.source_root_id"),
+                                   Removed, Folder)
+    });
+
+    const auto appendAssetChildTriggers = [&triggerStatements](const QString &prefix,
+                                                                const QString &tableName,
+                                                                int changeMask) {
+        const auto keyForNew = QStringLiteral(
+            "COALESCE((SELECT absolute_path FROM asset_file WHERE id = NEW.asset_id), '')");
+        const auto keyForOld = QStringLiteral(
+            "COALESCE((SELECT absolute_path FROM asset_file WHERE id = OLD.asset_id), '')");
+        const auto sourceForNew = QStringLiteral(
+            "COALESCE((SELECT source_root_id FROM asset_file WHERE id = NEW.asset_id), 0)");
+        const auto sourceForOld = QStringLiteral(
+            "COALESCE((SELECT source_root_id FROM asset_file WHERE id = OLD.asset_id), 0)");
+        const auto existsForNew = QStringLiteral(
+            "EXISTS(SELECT 1 FROM asset_file WHERE id = NEW.asset_id)");
+        const auto existsForOld = QStringLiteral(
+            "EXISTS(SELECT 1 FROM asset_file WHERE id = OLD.asset_id)");
+        triggerStatements.append(createCatalogChangeTrigger(
+            QStringLiteral("catalog_change_%1_insert").arg(prefix), tableName, QStringLiteral("INSERT"),
+            QStringLiteral("1"), QStringLiteral("NEW.asset_id"), keyForNew, keyForNew,
+            sourceForNew, sourceForNew, 2, changeMask, existsForNew));
+        triggerStatements.append(createCatalogChangeTrigger(
+            QStringLiteral("catalog_change_%1_update").arg(prefix), tableName, QStringLiteral("UPDATE"),
+            QStringLiteral("1"), QStringLiteral("NEW.asset_id"), keyForNew, keyForNew,
+            sourceForNew, sourceForNew, 2, changeMask, existsForNew));
+        triggerStatements.append(createCatalogChangeTrigger(
+            QStringLiteral("catalog_change_%1_delete").arg(prefix), tableName, QStringLiteral("DELETE"),
+            QStringLiteral("1"), QStringLiteral("OLD.asset_id"), keyForOld, keyForOld,
+            sourceForOld, sourceForOld, 2, changeMask, existsForOld));
+    };
+    appendAssetChildTriggers(QStringLiteral("media"), QStringLiteral("media_metadata"), AssetMetadata);
+    appendAssetChildTriggers(QStringLiteral("embedded"), QStringLiteral("embedded_metadata"), AssetMetadata);
+    appendAssetChildTriggers(QStringLiteral("thumbnail"), QStringLiteral("thumbnail"), Thumbnail);
+    triggerStatements.append(QStringLiteral(
+        "UPDATE catalog_change_state SET pending_change_count = (SELECT COUNT(*) FROM catalog_change_log), "
+        "next_log_id = MAX(next_log_id, COALESCE((SELECT MAX(log_id) FROM catalog_change_log), 0)) "
+        "WHERE singleton_id = 1"));
+    return executeBatch(db, triggerStatements, errorMessage);
 }
 
 int DatabaseManager::currentSchemaVersion(QSqlDatabase &db) const

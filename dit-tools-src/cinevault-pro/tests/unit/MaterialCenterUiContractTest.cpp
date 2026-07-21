@@ -560,6 +560,28 @@ private slots:
                        QStringLiteral("m_updateService->beginStartupFlow()")});
     }
 
+    void shutdownBarrierAndProjectTransitionRemainRecoverable()
+    {
+        const auto contextSource = sourceFile(QStringLiteral("src/app/AppContext.cpp"));
+        const auto projectHeader = sourceFile(QStringLiteral("src/application/ProjectService.h"));
+        const auto projectSource = sourceFile(QStringLiteral("src/application/ProjectService.cpp"));
+        const auto mainSource = sourceFile(QStringLiteral("src/app/main.cpp"));
+        const auto bootstrapSource = sourceFile(QStringLiteral("src/app/AppBootstrap.cpp"));
+        QVERIFY2(!contextSource.isEmpty() && !projectHeader.isEmpty()
+                     && !projectSource.isEmpty() && !mainSource.isEmpty()
+                     && !bootstrapSource.isEmpty(),
+                 "无法读取退出屏障契约源码");
+
+        QVERIFY(projectHeader.contains(QStringLiteral("projectAboutToChange")));
+        QVERIFY(projectSource.contains(QStringLiteral("emit projectAboutToChange")));
+        QVERIFY(contextSource.contains(QStringLiteral("shutdown-recovery.json")));
+        QVERIFY(contextSource.contains(QStringLiteral("shutdown_barrier_timeout")));
+        QVERIFY(contextSource.contains(QStringLiteral("requestCancelAll()")));
+        QVERIFY(contextSource.contains(QStringLiteral("m_indexingWorkCoordinator->shutdown()")));
+        QVERIFY(mainSource.contains(QStringLiteral("process_exit reason=event_loop_return")));
+        QVERIFY(bootstrapSource.contains(QStringLiteral("previous_exit reason=incomplete_shutdown")));
+    }
+
     void sourceImportAcceptsTypedNetworkPaths()
     {
         const auto mainQml = sourceFile(QStringLiteral("src/ui/qml/Main.qml"));

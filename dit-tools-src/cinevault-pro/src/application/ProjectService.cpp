@@ -359,10 +359,12 @@ bool ProjectService::openProject(const QString &projectPath, QString *errorMessa
     }
 
     const auto previousProject = m_currentProject;
+    emit projectAboutToChange(previousProject.databasePath, databasePath);
     const auto restorePreviousProject = [&]() {
         m_databaseManager->closeProjectDatabase();
         m_currentProject = {};
         if (previousProject.databasePath.isEmpty()) {
+            emit projectChanged();
             return;
         }
         QString restoreError;
@@ -371,6 +373,7 @@ bool ProjectService::openProject(const QString &projectPath, QString *errorMessa
         } else if (errorMessage) {
             *errorMessage += QStringLiteral("；恢复原项目失败：%1").arg(restoreError);
         }
+        emit projectChanged();
     };
 
     if (!m_databaseManager->openProjectDatabase(databasePath, errorMessage)) {
@@ -393,6 +396,7 @@ bool ProjectService::openProject(const QString &projectPath, QString *errorMessa
 
 void ProjectService::closeProject()
 {
+    emit projectAboutToChange(m_currentProject.databasePath, QString());
     if (!m_currentProject.databasePath.isEmpty()) {
         Logger::info(QStringLiteral("项目已关闭：%1").arg(m_currentProject.databasePath));
     }

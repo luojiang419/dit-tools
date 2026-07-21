@@ -131,6 +131,9 @@ try {
     $exifToolCacheRoot = Join-Path $env:LOCALAPPDATA "CineVault\BuildCache\exiftool-v1"
     $exifToolPrepareScript = Join-Path $projectRoot "cmake\PrepareExifToolDependency.cmake"
     Invoke-VcVarsCommand "cmake -DOUTPUT_ROOT=`"$exifToolCacheRoot`" -P `"$exifToolPrepareScript`""
+    $libRawCacheRoot = Join-Path $env:LOCALAPPDATA "CineVault\BuildCache\libraw-v1"
+    $libRawPrepareScript = Join-Path $projectRoot "cmake\PrepareRawPreviewDependencies.cmake"
+    Invoke-VcVarsCommand "cmake -DOUTPUT_ROOT=`"$libRawCacheRoot`" -P `"$libRawPrepareScript`""
     if ($RealWorkflow -or $EnableFfmpeg) {
         $localSearchCacheRoot = Join-Path $env:LOCALAPPDATA "CineVault\BuildCache\local-search-v1"
         $localSearchPrepareScript = Join-Path $projectRoot "cmake\PrepareLocalSearchDependencies.cmake"
@@ -195,6 +198,42 @@ if ($null -eq $exePath) {
 
 Copy-Item $exePath -Destination $stagingDir -Force
 $deployedExe = Join-Path $stagingDir "CineVault.exe"
+
+$rawWorkerSource = Join-Path $buildDir "CineVaultRawWorker.exe"
+if (-not (Test-Path -LiteralPath $rawWorkerSource -PathType Leaf)) {
+    throw "CineVaultRawWorker.exe is missing from the build directory."
+}
+Copy-Item -LiteralPath $rawWorkerSource -Destination $stagingDir -Force
+
+$libRawSource = Join-Path $buildDir "libraw.dll"
+$libRawLicenseSource = Join-Path $buildDir "licenses\libraw"
+if (Test-Path -LiteralPath $libRawSource -PathType Leaf) {
+    if (-not (Test-Path -LiteralPath (Join-Path $libRawLicenseSource "LICENSE.CDDL") -PathType Leaf)) {
+        throw "LibRaw runtime is present but its audited CDDL license payload is missing."
+    }
+    Copy-Item -LiteralPath $libRawSource -Destination $stagingDir -Force
+    $libRawLicenseParent = Join-Path $stagingDir "licenses"
+    New-Item -ItemType Directory -Force -Path $libRawLicenseParent | Out-Null
+    Copy-Item -LiteralPath $libRawLicenseSource -Destination $libRawLicenseParent -Recurse -Force
+} elseif ($RealWorkflow -or $EnableFfmpeg) {
+    throw "LibRaw runtime is missing from the build directory."
+}
+
+$gprRuntimeSource = Join-Path $buildDir "gpr\gpr_tools.exe"
+$gprLicenseSource = Join-Path $buildDir "licenses\gpr-sdk"
+if (Test-Path -LiteralPath $gprRuntimeSource -PathType Leaf) {
+    if (-not (Test-Path -LiteralPath (Join-Path $gprLicenseSource "LICENSE-MIT") -PathType Leaf)) {
+        throw "GoPro GPR SDK runtime is present but its audited MIT license payload is missing."
+    }
+    $gprTarget = Join-Path $stagingDir "gpr"
+    New-Item -ItemType Directory -Force -Path $gprTarget | Out-Null
+    Copy-Item -LiteralPath $gprRuntimeSource -Destination $gprTarget -Force
+    $gprLicenseParent = Join-Path $stagingDir "licenses"
+    New-Item -ItemType Directory -Force -Path $gprLicenseParent | Out-Null
+    Copy-Item -LiteralPath $gprLicenseSource -Destination $gprLicenseParent -Recurse -Force
+} elseif ($RealWorkflow -or $EnableFfmpeg) {
+    throw "GoPro GPR SDK runtime is missing from the build directory."
+}
 
 $onnxRuntimeSource = Join-Path $buildDir "onnxruntime.dll"
 $modelsSource = Join-Path $buildDir "data\models"

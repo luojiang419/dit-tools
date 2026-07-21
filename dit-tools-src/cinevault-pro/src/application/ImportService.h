@@ -3,6 +3,7 @@
 #include "domain/Entities.h"
 
 #include <QObject>
+#include <QStringList>
 
 class DatabaseManager;
 class JobService;
@@ -18,6 +19,11 @@ public:
     bool rescanSourceRoot(qint64 sourceRootId,
                           const QString &reason,
                           QString *errorMessage = nullptr);
+    bool rescanSourceDirectories(qint64 sourceRootId,
+                                 const QStringList &changedPaths,
+                                 bool forceFullScan,
+                                 const QString &reason,
+                                 QString *errorMessage = nullptr);
     QVector<SourceRoot> sourceRoots() const;
     QString lastMessage() const;
 
@@ -41,5 +47,6 @@ private:
     bool startSourceScan(const SourceRoot &sourceRoot,
                          const QString &titlePrefix,
                          const QString &detail,
+                         const QStringList &dirtyDirectoryPaths = {},
                          QString *errorMessage = nullptr);
 };

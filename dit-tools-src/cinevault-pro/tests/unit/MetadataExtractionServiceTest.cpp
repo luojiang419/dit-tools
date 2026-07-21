@@ -1,6 +1,7 @@
 #include "application/MetadataExtractionService.h"
 #include "core/jobs/JobEngine.h"
 #include "infrastructure/db/DatabaseManager.h"
+#include "infrastructure/monitoring/PerformanceTelemetry.h"
 
 #include <QtTest>
 
@@ -105,6 +106,78 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!jobEngine.jobs().isEmpty()
                                      && jobEngine.jobs().first().state == JobState::Completed,
                                  5000);
+        databaseManager.closeProjectDatabase();
+    }
+
+    void extractionPaginationKeepsAssetQueueBounded()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        const auto sourcePath = tempDir.filePath(QStringLiteral("paged-source"));
+        QVERIFY(QDir().mkpath(sourcePath));
+
+        DatabaseManager databaseManager;
+        QString errorMessage;
+        const auto databasePath = tempDir.filePath(QStringLiteral("paged-project.cvdb"));
+        QVERIFY2(databaseManager.openProjectDatabase(databasePath, &errorMessage), qPrintable(errorMessage));
+        auto db = databaseManager.database();
+
+        QSqlQuery source(db);
+        source.prepare(QStringLiteral(
+            "INSERT INTO source_root (name, path, status, total_files, total_folders, total_size_bytes, "
+            "video_count, audio_count, image_count, other_count, warning_count, scan_version, created_at, updated_at) "
+            "VALUES ('PagedCamera', ?, 'ok', 129, 0, 0, 0, 0, 129, 0, 0, 5, ?, ?)"));
+        source.addBindValue(sourcePath);
+        source.addBindValue(QStringLiteral("2026-07-21T12:00:00"));
+        source.addBindValue(QStringLiteral("2026-07-21T12:00:00"));
+        QVERIFY2(source.exec(), qPrintable(source.lastError().text()));
+        const auto sourceRootId = source.lastInsertId().toLongLong();
+
+        QImage image(4, 3, QImage::Format_RGB32);
+        image.fill(QColor(QStringLiteral("#3b82f6")));
+        QSqlQuery asset(db);
+        asset.prepare(QStringLiteral(
+            "INSERT INTO asset_file (source_root_id, name, extension, absolute_path, relative_path, parent_path, "
+            "path_key, asset_type, size_bytes, modified_at, is_readable, created_at) "
+            "VALUES (?, ?, 'jpg', ?, ?, ?, ?, ?, ?, ?, 1, ?)"));
+        for (int index = 0; index < 129; ++index) {
+            const auto fileName = QStringLiteral("paged-%1.jpg").arg(index, 3, 10, QLatin1Char('0'));
+            const auto imagePath = QDir(sourcePath).filePath(fileName);
+            QVERIFY(image.save(imagePath, "JPEG"));
+            const QFileInfo imageInfo(imagePath);
+            asset.addBindValue(sourceRootId);
+            asset.addBindValue(fileName);
+            asset.addBindValue(imageInfo.absoluteFilePath());
+            asset.addBindValue(fileName);
+            asset.addBindValue(imageInfo.absolutePath());
+            asset.addBindValue(imageInfo.absoluteFilePath().toCaseFolded());
+            asset.addBindValue(static_cast<int>(AssetType::Image));
+            asset.addBindValue(imageInfo.size());
+            asset.addBindValue(imageInfo.lastModified().toString(Qt::ISODateWithMs));
+            asset.addBindValue(QStringLiteral("2026-07-21T12:00:00"));
+            QVERIFY2(asset.exec(), qPrintable(asset.lastError().text()));
+            asset.finish();
+        }
+
+        ExifToolAdapter adapter;
+        QVERIFY2(adapter.isAvailable(), qPrintable(adapter.unavailableReason()));
+        auto &telemetry = PerformanceTelemetry::global();
+        telemetry.resetForTesting();
+        JobEngine jobEngine(&databaseManager);
+        MetadataExtractionService service(&databaseManager, &jobEngine, &adapter);
+        QSignalSpy changedSpy(&service, &MetadataExtractionService::metadataCatalogChanged);
+        service.startForSourceRoot(sourceRootId);
+        QVERIFY2(changedSpy.wait(60000), "分页元数据任务未在超时前完成");
+
+        QSqlQuery metadataCount(db);
+        QVERIFY(metadataCount.exec(QStringLiteral("SELECT COUNT(*) FROM embedded_metadata"))
+                && metadataCount.next());
+        QCOMPARE(metadataCount.value(0).toLongLong(), qint64{129});
+        metadataCount.finish();
+        const auto peakDepth = telemetry.snapshot()
+            .value(QStringLiteral("peak_queue_depths")).toObject()
+            .value(QStringLiteral("metadata.exif_assets")).toInteger();
+        QCOMPARE(peakDepth, qint64{128});
         databaseManager.closeProjectDatabase();
     }
 };

@@ -1,10 +1,14 @@
 #include "core/scan/ScanEngine.h"
 
+#include "application/IndexingWorkCoordinator.h"
+
 #include "core/jobs/JobEngine.h"
 #include "core/media/MediaProbeEngine.h"
 #include "core/scan/FileTypeService.h"
+#include "core/scan/ScanPathPolicy.h"
 #include "core/thumbnail/ThumbnailEngine.h"
 #include "infrastructure/db/DatabaseManager.h"
+#include "infrastructure/monitoring/PerformanceTelemetry.h"
 #include "shared/FolderPathMetadata.h"
 #include "shared/ScopedBackgroundThreadPriority.h"
 
@@ -14,7 +18,6 @@
 #include <QDir>
 #include <QDirIterator>
 #include <QElapsedTimer>
-#include <QFile>
 #include <QFileInfo>
 #include <QHash>
 #include <QMetaObject>
@@ -24,6 +27,7 @@
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QStringList>
+#include <QStorageInfo>
 #include <QThread>
 #include <QVector>
 
@@ -35,11 +39,8 @@
 #include <utility>
 
 namespace {
-bool canOpenFileForRead(const QString &path)
-{
-    QFile file(path);
-    return file.open(QIODevice::ReadOnly);
-}
+constexpr qsizetype ScanEnumerationBatchSize = 256;
+constexpr qint64 MinimumProjectVolumeFreeBytes = 1024LL * 1024LL * 1024LL;
 
 QString toIsoString(const std::filesystem::file_time_type &fileTime)
 {
@@ -116,8 +117,13 @@ ScanEngine::ScanEngine(DatabaseManager *databaseManager, JobEngine *jobEngine, M
 {
 }
 
-void ScanEngine::startScan(const SourceRoot &sourceRoot, qint64 jobId)
+void ScanEngine::startScan(const SourceRoot &sourceRoot,
+                           qint64 jobId,
+                           const QStringList &dirtyDirectoryPaths)
 {
+    const auto workGeneration = m_workCoordinator
+        ? m_workCoordinator->currentGeneration()
+        : quint64{0};
     const auto projectDatabasePath = m_databaseManager
         ? QFileInfo(m_databaseManager->databaseFilePath()).absoluteFilePath()
         : QString();
@@ -132,7 +138,11 @@ void ScanEngine::startScan(const SourceRoot &sourceRoot, qint64 jobId)
     }
 
     QString sessionError;
-    const auto sessionId = prepareSession(sourceRoot, &sessionError);
+    QStringList dirtyRelativePaths;
+    const auto sessionId = prepareSession(sourceRoot,
+                                          dirtyDirectoryPaths,
+                                          &dirtyRelativePaths,
+                                          &sessionError);
     if (sessionId <= 0) {
         const auto message = sessionError.isEmpty()
             ? QStringLiteral("创建可恢复扫描会话失败")
@@ -150,6 +160,7 @@ void ScanEngine::startScan(const SourceRoot &sourceRoot, qint64 jobId)
                                    .arg(sourceRoot.id);
     {
         QMutexLocker locker(&m_activeScansMutex);
+        m_cancelledSourceRoots.remove(sourceRoot.id);
         if (m_activeScans.contains(activeScanKey)) {
             const auto message = QStringLiteral("该素材源已有扫描任务正在运行");
             if (m_jobEngine) {
@@ -162,13 +173,32 @@ void ScanEngine::startScan(const SourceRoot &sourceRoot, qint64 jobId)
         m_activeScans.insert(activeScanKey);
     }
 
-    auto future = QtConcurrent::run([this, sourceRoot, jobId, projectDatabasePath, activeScanKey, sessionId]() {
-        runScan(sourceRoot, jobId, projectDatabasePath, activeScanKey, sessionId);
+    const auto fullScan = dirtyDirectoryPaths.isEmpty();
+    auto future = QtConcurrent::run([this,
+                                     sourceRoot,
+                                     jobId,
+                                     projectDatabasePath,
+                                     activeScanKey,
+                                     sessionId,
+                                     workGeneration,
+                                     fullScan,
+                                     dirtyRelativePaths]() {
+        runScan(sourceRoot,
+                jobId,
+                projectDatabasePath,
+                activeScanKey,
+                sessionId,
+                workGeneration,
+                fullScan,
+                dirtyRelativePaths);
     });
     m_scanFutures.addFuture(future);
 }
 
-qint64 ScanEngine::prepareSession(const SourceRoot &sourceRoot, QString *errorMessage)
+qint64 ScanEngine::prepareSession(const SourceRoot &sourceRoot,
+                                  const QStringList &dirtyDirectoryPaths,
+                                  QStringList *dirtyRelativePaths,
+                                  QString *errorMessage)
 {
     if (!m_databaseManager || !m_databaseManager->hasOpenProject()) {
         if (errorMessage) {
@@ -240,7 +270,14 @@ qint64 ScanEngine::prepareSession(const SourceRoot &sourceRoot, QString *errorMe
     }
     const auto sessionId = createSession.lastInsertId().toLongLong();
     const auto rootFolderName = FolderPathMetadata::folderName(sourceRoot.path, sourceRoot.name);
-    const auto rootFolder = makeFolderNode(sourceRoot, rootFolderName, sourceRoot.path, QString());
+    QStringList scanDirectories = dirtyDirectoryPaths;
+    if (scanDirectories.isEmpty()) {
+        scanDirectories.append(sourceRoot.path);
+    }
+    QSet<QString> seenRelativePaths;
+    if (dirtyRelativePaths) {
+        dirtyRelativePaths->clear();
+    }
 
     QSqlQuery stageRoot(db);
     stageRoot.prepare(QStringLiteral(
@@ -248,38 +285,67 @@ qint64 ScanEngine::prepareSession(const SourceRoot &sourceRoot, QString *errorMe
         "(session_id, path_key, name, absolute_path, relative_path, parent_relative_path, depth, "
         "file_count, direct_file_count, recursive_file_count, normalized_date, date_anchor, created_at, updated_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?)"));
-    stageRoot.addBindValue(sessionId);
-    stageRoot.addBindValue(rootFolder.pathKey);
-    stageRoot.addBindValue(rootFolder.name);
-    stageRoot.addBindValue(rootFolder.absolutePath);
-    stageRoot.addBindValue(rootFolder.relativePath);
-    stageRoot.addBindValue(rootFolder.parentRelativePath);
-    stageRoot.addBindValue(rootFolder.depth);
-    stageRoot.addBindValue(rootFolder.normalizedDate);
-    stageRoot.addBindValue(rootFolder.dateAnchor);
-    stageRoot.addBindValue(now);
-    stageRoot.addBindValue(now);
-    if (!stageRoot.exec()) {
-        if (errorMessage) {
-            *errorMessage = stageRoot.lastError().text();
-        }
-        rollback();
-        return 0;
-    }
-
     QSqlQuery rootWork(db);
     rootWork.prepare(QStringLiteral(
         "INSERT INTO scan_work_item "
         "(session_id, absolute_path, relative_path, path_key, depth, state, created_at, updated_at) "
-        "VALUES (?, ?, '', ?, 0, 'pending', ?, ?)"));
-    rootWork.addBindValue(sessionId);
-    rootWork.addBindValue(sourceRoot.path);
-    rootWork.addBindValue(rootFolder.pathKey);
-    rootWork.addBindValue(now);
-    rootWork.addBindValue(now);
-    if (!rootWork.exec()) {
+        "VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)"));
+    for (const auto &directoryPath : std::as_const(scanDirectories)) {
+        const auto absolutePath = QFileInfo(directoryPath).absoluteFilePath();
+        const auto relativePath = FolderPathMetadata::normalizeRelativePath(
+            FolderPathMetadata::relativePathFromRoot(sourceRoot.path, absolutePath));
+        const auto relativeKey = relativePath.toCaseFolded();
+        if (!ScanPathPolicy::isPathInside(absolutePath, sourceRoot.path)
+            || seenRelativePaths.contains(relativeKey)) {
+            continue;
+        }
+        seenRelativePaths.insert(relativeKey);
+        if (dirtyRelativePaths) {
+            dirtyRelativePaths->append(relativePath);
+        }
+        const auto folder = makeFolderNode(sourceRoot,
+                                           rootFolderName,
+                                           absolutePath,
+                                           relativePath);
+        stageRoot.addBindValue(sessionId);
+        stageRoot.addBindValue(folder.pathKey);
+        stageRoot.addBindValue(folder.name);
+        stageRoot.addBindValue(folder.absolutePath);
+        stageRoot.addBindValue(folder.relativePath);
+        stageRoot.addBindValue(folder.parentRelativePath);
+        stageRoot.addBindValue(folder.depth);
+        stageRoot.addBindValue(folder.normalizedDate);
+        stageRoot.addBindValue(folder.dateAnchor);
+        stageRoot.addBindValue(now);
+        stageRoot.addBindValue(now);
+        if (!stageRoot.exec()) {
+            if (errorMessage) {
+                *errorMessage = stageRoot.lastError().text();
+            }
+            rollback();
+            return 0;
+        }
+        stageRoot.finish();
+
+        rootWork.addBindValue(sessionId);
+        rootWork.addBindValue(folder.absolutePath);
+        rootWork.addBindValue(folder.relativePath);
+        rootWork.addBindValue(folder.pathKey);
+        rootWork.addBindValue(folder.depth);
+        rootWork.addBindValue(now);
+        rootWork.addBindValue(now);
+        if (!rootWork.exec()) {
+            if (errorMessage) {
+                *errorMessage = rootWork.lastError().text();
+            }
+            rollback();
+            return 0;
+        }
+        rootWork.finish();
+    }
+    if (seenRelativePaths.isEmpty()) {
         if (errorMessage) {
-            *errorMessage = rootWork.lastError().text();
+            *errorMessage = QStringLiteral("没有可扫描的变化目录");
         }
         rollback();
         return 0;
@@ -299,26 +365,62 @@ void ScanEngine::waitForIdle()
     m_scanFutures.waitForFinished();
 }
 
+void ScanEngine::setWorkCoordinator(IndexingWorkCoordinator *workCoordinator)
+{
+    m_workCoordinator = workCoordinator;
+}
+
+void ScanEngine::requestCancel(qint64 sourceRootId)
+{
+    if (sourceRootId <= 0) {
+        return;
+    }
+    QMutexLocker locker(&m_activeScansMutex);
+    m_cancelledSourceRoots.insert(sourceRootId);
+}
+
+void ScanEngine::requestCancelAll()
+{
+    QMutexLocker locker(&m_activeScansMutex);
+    for (const auto &activeScanKey : std::as_const(m_activeScans)) {
+        bool ok = false;
+        const auto sourceRootId = activeScanKey.section(QLatin1Char('|'), -1).toLongLong(&ok);
+        if (ok && sourceRootId > 0) {
+            m_cancelledSourceRoots.insert(sourceRootId);
+        }
+    }
+}
+
 void ScanEngine::setFailureAfterEntriesForTesting(qint64 entryCount)
 {
     m_failureAfterEntries.store(entryCount);
 }
 
-void ScanEngine::releaseActiveScan(const QString &activeScanKey)
+void ScanEngine::releaseActiveScan(const QString &activeScanKey, qint64 sourceRootId)
 {
     QMutexLocker locker(&m_activeScansMutex);
     m_activeScans.remove(activeScanKey);
+    m_cancelledSourceRoots.remove(sourceRootId);
+}
+
+bool ScanEngine::isCancellationRequested(qint64 sourceRootId)
+{
+    QMutexLocker locker(&m_activeScansMutex);
+    return m_cancelledSourceRoots.contains(sourceRootId);
 }
 
 void ScanEngine::runScan(SourceRoot sourceRoot,
                          qint64 jobId,
                          const QString &projectDatabasePath,
                          const QString &activeScanKey,
-                         qint64 sessionId)
+                         qint64 sessionId,
+                         quint64 workGeneration,
+                         bool fullScan,
+                         QStringList dirtyRelativePaths)
 {
     const ScopedBackgroundThreadPriority backgroundPriority;
-    const auto activeScanGuard = qScopeGuard([this, activeScanKey]() {
-        releaseActiveScan(activeScanKey);
+    const auto activeScanGuard = qScopeGuard([this, activeScanKey, sourceRoot]() {
+        releaseActiveScan(activeScanKey, sourceRoot.id);
     });
     const auto connectionName = QStringLiteral("scan_%1_%2").arg(sourceRoot.id).arg(reinterpret_cast<quintptr>(QThread::currentThreadId()));
     QString errorMessage;
@@ -343,7 +445,14 @@ void ScanEngine::runScan(SourceRoot sourceRoot,
     }
 
     if (sessionId > 0) {
-        runResumableScan(sourceRoot, jobId, projectDatabasePath, sessionId, db);
+        runResumableScan(sourceRoot,
+                         jobId,
+                         projectDatabasePath,
+                         sessionId,
+                         db,
+                         workGeneration,
+                         fullScan,
+                         dirtyRelativePaths);
         db.close();
         db = QSqlDatabase();
         m_databaseManager->closeThreadConnection(connectionName);
@@ -680,8 +789,7 @@ void ScanEngine::runScan(SourceRoot sourceRoot,
                 if (metadataError) {
                     ++batch.warningCount;
                 }
-                file.readable = QFileInfo(absolutePath).isReadable()
-                    && canOpenFileForRead(absolutePath);
+                file.readable = QFileInfo(absolutePath).isReadable();
                 files.append(file);
 
                 const auto parentRelativePath = FolderPathMetadata::parentRelativePath(file.relativePath);
@@ -791,8 +899,17 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
                                   qint64 jobId,
                                   const QString &projectDatabasePath,
                                   qint64 sessionId,
-                                  QSqlDatabase &db)
+                                  QSqlDatabase &db,
+                                  quint64 workGeneration,
+                                  bool fullScan,
+                                  const QStringList &dirtyRelativePaths)
 {
+    auto &telemetry = PerformanceTelemetry::global();
+    const auto scanStartedAtMs = telemetry.beginStage(
+        QStringLiteral("scan"),
+        QStringLiteral("resumable_scan"),
+        {{QStringLiteral("source_root_id"), sourceRoot.id},
+         {QStringLiteral("session_id"), sessionId}});
     QString errorMessage;
     qint64 reportedProgress = 0;
     QElapsedTimer progressTimer;
@@ -913,7 +1030,51 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
         int depth = 0;
     };
 
+    QElapsedTimer healthCheckTimer;
+    healthCheckTimer.start();
+    qint64 entriesSinceHealthCheck = 0;
+    auto checkScanHealth = [&](bool force) {
+        if (isCancellationRequested(sourceRoot.id)) {
+            throw std::runtime_error("扫描已由用户取消，恢复点已保存");
+        }
+        if (!force && entriesSinceHealthCheck < 1000 && healthCheckTimer.elapsed() < 250) {
+            return;
+        }
+        entriesSinceHealthCheck = 0;
+        healthCheckTimer.restart();
+
+        const QFileInfo sourceInfo(sourceRoot.path);
+        if (!sourceInfo.isDir() || !sourceInfo.isReadable()) {
+            throw std::runtime_error(
+                QStringLiteral("素材源已断开或不可访问：%1").arg(sourceRoot.path).toStdString());
+        }
+
+        QStorageInfo projectStorage(QFileInfo(projectDatabasePath).absolutePath());
+        projectStorage.refresh();
+        if (projectStorage.isReady()
+            && projectStorage.bytesAvailable() >= 0
+            && projectStorage.bytesAvailable() < MinimumProjectVolumeFreeBytes) {
+            throw std::runtime_error(
+                QStringLiteral("项目盘剩余空间不足 1 GiB，扫描已暂停并保留旧索引").toStdString());
+        }
+    };
+
+    auto acquireLease = [&](IndexingWorkCoordinator::Resource resource) {
+        IndexingWorkCoordinator::Lease lease;
+        if (m_workCoordinator) {
+            lease = m_workCoordinator->acquire({resource,
+                                                IndexingWorkCoordinator::Priority::Foreground,
+                                                false,
+                                                workGeneration});
+            if (!lease) {
+                throw std::runtime_error("扫描因项目切换、队列拥塞或应用退出而取消");
+            }
+        }
+        return lease;
+    };
+
     try {
+        auto resumeWriterLease = acquireLease(IndexingWorkCoordinator::Resource::SqliteWriter);
         QSqlQuery resumeRunning(db);
         resumeRunning.prepare(QStringLiteral(
             "UPDATE scan_work_item SET state = 'pending', updated_at = ? WHERE session_id = ? AND state = 'running'"));
@@ -922,6 +1083,7 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
         if (!resumeRunning.exec()) {
             throw std::runtime_error(resumeRunning.lastError().text().toStdString());
         }
+        resumeWriterLease.reset();
 
         publishProgress(true);
         qint64 processedEntries = 0;
@@ -946,6 +1108,8 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
             item.depth = next.value(3).toInt();
             next.finish();
 
+            auto heavyIoLease = acquireLease(IndexingWorkCoordinator::Resource::HeavyIo);
+
             const QFileInfo directoryInfo(item.absolutePath);
             if (!directoryInfo.isDir() || !directoryInfo.isReadable()) {
                 if (item.depth <= 0) {
@@ -953,6 +1117,7 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
                 }
                 const auto now = QDateTime::currentDateTime().toString(Qt::ISODate);
                 const auto warning = QStringLiteral("已跳过不可访问的子目录：%1").arg(item.absolutePath);
+                auto writerLease = acquireLease(IndexingWorkCoordinator::Resource::SqliteWriter);
                 if (!db.transaction()) {
                     throw std::runtime_error(db.lastError().text().toStdString());
                 }
@@ -1023,29 +1188,8 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
                 publishProgress(false);
                 continue;
             }
-            struct DirectoryEntry {
-                QString absolutePath;
-                QString relativePath;
-                QFileInfo info;
-                bool readable = false;
-            };
-            QVector<DirectoryEntry> directoryEntries;
-            QDirIterator entryIterator(
-                item.absolutePath,
-                QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System | QDir::NoSymLinks,
-                QDirIterator::NoIteratorFlags);
-            while (entryIterator.hasNext()) {
-                DirectoryEntry entry;
-                entry.absolutePath = entryIterator.next();
-                entry.info = QFileInfo(entry.absolutePath);
-                entry.relativePath = FolderPathMetadata::normalizeRelativePath(
-                    FolderPathMetadata::relativePathFromRoot(sourceRoot.path, entry.absolutePath));
-                entry.readable = entry.info.isFile()
-                    && entry.info.isReadable()
-                    && canOpenFileForRead(entry.absolutePath);
-                directoryEntries.append(std::move(entry));
-            }
-
+            checkScanHealth(true);
+            auto stageResetWriterLease = acquireLease(IndexingWorkCoordinator::Resource::SqliteWriter);
             if (!db.transaction()) {
                 throw std::runtime_error(db.lastError().text().toStdString());
             }
@@ -1063,116 +1207,257 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
                 throw std::runtime_error(markRunning.lastError().text().toStdString());
             }
 
-            QSqlQuery stageFolder(db);
-            stageFolder.prepare(QStringLiteral(
-                "INSERT OR IGNORE INTO scan_stage_folder "
-                "(session_id, path_key, name, absolute_path, relative_path, parent_relative_path, depth, "
-                "file_count, direct_file_count, recursive_file_count, normalized_date, date_anchor, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?)"));
-            QSqlQuery enqueueDirectory(db);
-            enqueueDirectory.prepare(QStringLiteral(
-                "INSERT OR IGNORE INTO scan_work_item "
-                "(session_id, absolute_path, relative_path, path_key, depth, state, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)"));
-            QSqlQuery stageFile(db);
-            stageFile.prepare(QStringLiteral(
-                "INSERT OR REPLACE INTO scan_stage_asset "
-                "(session_id, path_key, name, extension, absolute_path, relative_path, parent_path, parent_relative_path, "
-                "asset_type, size_bytes, modified_at, is_readable, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
-
-            for (const auto &entry : std::as_const(directoryEntries)) {
-                const auto &absolutePath = entry.absolutePath;
-                const auto &relativePath = entry.relativePath;
-                const auto &info = entry.info;
-                if (info.isDir()) {
-                    const auto folder = makeFolderNode(sourceRoot, rootFolderName, absolutePath, relativePath);
-                    stageFolder.addBindValue(sessionId);
-                    stageFolder.addBindValue(folder.pathKey);
-                    stageFolder.addBindValue(folder.name);
-                    stageFolder.addBindValue(folder.absolutePath);
-                    stageFolder.addBindValue(folder.relativePath);
-                    stageFolder.addBindValue(folder.parentRelativePath);
-                    stageFolder.addBindValue(folder.depth);
-                    stageFolder.addBindValue(folder.normalizedDate);
-                    stageFolder.addBindValue(folder.dateAnchor);
-                    stageFolder.addBindValue(now);
-                    stageFolder.addBindValue(now);
-                    if (!stageFolder.exec()) {
-                        const auto message = stageFolder.lastError().text();
-                        rollbackWork();
-                        throw std::runtime_error(message.toStdString());
-                    }
-                    stageFolder.finish();
-
-                    enqueueDirectory.addBindValue(sessionId);
-                    enqueueDirectory.addBindValue(folder.absolutePath);
-                    enqueueDirectory.addBindValue(folder.relativePath);
-                    enqueueDirectory.addBindValue(folder.pathKey);
-                    enqueueDirectory.addBindValue(folder.depth);
-                    enqueueDirectory.addBindValue(now);
-                    enqueueDirectory.addBindValue(now);
-                    if (!enqueueDirectory.exec()) {
-                        const auto message = enqueueDirectory.lastError().text();
-                        rollbackWork();
-                        throw std::runtime_error(message.toStdString());
-                    }
-                    enqueueDirectory.finish();
-                } else if (info.isFile()) {
-                    const auto parentRelativePath = FolderPathMetadata::parentRelativePath(relativePath);
-                    stageFile.addBindValue(sessionId);
-                    stageFile.addBindValue(FolderPathMetadata::normalizedPathKey(absolutePath));
-                    stageFile.addBindValue(info.fileName());
-                    stageFile.addBindValue(info.suffix().toLower());
-                    stageFile.addBindValue(absolutePath);
-                    stageFile.addBindValue(relativePath);
-                    stageFile.addBindValue(info.absolutePath());
-                    stageFile.addBindValue(parentRelativePath);
-                    stageFile.addBindValue(static_cast<int>(FileTypeService::classify(info.fileName())));
-                    stageFile.addBindValue(info.size());
-                    stageFile.addBindValue(info.lastModified().toString(Qt::ISODate));
-                    stageFile.addBindValue(entry.readable ? 1 : 0);
-                    stageFile.addBindValue(now);
-                    if (!stageFile.exec()) {
-                        const auto message = stageFile.lastError().text();
-                        rollbackWork();
-                        throw std::runtime_error(message.toStdString());
-                    }
-                    stageFile.finish();
-                }
-
-                ++processedEntries;
-                const auto failureAfterEntries = m_failureAfterEntries.load();
-                if (failureAfterEntries >= 0 && processedEntries >= failureAfterEntries) {
-                    rollbackWork();
-                    throw std::runtime_error("测试注入：扫描在目录检查点提交前中断");
-                }
-            }
-
-            QSqlQuery completeWork(db);
-            completeWork.prepare(QStringLiteral("UPDATE scan_work_item SET state = 'completed', updated_at = ? WHERE id = ?"));
-            completeWork.addBindValue(now);
-            completeWork.addBindValue(item.id);
-            if (!completeWork.exec()) {
-                const auto message = completeWork.lastError().text();
+            QSqlQuery clearChildWork(db);
+            clearChildWork.prepare(QStringLiteral(
+                "DELETE FROM scan_work_item WHERE ? = 1 AND session_id = ? AND id <> ? AND path_key IN ("
+                "SELECT path_key FROM scan_stage_folder WHERE session_id = ? "
+                "AND parent_relative_path = ? AND relative_path <> ?)"));
+            clearChildWork.addBindValue(fullScan ? 1 : 0);
+            clearChildWork.addBindValue(sessionId);
+            clearChildWork.addBindValue(item.id);
+            clearChildWork.addBindValue(sessionId);
+            clearChildWork.addBindValue(item.relativePath);
+            clearChildWork.addBindValue(item.relativePath);
+            if (!clearChildWork.exec()) {
+                const auto message = clearChildWork.lastError().text();
                 rollbackWork();
                 throw std::runtime_error(message.toStdString());
             }
-            QSqlQuery touchSession(db);
-            touchSession.prepare(QStringLiteral("UPDATE scan_session SET state = 'running', updated_at = ? WHERE id = ?"));
-            touchSession.addBindValue(now);
-            touchSession.addBindValue(sessionId);
-            if (!touchSession.exec()) {
-                const auto message = touchSession.lastError().text();
+
+            QSqlQuery clearDirectAssets(db);
+            clearDirectAssets.prepare(QStringLiteral(
+                "DELETE FROM scan_stage_asset WHERE session_id = ? AND parent_relative_path = ?"));
+            clearDirectAssets.addBindValue(sessionId);
+            clearDirectAssets.addBindValue(item.relativePath);
+            if (!clearDirectAssets.exec()) {
+                const auto message = clearDirectAssets.lastError().text();
                 rollbackWork();
                 throw std::runtime_error(message.toStdString());
             }
+
+            QSqlQuery clearDirectFolders(db);
+            clearDirectFolders.prepare(QStringLiteral(
+                "DELETE FROM scan_stage_folder WHERE session_id = ? "
+                "AND parent_relative_path = ? AND relative_path <> ?"));
+            clearDirectFolders.addBindValue(sessionId);
+            clearDirectFolders.addBindValue(item.relativePath);
+            clearDirectFolders.addBindValue(item.relativePath);
+            if (!clearDirectFolders.exec()) {
+                const auto message = clearDirectFolders.lastError().text();
+                rollbackWork();
+                throw std::runtime_error(message.toStdString());
+            }
+
             if (!db.commit()) {
                 const auto message = db.lastError().text();
                 rollbackWork();
                 throw std::runtime_error(message.toStdString());
             }
-            publishProgress(false);
+            stageResetWriterLease.reset();
+
+            struct DirectoryEntry {
+                QString absolutePath;
+                QString relativePath;
+                QFileInfo info;
+                bool readable = false;
+            };
+
+            auto commitDirectoryBatch = [&](const QVector<DirectoryEntry> &directoryEntries,
+                                            bool completeDirectory) {
+                checkScanHealth(false);
+                QElapsedTimer writeTimer;
+                writeTimer.start();
+                auto writerLease = acquireLease(IndexingWorkCoordinator::Resource::SqliteWriter);
+                if (!db.transaction()) {
+                    throw std::runtime_error(db.lastError().text().toStdString());
+                }
+                const auto batchNow = QDateTime::currentDateTime().toString(Qt::ISODate);
+
+                QSqlQuery stageFolder(db);
+                stageFolder.prepare(QStringLiteral(
+                    "INSERT OR REPLACE INTO scan_stage_folder "
+                    "(session_id, path_key, name, absolute_path, relative_path, parent_relative_path, depth, "
+                    "file_count, direct_file_count, recursive_file_count, normalized_date, date_anchor, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?)"));
+                QSqlQuery enqueueDirectory(db);
+                enqueueDirectory.prepare(QStringLiteral(
+                    "INSERT OR IGNORE INTO scan_work_item "
+                    "(session_id, absolute_path, relative_path, path_key, depth, state, created_at, updated_at) "
+                    "SELECT ?, ?, ?, ?, ?, 'pending', ?, ? "
+                    "WHERE ? = 1 OR NOT EXISTS (SELECT 1 FROM folder_node "
+                    "WHERE source_root_id = ? AND path_key = ?)"));
+                QSqlQuery stageFile(db);
+                stageFile.prepare(QStringLiteral(
+                    "INSERT OR REPLACE INTO scan_stage_asset "
+                    "(session_id, path_key, name, extension, absolute_path, relative_path, parent_path, parent_relative_path, "
+                    "asset_type, size_bytes, modified_at, is_readable, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+
+                for (const auto &entry : directoryEntries) {
+                    const auto &absolutePath = entry.absolutePath;
+                    const auto &relativePath = entry.relativePath;
+                    const auto &info = entry.info;
+                    if (info.isDir()) {
+                        const auto folder = makeFolderNode(
+                            sourceRoot, rootFolderName, absolutePath, relativePath);
+                        stageFolder.addBindValue(sessionId);
+                        stageFolder.addBindValue(folder.pathKey);
+                        stageFolder.addBindValue(folder.name);
+                        stageFolder.addBindValue(folder.absolutePath);
+                        stageFolder.addBindValue(folder.relativePath);
+                        stageFolder.addBindValue(folder.parentRelativePath);
+                        stageFolder.addBindValue(folder.depth);
+                        stageFolder.addBindValue(folder.normalizedDate);
+                        stageFolder.addBindValue(folder.dateAnchor);
+                        stageFolder.addBindValue(batchNow);
+                        stageFolder.addBindValue(batchNow);
+                        if (!stageFolder.exec()) {
+                            const auto message = stageFolder.lastError().text();
+                            db.rollback();
+                            throw std::runtime_error(message.toStdString());
+                        }
+                        stageFolder.finish();
+
+                        enqueueDirectory.addBindValue(sessionId);
+                        enqueueDirectory.addBindValue(folder.absolutePath);
+                        enqueueDirectory.addBindValue(folder.relativePath);
+                        enqueueDirectory.addBindValue(folder.pathKey);
+                        enqueueDirectory.addBindValue(folder.depth);
+                        enqueueDirectory.addBindValue(batchNow);
+                        enqueueDirectory.addBindValue(batchNow);
+                        enqueueDirectory.addBindValue(fullScan ? 1 : 0);
+                        enqueueDirectory.addBindValue(sourceRoot.id);
+                        enqueueDirectory.addBindValue(folder.pathKey);
+                        if (!enqueueDirectory.exec()) {
+                            const auto message = enqueueDirectory.lastError().text();
+                            db.rollback();
+                            throw std::runtime_error(message.toStdString());
+                        }
+                        enqueueDirectory.finish();
+                    } else if (info.isFile()) {
+                        const auto parentRelativePath =
+                            FolderPathMetadata::parentRelativePath(relativePath);
+                        stageFile.addBindValue(sessionId);
+                        stageFile.addBindValue(
+                            FolderPathMetadata::normalizedPathKey(absolutePath));
+                        stageFile.addBindValue(info.fileName());
+                        stageFile.addBindValue(info.suffix().toLower());
+                        stageFile.addBindValue(absolutePath);
+                        stageFile.addBindValue(relativePath);
+                        stageFile.addBindValue(info.absolutePath());
+                        stageFile.addBindValue(parentRelativePath);
+                        stageFile.addBindValue(
+                            static_cast<int>(FileTypeService::classify(info.fileName())));
+                        stageFile.addBindValue(info.size());
+                        stageFile.addBindValue(info.lastModified().toString(Qt::ISODate));
+                        stageFile.addBindValue(entry.readable ? 1 : 0);
+                        stageFile.addBindValue(batchNow);
+                        if (!stageFile.exec()) {
+                            const auto message = stageFile.lastError().text();
+                            db.rollback();
+                            throw std::runtime_error(message.toStdString());
+                        }
+                        stageFile.finish();
+                    }
+
+                    ++processedEntries;
+                    ++entriesSinceHealthCheck;
+                    const auto failureAfterEntries = m_failureAfterEntries.load();
+                    if (failureAfterEntries >= 0 && processedEntries >= failureAfterEntries) {
+                        db.rollback();
+                        throw std::runtime_error("测试注入：扫描在目录批次提交前中断");
+                    }
+                }
+
+                if (completeDirectory) {
+                    QSqlQuery completeWork(db);
+                    completeWork.prepare(QStringLiteral(
+                        "UPDATE scan_work_item SET state = 'completed', updated_at = ? WHERE id = ?"));
+                    completeWork.addBindValue(batchNow);
+                    completeWork.addBindValue(item.id);
+                    if (!completeWork.exec()) {
+                        const auto message = completeWork.lastError().text();
+                        db.rollback();
+                        throw std::runtime_error(message.toStdString());
+                    }
+                }
+
+                QSqlQuery touchSession(db);
+                touchSession.prepare(QStringLiteral(
+                    "UPDATE scan_session SET state = 'running', updated_at = ? WHERE id = ?"));
+                touchSession.addBindValue(batchNow);
+                touchSession.addBindValue(sessionId);
+                if (!touchSession.exec()) {
+                    const auto message = touchSession.lastError().text();
+                    db.rollback();
+                    throw std::runtime_error(message.toStdString());
+                }
+                if (!db.commit()) {
+                    const auto message = db.lastError().text();
+                    db.rollback();
+                    throw std::runtime_error(message.toStdString());
+                }
+                telemetry.recordBatch(
+                    QStringLiteral("scan"),
+                    QStringLiteral("directory_stage_write"),
+                    directoryEntries.size(),
+                    writeTimer.elapsed());
+                publishProgress(false);
+            };
+
+            QVector<DirectoryEntry> directoryEntries;
+            directoryEntries.reserve(ScanEnumerationBatchSize);
+            QElapsedTimer enumerationTimer;
+            enumerationTimer.start();
+            QDirIterator entryIterator(
+                item.absolutePath,
+                QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System
+                    | QDir::NoSymLinks,
+                QDirIterator::NoIteratorFlags);
+            while (entryIterator.hasNext()) {
+                DirectoryEntry entry;
+                entry.absolutePath = entryIterator.next();
+                entry.info = QFileInfo(entry.absolutePath);
+                if (ScanPathPolicy::isExcludedPath(sourceRoot.path,
+                                                   entry.absolutePath,
+                                                   projectDatabasePath)
+                    || ScanPathPolicy::isLinkOrReparsePoint(entry.absolutePath)) {
+                    continue;
+                }
+                entry.relativePath = FolderPathMetadata::normalizeRelativePath(
+                    FolderPathMetadata::relativePathFromRoot(
+                        sourceRoot.path, entry.absolutePath));
+                entry.readable = entry.info.isFile() && entry.info.isReadable();
+                directoryEntries.append(std::move(entry));
+
+                if (directoryEntries.size() < ScanEnumerationBatchSize) {
+                    continue;
+                }
+                telemetry.setQueueDepth(
+                    QStringLiteral("scan.directory_entries"), directoryEntries.size());
+                telemetry.recordBatch(
+                    QStringLiteral("scan"),
+                    QStringLiteral("directory_enumeration"),
+                    directoryEntries.size(),
+                    enumerationTimer.elapsed());
+                commitDirectoryBatch(directoryEntries, false);
+                directoryEntries.clear();
+                telemetry.setQueueDepth(QStringLiteral("scan.directory_entries"), 0);
+                enumerationTimer.restart();
+            }
+
+            if (!directoryEntries.isEmpty()) {
+                telemetry.setQueueDepth(
+                    QStringLiteral("scan.directory_entries"), directoryEntries.size());
+                telemetry.recordBatch(
+                    QStringLiteral("scan"),
+                    QStringLiteral("directory_enumeration"),
+                    directoryEntries.size(),
+                    enumerationTimer.elapsed());
+            }
+            commitDirectoryBatch(directoryEntries, true);
+            directoryEntries.clear();
+            telemetry.setQueueDepth(QStringLiteral("scan.directory_entries"), 0);
         }
 
         QSqlQuery maxDepthQuery(db);
@@ -1184,6 +1469,7 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
         const auto maxDepth = maxDepthQuery.value(0).toInt();
         maxDepthQuery.finish();
 
+        auto countWriterLease = acquireLease(IndexingWorkCoordinator::Resource::SqliteWriter);
         if (!db.transaction()) {
             throw std::runtime_error(db.lastError().text().toStdString());
         }
@@ -1203,6 +1489,7 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
             db.rollback();
             throw std::runtime_error(message.toStdString());
         }
+        countWriterLease.reset();
         for (auto depth = maxDepth; depth >= 0; --depth) {
             QSqlQuery recursiveCounts(db);
             recursiveCounts.prepare(QStringLiteral(
@@ -1225,7 +1512,7 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
             throw std::runtime_error(message.toStdString());
         }
 
-        const auto batch = readBatch();
+        auto batch = readBatch();
         if (!errorMessage.isEmpty()) {
             throw std::runtime_error(errorMessage.toStdString());
         }
@@ -1233,31 +1520,9 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
         qint64 audioCount = 0;
         qint64 imageCount = 0;
         qint64 otherCount = 0;
-        QSqlQuery typeCounts(db);
-        typeCounts.prepare(QStringLiteral(
-            "SELECT "
-            "COALESCE(SUM(CASE WHEN asset_type = ? THEN 1 ELSE 0 END), 0), "
-            "COALESCE(SUM(CASE WHEN asset_type = ? THEN 1 ELSE 0 END), 0), "
-            "COALESCE(SUM(CASE WHEN asset_type = ? THEN 1 ELSE 0 END), 0), "
-            "COALESCE(SUM(CASE WHEN asset_type NOT IN (?, ?, ?) THEN 1 ELSE 0 END), 0) "
-            "FROM scan_stage_asset WHERE session_id = ?"));
-        typeCounts.addBindValue(static_cast<int>(AssetType::Video));
-        typeCounts.addBindValue(static_cast<int>(AssetType::Audio));
-        typeCounts.addBindValue(static_cast<int>(AssetType::Image));
-        typeCounts.addBindValue(static_cast<int>(AssetType::Video));
-        typeCounts.addBindValue(static_cast<int>(AssetType::Audio));
-        typeCounts.addBindValue(static_cast<int>(AssetType::Image));
-        typeCounts.addBindValue(sessionId);
-        if (!typeCounts.exec() || !typeCounts.next()) {
-            throw std::runtime_error(typeCounts.lastError().text().toStdString());
-        }
-        videoCount = typeCounts.value(0).toLongLong();
-        audioCount = typeCounts.value(1).toLongLong();
-        imageCount = typeCounts.value(2).toLongLong();
-        otherCount = typeCounts.value(3).toLongLong();
-        typeCounts.finish();
 
         const auto sessionLiteral = QString::number(sessionId);
+        auto reconcileWriterLease = acquireLease(IndexingWorkCoordinator::Resource::SqliteWriter);
         if (!db.transaction()) {
             throw std::runtime_error(db.lastError().text().toStdString());
         }
@@ -1273,6 +1538,54 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
             }
             return true;
         };
+        const auto completedWorkSet = QStringLiteral(
+            "(SELECT relative_path FROM scan_work_item WHERE session_id = %1 "
+            "AND state IN ('completed', 'skipped'))").arg(sessionLiteral);
+        const auto assetParentExpression = QStringLiteral(
+            "CASE WHEN length(asset_file.relative_path) > length(asset_file.name) "
+            "THEN substr(asset_file.relative_path, 1, "
+            "length(asset_file.relative_path) - length(asset_file.name) - 1) ELSE '' END");
+        const auto assetDeleteScope = fullScan
+            ? QString()
+            : QStringLiteral(" AND %1 IN %2")
+                  .arg(assetParentExpression, completedWorkSet);
+        const auto folderDeleteScope = fullScan
+            ? QString()
+            : QStringLiteral(" AND folder_node.parent_relative_path IN %1")
+                  .arg(completedWorkSet);
+
+        if (!fullScan) {
+            const QStringList pruneMissingSubtrees{
+                QStringLiteral(
+                    "DELETE FROM asset_file WHERE source_root_id = ? AND EXISTS ("
+                    "SELECT 1 FROM folder_node missing "
+                    "WHERE missing.source_root_id = ? "
+                    "AND missing.parent_relative_path IN %1 "
+                    "AND NOT EXISTS (SELECT 1 FROM scan_stage_folder s "
+                    "WHERE s.session_id = %2 AND s.path_key = missing.path_key) "
+                    "AND (asset_file.relative_path = missing.relative_path "
+                    "OR substr(asset_file.relative_path, 1, length(missing.relative_path) + 1) "
+                    "= missing.relative_path || '/'))")
+                    .arg(completedWorkSet, sessionLiteral),
+                QStringLiteral(
+                    "DELETE FROM folder_node WHERE source_root_id = ? AND EXISTS ("
+                    "SELECT 1 FROM folder_node missing "
+                    "WHERE missing.source_root_id = ? "
+                    "AND missing.parent_relative_path IN %1 "
+                    "AND NOT EXISTS (SELECT 1 FROM scan_stage_folder s "
+                    "WHERE s.session_id = %2 AND s.path_key = missing.path_key) "
+                    "AND (folder_node.relative_path = missing.relative_path "
+                    "OR substr(folder_node.relative_path, 1, length(missing.relative_path) + 1) "
+                    "= missing.relative_path || '/'))")
+                    .arg(completedWorkSet, sessionLiteral)
+            };
+            for (const auto &statement : pruneMissingSubtrees) {
+                if (!reconcile(statement)) {
+                    db.rollback();
+                    throw std::runtime_error(errorMessage.toStdString());
+                }
+            }
+        }
         const QStringList reconcileStatements = {
             QStringLiteral("DELETE FROM embedded_metadata WHERE asset_id IN ("
                            "SELECT af.id FROM asset_file af JOIN scan_stage_asset s "
@@ -1303,8 +1616,9 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
                            "SELECT ?, s.name, s.extension, s.absolute_path, s.relative_path, s.parent_path, s.path_key, s.asset_type, s.size_bytes, s.modified_at, s.is_readable, s.created_at "
                            "FROM scan_stage_asset s WHERE s.session_id = %1 AND NOT EXISTS (SELECT 1 FROM asset_file af "
                            "WHERE af.source_root_id = ? AND af.path_key = s.path_key)").arg(sessionLiteral),
-            QStringLiteral("DELETE FROM asset_file WHERE source_root_id = ? AND NOT EXISTS (SELECT 1 FROM scan_stage_asset s "
-                           "WHERE s.session_id = %1 AND s.path_key = asset_file.path_key)").arg(sessionLiteral),
+            QStringLiteral("DELETE FROM asset_file WHERE source_root_id = ?%2 AND NOT EXISTS (SELECT 1 FROM scan_stage_asset s "
+                           "WHERE s.session_id = %1 AND s.path_key = asset_file.path_key)")
+                .arg(sessionLiteral, assetDeleteScope),
             QStringLiteral("UPDATE folder_node SET "
                            "name = (SELECT s.name FROM scan_stage_folder s WHERE s.session_id = %1 AND s.path_key = folder_node.path_key), "
                            "absolute_path = (SELECT s.absolute_path FROM scan_stage_folder s WHERE s.session_id = %1 AND s.path_key = folder_node.path_key), "
@@ -1324,8 +1638,9 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
                            "SELECT ?, s.name, s.absolute_path, s.path_key, s.relative_path, s.parent_relative_path, s.depth, s.file_count, s.direct_file_count, s.recursive_file_count, s.normalized_date, s.date_anchor, s.created_at, s.updated_at "
                            "FROM scan_stage_folder s WHERE s.session_id = %1 AND NOT EXISTS (SELECT 1 FROM folder_node fn "
                            "WHERE fn.source_root_id = ? AND fn.path_key = s.path_key)").arg(sessionLiteral),
-            QStringLiteral("DELETE FROM folder_node WHERE source_root_id = ? AND NOT EXISTS (SELECT 1 FROM scan_stage_folder s "
-                           "WHERE s.session_id = %1 AND s.path_key = folder_node.path_key)").arg(sessionLiteral)
+            QStringLiteral("DELETE FROM folder_node WHERE source_root_id = ?%2 AND NOT EXISTS (SELECT 1 FROM scan_stage_folder s "
+                           "WHERE s.session_id = %1 AND s.path_key = folder_node.path_key)")
+                .arg(sessionLiteral, folderDeleteScope)
         };
         for (const auto &statement : reconcileStatements) {
             if (!reconcile(statement)) {
@@ -1333,6 +1648,116 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
                 throw std::runtime_error(errorMessage.toStdString());
             }
         }
+
+        if (!fullScan) {
+            QSet<QString> affectedFolders;
+            const auto addAffectedFolder = [&affectedFolders](const QString &relativePath) {
+                const auto normalized = FolderPathMetadata::normalizeRelativePath(relativePath);
+                for (const auto &ancestor : FolderPathMetadata::ancestorRelativePaths(normalized)) {
+                    affectedFolders.insert(ancestor);
+                }
+            };
+            for (const auto &relativePath : dirtyRelativePaths) {
+                addAffectedFolder(relativePath);
+            }
+            QSqlQuery affectedQuery(db);
+            affectedQuery.prepare(QStringLiteral(
+                "SELECT relative_path FROM scan_work_item WHERE session_id = ? "
+                "UNION SELECT relative_path FROM scan_stage_folder WHERE session_id = ?"));
+            affectedQuery.addBindValue(sessionId);
+            affectedQuery.addBindValue(sessionId);
+            if (!affectedQuery.exec()) {
+                db.rollback();
+                throw std::runtime_error(affectedQuery.lastError().text().toStdString());
+            }
+            while (affectedQuery.next()) {
+                addAffectedFolder(affectedQuery.value(0).toString());
+            }
+            affectedQuery.finish();
+
+            auto affected = affectedFolders.values();
+            std::sort(affected.begin(), affected.end(), [](const QString &left, const QString &right) {
+                return FolderPathMetadata::depth(left) > FolderPathMetadata::depth(right);
+            });
+            QSqlQuery refreshFolderCounts(db);
+            refreshFolderCounts.prepare(QStringLiteral(
+                "UPDATE folder_node SET "
+                "direct_file_count = (SELECT COUNT(*) FROM asset_file af WHERE af.source_root_id = ? "
+                "AND CASE WHEN length(af.relative_path) > length(af.name) "
+                "THEN substr(af.relative_path, 1, length(af.relative_path) - length(af.name) - 1) "
+                "ELSE '' END = ?), "
+                "file_count = (SELECT COUNT(*) FROM asset_file af WHERE af.source_root_id = ? "
+                "AND CASE WHEN length(af.relative_path) > length(af.name) "
+                "THEN substr(af.relative_path, 1, length(af.relative_path) - length(af.name) - 1) "
+                "ELSE '' END = ?), "
+                "recursive_file_count = (SELECT COUNT(*) FROM asset_file af WHERE af.source_root_id = ? "
+                "AND (? = '' OR af.relative_path = ? "
+                "OR substr(af.relative_path, 1, length(?) + 1) = ? || '/')), "
+                "updated_at = ? WHERE source_root_id = ? AND relative_path = ?"));
+            const auto countUpdatedAt = QDateTime::currentDateTime().toString(Qt::ISODate);
+            for (const auto &relativePath : std::as_const(affected)) {
+                refreshFolderCounts.addBindValue(sourceRoot.id);
+                refreshFolderCounts.addBindValue(relativePath);
+                refreshFolderCounts.addBindValue(sourceRoot.id);
+                refreshFolderCounts.addBindValue(relativePath);
+                refreshFolderCounts.addBindValue(sourceRoot.id);
+                refreshFolderCounts.addBindValue(relativePath);
+                refreshFolderCounts.addBindValue(relativePath);
+                refreshFolderCounts.addBindValue(relativePath);
+                refreshFolderCounts.addBindValue(relativePath);
+                refreshFolderCounts.addBindValue(countUpdatedAt);
+                refreshFolderCounts.addBindValue(sourceRoot.id);
+                refreshFolderCounts.addBindValue(relativePath);
+                if (!refreshFolderCounts.exec()) {
+                    const auto message = refreshFolderCounts.lastError().text();
+                    db.rollback();
+                    throw std::runtime_error(message.toStdString());
+                }
+                refreshFolderCounts.finish();
+            }
+        }
+
+        QSqlQuery finalAssetCounts(db);
+        finalAssetCounts.prepare(QStringLiteral(
+            "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0), "
+            "COALESCE(SUM(CASE WHEN is_readable = 0 THEN 1 ELSE 0 END), 0), "
+            "COALESCE(SUM(CASE WHEN asset_type = ? THEN 1 ELSE 0 END), 0), "
+            "COALESCE(SUM(CASE WHEN asset_type = ? THEN 1 ELSE 0 END), 0), "
+            "COALESCE(SUM(CASE WHEN asset_type = ? THEN 1 ELSE 0 END), 0), "
+            "COALESCE(SUM(CASE WHEN asset_type NOT IN (?, ?, ?) THEN 1 ELSE 0 END), 0) "
+            "FROM asset_file WHERE source_root_id = ?"));
+        finalAssetCounts.addBindValue(static_cast<int>(AssetType::Video));
+        finalAssetCounts.addBindValue(static_cast<int>(AssetType::Audio));
+        finalAssetCounts.addBindValue(static_cast<int>(AssetType::Image));
+        finalAssetCounts.addBindValue(static_cast<int>(AssetType::Video));
+        finalAssetCounts.addBindValue(static_cast<int>(AssetType::Audio));
+        finalAssetCounts.addBindValue(static_cast<int>(AssetType::Image));
+        finalAssetCounts.addBindValue(sourceRoot.id);
+        if (!finalAssetCounts.exec() || !finalAssetCounts.next()) {
+            const auto message = finalAssetCounts.lastError().text();
+            db.rollback();
+            throw std::runtime_error(message.toStdString());
+        }
+        batch.totalFiles = finalAssetCounts.value(0).toLongLong();
+        batch.totalSizeBytes = finalAssetCounts.value(1).toLongLong();
+        batch.warningCount = finalAssetCounts.value(2).toLongLong();
+        videoCount = finalAssetCounts.value(3).toLongLong();
+        audioCount = finalAssetCounts.value(4).toLongLong();
+        imageCount = finalAssetCounts.value(5).toLongLong();
+        otherCount = finalAssetCounts.value(6).toLongLong();
+        finalAssetCounts.finish();
+
+        QSqlQuery finalFolderCounts(db);
+        finalFolderCounts.prepare(QStringLiteral(
+            "SELECT COUNT(*) FROM folder_node WHERE source_root_id = ? AND relative_path <> ''"));
+        finalFolderCounts.addBindValue(sourceRoot.id);
+        if (!finalFolderCounts.exec() || !finalFolderCounts.next()) {
+            const auto message = finalFolderCounts.lastError().text();
+            db.rollback();
+            throw std::runtime_error(message.toStdString());
+        }
+        batch.totalFolders = finalFolderCounts.value(0).toLongLong();
+        finalFolderCounts.finish();
 
         QSqlQuery sourceUpdate(db);
         sourceUpdate.prepare(QStringLiteral(
@@ -1372,6 +1797,17 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
         cleanup.prepare(QStringLiteral("DELETE FROM scan_session WHERE id = ? AND state = 'completed'"));
         cleanup.addBindValue(sessionId);
         cleanup.exec();
+        reconcileWriterLease.reset();
+
+        telemetry.finishStage(
+            QStringLiteral("scan"),
+            QStringLiteral("resumable_scan"),
+            scanStartedAtMs,
+            QStringLiteral("ok"),
+            {{QStringLiteral("source_root_id"), sourceRoot.id},
+             {QStringLiteral("files"), batch.totalFiles},
+             {QStringLiteral("folders"), batch.totalFolders}});
+        telemetry.logSnapshot(QStringLiteral("scan_completed"));
 
         QMetaObject::invokeMethod(this, [this, sourceRoot, projectDatabasePath, batch, jobId]() {
             const auto stillCurrent = m_databaseManager
@@ -1390,11 +1826,41 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
             }
             emit scanFinishedForProject(projectDatabasePath, sourceRoot.id);
         }, Qt::QueuedConnection);
+    } catch (const std::bad_alloc &) {
+        telemetry.setQueueDepth(QStringLiteral("scan.directory_entries"), 0);
+        telemetry.finishStage(
+            QStringLiteral("scan"),
+            QStringLiteral("resumable_scan"),
+            scanStartedAtMs,
+            QStringLiteral("out_of_memory"));
+        telemetry.logSnapshot(QStringLiteral("scan_out_of_memory"));
+        interrupt(QStringLiteral("扫描内存不足，已保存恢复点；请关闭高内存任务后重试"));
     } catch (const std::exception &exception) {
         auto message = QString::fromUtf8(exception.what()).trimmed();
         if (message.isEmpty()) {
             message = QStringLiteral("扫描已中断，等待下次自动恢复");
         }
+        if (message.contains(QStringLiteral("busy"), Qt::CaseInsensitive)
+            || message.contains(QStringLiteral("locked"), Qt::CaseInsensitive)) {
+            telemetry.recordSqliteBusy(QStringLiteral("scan"));
+        }
+        telemetry.setQueueDepth(QStringLiteral("scan.directory_entries"), 0);
+        telemetry.finishStage(
+            QStringLiteral("scan"),
+            QStringLiteral("resumable_scan"),
+            scanStartedAtMs,
+            QStringLiteral("failed"),
+            {{QStringLiteral("error"), message}});
+        telemetry.logSnapshot(QStringLiteral("scan_failed"));
         interrupt(message);
+    } catch (...) {
+        telemetry.setQueueDepth(QStringLiteral("scan.directory_entries"), 0);
+        telemetry.finishStage(
+            QStringLiteral("scan"),
+            QStringLiteral("resumable_scan"),
+            scanStartedAtMs,
+            QStringLiteral("unknown_exception"));
+        telemetry.logSnapshot(QStringLiteral("scan_unknown_exception"));
+        interrupt(QStringLiteral("扫描遇到未知异常，已保存恢复点"));
     }
 }

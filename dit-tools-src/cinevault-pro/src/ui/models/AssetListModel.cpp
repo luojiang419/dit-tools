@@ -68,9 +68,53 @@ QHash<int, QByteArray> AssetListModel::roleNames() const
     };
 }
 
+void AssetListModel::clear()
+{
+    if (m_items.isEmpty()) {
+        return;
+    }
+    beginResetModel();
+    m_items.clear();
+    endResetModel();
+}
+
 void AssetListModel::setItems(const QVector<AssetFile> &items)
 {
     beginResetModel();
     m_items = items;
     endResetModel();
+}
+
+void AssetListModel::appendItems(const QVector<AssetFile> &items)
+{
+    if (items.isEmpty()) {
+        return;
+    }
+    const auto first = m_items.size();
+    const auto last = first + items.size() - 1;
+    beginInsertRows(QModelIndex(), first, last);
+    m_items.append(items);
+    endInsertRows();
+}
+
+void AssetListModel::updateItemsById(const QVector<AssetFile> &items)
+{
+    if (items.isEmpty() || m_items.isEmpty()) {
+        return;
+    }
+
+    QHash<qint64, AssetFile> updates;
+    updates.reserve(items.size());
+    for (const auto &item : items) {
+        updates.insert(item.id, item);
+    }
+    for (qsizetype index = 0; index < m_items.size(); ++index) {
+        const auto update = updates.constFind(m_items.at(index).id);
+        if (update == updates.cend()) {
+            continue;
+        }
+        m_items[index] = update.value();
+        const auto modelIndex = createIndex(index, 0);
+        emit dataChanged(modelIndex, modelIndex);
+    }
 }

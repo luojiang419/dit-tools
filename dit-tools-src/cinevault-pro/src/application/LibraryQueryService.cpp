@@ -1,6 +1,5 @@
 #include "application/LibraryQueryService.h"
 
-#include "core/search/SearchEngine.h"
 #include "infrastructure/db/DatabaseManager.h"
 #include "infrastructure/logging/Logger.h"
 #include "shared/Formatters.h"
@@ -11,10 +10,15 @@
 #include <QJsonParseError>
 #include <QJsonValue>
 #include <QDateTime>
+#include <QElapsedTimer>
+#include <QScopeGuard>
 #include <QSqlDatabase>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QStringList>
+#include <QThread>
+
+#include <atomic>
 
 namespace {
 QVariantList makeDetails(const QList<QPair<QString, QString>> &items)
@@ -36,6 +40,58 @@ bool execOrLog(QSqlQuery &query, const QString &context)
     }
     Logger::warn(QStringLiteral("%1 查询失败：%2").arg(context, query.lastError().text()));
     return false;
+}
+
+QString buildLikePattern(const QString &keyword)
+{
+    auto normalized = keyword.trimmed();
+    normalized.replace(QLatin1Char('%'), QStringLiteral("\\%"));
+    normalized.replace(QLatin1Char('_'), QStringLiteral("\\_"));
+    return QStringLiteral("%") + normalized + QStringLiteral("%");
+}
+
+QString nextLibraryConnectionName(const QString &kind)
+{
+    static std::atomic<quint64> sequence{0};
+    return QStringLiteral("library_%1_%2_%3")
+        .arg(kind)
+        .arg(reinterpret_cast<quintptr>(QThread::currentThreadId()))
+        .arg(sequence.fetch_add(1, std::memory_order_relaxed));
+}
+
+void appendAssetFilters(QString *sql,
+                        QVariantList *binds,
+                        const LibraryAssetPageRequest &request,
+                        bool includeCursor)
+{
+    if (request.sourceRootId.has_value()) {
+        *sql += QStringLiteral(" AND af.source_root_id = ?");
+        binds->append(request.sourceRootId.value());
+    }
+    if (request.assetType.has_value()) {
+        *sql += QStringLiteral(" AND af.asset_type = ?");
+        binds->append(static_cast<int>(request.assetType.value()));
+    }
+    if (request.favoritesOnly) {
+        *sql += QStringLiteral(" AND af.is_favorite = 1");
+    }
+    if (!request.keyword.trimmed().isEmpty()) {
+        *sql += QStringLiteral(
+            " AND (af.name LIKE ? ESCAPE '\\' OR af.relative_path LIKE ? ESCAPE '\\' "
+            "OR COALESCE(em.search_text, '') LIKE ? ESCAPE '\\')");
+        const auto pattern = buildLikePattern(request.keyword);
+        binds->append(pattern);
+        binds->append(pattern);
+        binds->append(pattern);
+    }
+    if (includeCursor && request.hasCursor) {
+        *sql += request.modifiedTimeAscending
+            ? QStringLiteral(" AND (af.modified_at > ? OR (af.modified_at = ? AND af.id > ?))")
+            : QStringLiteral(" AND (af.modified_at < ? OR (af.modified_at = ? AND af.id < ?))");
+        binds->append(request.cursorModifiedAt);
+        binds->append(request.cursorModifiedAt);
+        binds->append(request.cursorAssetId);
+    }
 }
 
 void appendDetail(QList<QPair<QString, QString>> &details, const QString &label, const QString &value)
@@ -352,6 +408,31 @@ QString assetTypeCountColumn(AssetType type)
     default: return QStringLiteral("other_count");
     }
 }
+
+AssetFile assetFromQuery(const QSqlQuery &query)
+{
+    AssetFile row;
+    row.id = query.value(0).toLongLong();
+    row.sourceRootId = query.value(1).toLongLong();
+    row.name = query.value(2).toString();
+    row.extension = query.value(3).toString();
+    row.absolutePath = query.value(4).toString();
+    row.relativePath = query.value(5).toString();
+    row.parentPath = query.value(6).toString();
+    row.assetType = static_cast<AssetType>(query.value(7).toInt());
+    row.sizeBytes = query.value(8).toLongLong();
+    row.modifiedAt = query.value(9).toString();
+    row.readable = query.value(10).toInt() == 1;
+    row.favorite = query.value(11).toInt() == 1;
+    row.thumbnailPath = query.value(12).toString();
+    row.thumbnailStatus = static_cast<ThumbnailStatus>(query.value(13).toInt());
+    row.container = query.value(14).toString();
+    row.durationMs = query.value(15).toLongLong();
+    row.bitRate = query.value(16).toLongLong();
+    row.probeStatus = static_cast<ProbeStatus>(query.value(17).toInt());
+    row.technicalSummary = makeTechnicalSummary(row);
+    return row;
+}
 }
 
 LibraryQueryService::LibraryQueryService(DatabaseManager *databaseManager, SearchEngine *searchEngine, QObject *parent)
@@ -395,15 +476,44 @@ QVector<SourceRoot> LibraryQueryService::fetchSourceRoots() const
     return rows;
 }
 
-QVector<AssetFile> LibraryQueryService::fetchAssets(const QString &keyword,
-                                                    std::optional<qint64> sourceRootId,
-                                                    std::optional<AssetType> assetType,
-                                                    bool favoritesOnly,
-                                                    bool modifiedTimeAscending) const
+QString LibraryQueryService::projectDatabasePath() const
 {
-    QVector<AssetFile> rows;
-    if (!m_databaseManager->hasOpenProject()) {
-        return rows;
+    return m_databaseManager && m_databaseManager->hasOpenProject()
+        ? m_databaseManager->databaseFilePath()
+        : QString();
+}
+
+LibraryAssetPageResult LibraryQueryService::fetchAssetPageForPath(
+    const QString &projectDatabasePath,
+    const LibraryAssetPageRequest &request) const
+{
+    LibraryAssetPageResult result;
+    QElapsedTimer elapsed;
+    elapsed.start();
+    if (!m_databaseManager || projectDatabasePath.trimmed().isEmpty()) {
+        result.errorMessage = QStringLiteral("项目数据库路径为空");
+        return result;
+    }
+
+    const auto connectionName = nextLibraryConnectionName(QStringLiteral("page"));
+    QString openError;
+    auto db = m_databaseManager->openThreadConnectionForPath(
+        projectDatabasePath, connectionName, &openError);
+    const auto closeConnection = qScopeGuard([&]() {
+        db.close();
+        db = QSqlDatabase();
+        m_databaseManager->closeThreadConnection(connectionName);
+    });
+    if (!db.isOpen()) {
+        result.errorMessage = openError;
+        result.elapsedMs = elapsed.elapsed();
+        return result;
+    }
+    QSqlQuery readOnly(db);
+    if (!readOnly.exec(QStringLiteral("PRAGMA query_only = ON"))) {
+        result.errorMessage = readOnly.lastError().text();
+        result.elapsedMs = elapsed.elapsed();
+        return result;
     }
 
     QString sql = QStringLiteral(
@@ -422,63 +532,35 @@ QVector<AssetFile> LibraryQueryService::fetchAssets(const QString &keyword,
         "WHERE 1 = 1").arg(static_cast<int>(AssetType::Image));
 
     QVariantList binds;
-    if (sourceRootId.has_value()) {
-        sql += QStringLiteral(" AND af.source_root_id = ?");
-        binds.append(sourceRootId.value());
-    }
-    if (assetType.has_value()) {
-        sql += QStringLiteral(" AND af.asset_type = ?");
-        binds.append(static_cast<int>(assetType.value()));
-    }
-    if (favoritesOnly) {
-        sql += QStringLiteral(" AND af.is_favorite = 1");
-    }
-    if (!keyword.trimmed().isEmpty()) {
-        sql += QStringLiteral(
-            " AND (af.name LIKE ? ESCAPE '\\' OR af.relative_path LIKE ? ESCAPE '\\' "
-            "OR COALESCE(em.search_text, '') LIKE ? ESCAPE '\\')");
-        const auto pattern = m_searchEngine->buildLikePattern(keyword);
-        binds.append(pattern);
-        binds.append(pattern);
-        binds.append(pattern);
-    }
-    sql += modifiedTimeAscending
-        ? QStringLiteral(" ORDER BY af.modified_at ASC, af.id ASC LIMIT 5000")
-        : QStringLiteral(" ORDER BY af.modified_at DESC, af.id DESC LIMIT 5000");
+    appendAssetFilters(&sql, &binds, request, true);
+    sql += request.modifiedTimeAscending
+        ? QStringLiteral(" ORDER BY af.modified_at ASC, af.id ASC LIMIT ?")
+        : QStringLiteral(" ORDER BY af.modified_at DESC, af.id DESC LIMIT ?");
+    const auto pageLimit = qBound<qsizetype>(
+        qsizetype{1}, request.limit, qsizetype{1000});
+    binds.append(pageLimit + 1);
 
-    QSqlQuery query(m_databaseManager->database());
+    QSqlQuery query(db);
     query.prepare(sql);
     for (const auto &bind : binds) {
         query.addBindValue(bind);
     }
-    if (!execOrLog(query, QStringLiteral("读取素材列表"))) {
-        return rows;
+    if (!query.exec()) {
+        result.errorMessage = query.lastError().text();
+        Logger::warn(QStringLiteral("读取素材页查询失败：%1").arg(result.errorMessage));
+        result.elapsedMs = elapsed.elapsed();
+        return result;
     }
 
-    while (query.next()) {
-        AssetFile row;
-        row.id = query.value(0).toLongLong();
-        row.sourceRootId = query.value(1).toLongLong();
-        row.name = query.value(2).toString();
-        row.extension = query.value(3).toString();
-        row.absolutePath = query.value(4).toString();
-        row.relativePath = query.value(5).toString();
-        row.parentPath = query.value(6).toString();
-        row.assetType = static_cast<AssetType>(query.value(7).toInt());
-        row.sizeBytes = query.value(8).toLongLong();
-        row.modifiedAt = query.value(9).toString();
-        row.readable = query.value(10).toInt() == 1;
-        row.favorite = query.value(11).toInt() == 1;
-        row.thumbnailPath = query.value(12).toString();
-        row.thumbnailStatus = static_cast<ThumbnailStatus>(query.value(13).toInt());
-        row.container = query.value(14).toString();
-        row.durationMs = query.value(15).toLongLong();
-        row.bitRate = query.value(16).toLongLong();
-        row.probeStatus = static_cast<ProbeStatus>(query.value(17).toInt());
-        row.technicalSummary = makeTechnicalSummary(row);
-        rows.append(row);
+    while (query.next() && result.items.size() < pageLimit + 1) {
+        result.items.append(assetFromQuery(query));
     }
-    return rows;
+    result.hasMore = result.items.size() > pageLimit;
+    if (result.hasMore) {
+        result.items.resize(pageLimit);
+    }
+    result.elapsedMs = elapsed.elapsed();
+    return result;
 }
 
 InspectorState LibraryQueryService::buildSourceInspector(qint64 sourceRootId) const
@@ -698,46 +780,75 @@ InspectorState LibraryQueryService::buildAssetInspector(qint64 assetId) const
     return state;
 }
 
-qint64 LibraryQueryService::assetCount(const QString &keyword, std::optional<qint64> sourceRootId, std::optional<AssetType> assetType, bool favoritesOnly) const
+LibraryAssetCountResult LibraryQueryService::assetCountForPath(
+    const QString &projectDatabasePath,
+    const LibraryAssetPageRequest &request) const
 {
-    if (!m_databaseManager->hasOpenProject()) {
-        return 0;
+    LibraryAssetCountResult result;
+    QElapsedTimer elapsed;
+    elapsed.start();
+    if (!m_databaseManager || projectDatabasePath.trimmed().isEmpty()) {
+        result.errorMessage = QStringLiteral("项目数据库路径为空");
+        return result;
     }
 
-    QString sql = QStringLiteral(
-        "SELECT COUNT(*) FROM asset_file af "
-        "LEFT JOIN embedded_metadata em ON em.asset_id = af.id WHERE 1 = 1");
+    const auto connectionName = nextLibraryConnectionName(QStringLiteral("count"));
+    QString openError;
+    auto db = m_databaseManager->openThreadConnectionForPath(
+        projectDatabasePath, connectionName, &openError);
+    const auto closeConnection = qScopeGuard([&]() {
+        db.close();
+        db = QSqlDatabase();
+        m_databaseManager->closeThreadConnection(connectionName);
+    });
+    if (!db.isOpen()) {
+        result.errorMessage = openError;
+        result.elapsedMs = elapsed.elapsed();
+        return result;
+    }
+    QSqlQuery readOnly(db);
+    if (!readOnly.exec(QStringLiteral("PRAGMA query_only = ON"))) {
+        result.errorMessage = readOnly.lastError().text();
+        result.elapsedMs = elapsed.elapsed();
+        return result;
+    }
+
+    const bool canUseSourceTotals = request.keyword.trimmed().isEmpty()
+        && !request.assetType.has_value()
+        && !request.favoritesOnly;
+    QString sql;
     QVariantList binds;
-    if (sourceRootId.has_value()) {
-        sql += QStringLiteral(" AND af.source_root_id = ?");
-        binds.append(sourceRootId.value());
-    }
-    if (assetType.has_value()) {
-        sql += QStringLiteral(" AND af.asset_type = ?");
-        binds.append(static_cast<int>(assetType.value()));
-    }
-    if (favoritesOnly) {
-        sql += QStringLiteral(" AND af.is_favorite = 1");
-    }
-    if (!keyword.trimmed().isEmpty()) {
-        sql += QStringLiteral(
-            " AND (af.name LIKE ? ESCAPE '\\' OR af.relative_path LIKE ? ESCAPE '\\' "
-            "OR COALESCE(em.search_text, '') LIKE ? ESCAPE '\\')");
-        const auto pattern = m_searchEngine->buildLikePattern(keyword);
-        binds.append(pattern);
-        binds.append(pattern);
-        binds.append(pattern);
+    if (canUseSourceTotals) {
+        sql = QStringLiteral("SELECT COALESCE(SUM(total_files), 0) FROM source_root");
+        if (request.sourceRootId.has_value()) {
+            sql += QStringLiteral(" WHERE id = ?");
+            binds.append(request.sourceRootId.value());
+        }
+    } else {
+        sql = QStringLiteral("SELECT COUNT(*) FROM asset_file af ");
+        if (!request.keyword.trimmed().isEmpty()) {
+            sql += QStringLiteral("LEFT JOIN embedded_metadata em ON em.asset_id = af.id ");
+        }
+        sql += QStringLiteral("WHERE 1 = 1");
+        appendAssetFilters(&sql, &binds, request, false);
     }
 
-    QSqlQuery query(m_databaseManager->database());
+    QSqlQuery query(db);
     query.prepare(sql);
     for (const auto &bind : binds) {
         query.addBindValue(bind);
     }
-    if (!execOrLog(query, QStringLiteral("统计素材数量"))) {
-        return 0;
+    if (!query.exec()) {
+        result.errorMessage = query.lastError().text();
+        Logger::warn(QStringLiteral("统计素材数量查询失败：%1").arg(result.errorMessage));
+        result.elapsedMs = elapsed.elapsed();
+        return result;
     }
-    return query.next() ? query.value(0).toLongLong() : 0;
+    if (query.next()) {
+        result.count = query.value(0).toLongLong();
+    }
+    result.elapsedMs = elapsed.elapsed();
+    return result;
 }
 
 bool LibraryQueryService::setAssetFavorite(qint64 assetId, bool favorite)

@@ -10,6 +10,8 @@
 #include <QQmlError>
 #include <QQuickStyle>
 #include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QMessageLogContext>
 #include <QCoreApplication>
 #include <QTimer>
@@ -101,6 +103,18 @@ bool AppBootstrap::run()
     }
 
     installQmlRuntimeLogger();
+    const auto recoveryMarker = QDir(Paths::resolvedDataRoot())
+                                    .filePath(QStringLiteral("shutdown-recovery.json"));
+    if (QFileInfo::exists(recoveryMarker)) {
+        QFile marker(recoveryMarker);
+        const auto state = marker.open(QIODevice::ReadOnly)
+            ? QString::fromUtf8(marker.readAll())
+            : QStringLiteral("unreadable");
+        Logger::warn(QStringLiteral(
+            "previous_exit reason=incomplete_shutdown recovery_state=%1")
+                         .arg(state.left(4096)));
+        QFile::remove(recoveryMarker);
+    }
     QQuickStyle::setStyle(QStringLiteral("Basic"));
 
     m_engine = std::make_unique<QQmlApplicationEngine>();

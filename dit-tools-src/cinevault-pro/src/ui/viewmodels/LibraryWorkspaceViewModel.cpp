@@ -5,15 +5,22 @@
 #include "application/LibraryQueryService.h"
 #include "ui/models/AssetListModel.h"
 
+#include <QtConcurrent>
+
 #include <QClipboard>
 #include <QDesktopServices>
 #include <QDir>
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QMetaObject>
+#include <QSet>
 #include <QUrl>
 
+#include <utility>
+
 namespace {
+constexpr qsizetype AssetPageSize = 200;
+
 bool isMediaAsset(AssetType type)
 {
     return type == AssetType::Video || type == AssetType::Audio;
@@ -40,6 +47,31 @@ LibraryWorkspaceViewModel::LibraryWorkspaceViewModel(LibraryQueryService *librar
     , m_libraryQueryService(libraryQueryService)
     , m_model(new AssetListModel(this))
 {
+    m_catalogReloadTimer.setSingleShot(true);
+    m_catalogReloadTimer.setInterval(500);
+    connect(&m_catalogReloadTimer, &QTimer::timeout, this, [this]() {
+        beginResetQuery();
+    });
+    m_searchReloadTimer.setSingleShot(true);
+    m_searchReloadTimer.setInterval(250);
+    connect(&m_searchReloadTimer, &QTimer::timeout, this, [this]() {
+        beginResetQuery();
+    });
+    m_countQueryTimer.setSingleShot(true);
+    m_countQueryTimer.setInterval(300);
+    connect(&m_countQueryTimer, &QTimer::timeout, this, [this]() {
+        startCountQuery(m_pendingCountGeneration);
+    });
+}
+
+LibraryWorkspaceViewModel::~LibraryWorkspaceViewModel()
+{
+    waitForIdle();
+}
+
+void LibraryWorkspaceViewModel::waitForIdle()
+{
+    m_futures.waitForFinished();
 }
 
 AssetListModel *LibraryWorkspaceViewModel::model() const
@@ -69,10 +101,22 @@ QString LibraryWorkspaceViewModel::sortOrderText() const
 
 QString LibraryWorkspaceViewModel::statusText() const
 {
-    if (m_favoritesOnly) {
-        return QStringLiteral("当前结果 %1 条 · 仅显示收藏 · %2").arg(m_totalCount).arg(sortOrderText());
+    QString result;
+    if (m_loading && m_assets.isEmpty()) {
+        result = QStringLiteral("正在后台加载首屏素材…");
+    } else if (m_countPending) {
+        result = QStringLiteral("已加载 %1 条 · 正在统计总数").arg(m_assets.size());
+    } else {
+        result = QStringLiteral("已加载 %1 / 共 %2 条").arg(m_assets.size()).arg(m_totalCount);
     }
-    return QStringLiteral("当前结果 %1 条 · %2").arg(m_totalCount).arg(sortOrderText());
+    if (m_favoritesOnly) {
+        result += QStringLiteral(" · 仅显示收藏");
+    }
+    result += QStringLiteral(" · %1").arg(sortOrderText());
+    if (!m_queryError.isEmpty()) {
+        result += QStringLiteral(" · 加载失败：%1").arg(m_queryError);
+    }
+    return result;
 }
 
 void LibraryWorkspaceViewModel::setFavoritesOnly(bool favoritesOnly)
@@ -82,7 +126,7 @@ void LibraryWorkspaceViewModel::setFavoritesOnly(bool favoritesOnly)
     }
     m_favoritesOnly = favoritesOnly;
     emit filtersChanged();
-    refresh();
+    beginResetQuery();
 }
 
 qint64 LibraryWorkspaceViewModel::totalAssetCount() const
@@ -171,6 +215,21 @@ bool LibraryWorkspaceViewModel::selectedPreviewIsDocument() const
     return asset.id > 0 && asset.assetType == AssetType::Document;
 }
 
+bool LibraryWorkspaceViewModel::loading() const
+{
+    return m_loading;
+}
+
+bool LibraryWorkspaceViewModel::hasMore() const
+{
+    return m_hasMore;
+}
+
+int LibraryWorkspaceViewModel::loadedAssetCount() const
+{
+    return m_assets.size();
+}
+
 void LibraryWorkspaceViewModel::setViewMode(int viewMode)
 {
     if (m_viewMode == viewMode) {
@@ -182,6 +241,9 @@ void LibraryWorkspaceViewModel::setViewMode(int viewMode)
 
 void LibraryWorkspaceViewModel::resetForProject()
 {
+    m_catalogReloadTimer.stop();
+    m_searchReloadTimer.stop();
+    m_countQueryTimer.stop();
     const bool hadSelection = m_selectedAssetId != 0;
     m_searchText.clear();
     m_sourceFilter.reset();
@@ -191,7 +253,7 @@ void LibraryWorkspaceViewModel::resetForProject()
         emit filtersChanged();
     }
     m_selectedAssetId = 0;
-    refresh();
+    beginResetQuery();
     if (hadSelection) {
         emit selectionChanged();
     }
@@ -199,7 +261,24 @@ void LibraryWorkspaceViewModel::resetForProject()
 
 void LibraryWorkspaceViewModel::reload()
 {
-    refresh();
+    m_catalogReloadTimer.stop();
+    m_searchReloadTimer.stop();
+    beginResetQuery();
+}
+
+void LibraryWorkspaceViewModel::scheduleReload()
+{
+    if (!m_catalogReloadTimer.isActive()) {
+        m_catalogReloadTimer.start();
+    }
+}
+
+void LibraryWorkspaceViewModel::loadMore()
+{
+    if (m_loading || !m_hasMore || m_assets.isEmpty()) {
+        return;
+    }
+    startPageQuery(m_queryGeneration, false);
 }
 
 void LibraryWorkspaceViewModel::setSearchText(const QString &searchText)
@@ -208,7 +287,7 @@ void LibraryWorkspaceViewModel::setSearchText(const QString &searchText)
         return;
     }
     m_searchText = searchText;
-    refresh();
+    m_searchReloadTimer.start();
 }
 
 void LibraryWorkspaceViewModel::setSourceFilter(qint64 sourceRootId)
@@ -218,7 +297,7 @@ void LibraryWorkspaceViewModel::setSourceFilter(qint64 sourceRootId)
         m_selectedAssetId = 0;
         emit selectionChanged();
     }
-    refresh();
+    beginResetQuery();
 }
 
 void LibraryWorkspaceViewModel::setAssetTypeFilter(int assetType)
@@ -228,14 +307,14 @@ void LibraryWorkspaceViewModel::setAssetTypeFilter(int assetType)
     } else {
         m_assetTypeFilter = static_cast<AssetType>(assetType);
     }
-    refresh();
+    beginResetQuery();
 }
 
 void LibraryWorkspaceViewModel::toggleModifiedTimeOrder()
 {
     m_modifiedTimeAscending = !m_modifiedTimeAscending;
     emit filtersChanged();
-    refresh();
+    beginResetQuery();
 }
 
 void LibraryWorkspaceViewModel::selectAsset(qint64 assetId)
@@ -266,6 +345,9 @@ void LibraryWorkspaceViewModel::moveAssetSelection(int delta)
         ? 0
         : qBound(0, currentIndex + delta, m_assets.size() - 1);
     selectAssetAt(targetIndex);
+    if (targetIndex >= m_assets.size() - 12) {
+        loadMore();
+    }
 }
 
 bool LibraryWorkspaceViewModel::toggleAssetFavorite(qint64 assetId)
@@ -277,7 +359,7 @@ bool LibraryWorkspaceViewModel::toggleAssetFavorite(qint64 assetId)
     if (!m_libraryQueryService->setAssetFavorite(assetId, !asset.favorite)) {
         return false;
     }
-    refresh();
+    beginResetQuery();
     if (m_selectedAssetId == assetId) {
         emit assetSelected(assetId);
     }
@@ -338,16 +420,165 @@ AssetFile LibraryWorkspaceViewModel::selectedAsset() const
     return assetById(m_selectedAssetId);
 }
 
-void LibraryWorkspaceViewModel::refresh()
+LibraryAssetPageRequest LibraryWorkspaceViewModel::queryRequest(bool includeCursor) const
+{
+    LibraryAssetPageRequest request;
+    request.keyword = m_searchText;
+    request.sourceRootId = m_sourceFilter;
+    request.assetType = m_assetTypeFilter;
+    request.favoritesOnly = m_favoritesOnly;
+    request.modifiedTimeAscending = m_modifiedTimeAscending;
+    request.limit = AssetPageSize;
+    if (includeCursor && !m_assets.isEmpty()) {
+        const auto &last = m_assets.constLast();
+        request.hasCursor = true;
+        request.cursorModifiedAt = last.modifiedAt;
+        request.cursorAssetId = last.id;
+    }
+    return request;
+}
+
+void LibraryWorkspaceViewModel::beginResetQuery()
+{
+    ++m_queryGeneration;
+    const auto generation = m_queryGeneration;
+    m_queryError.clear();
+    m_assets.clear();
+    m_model->clear();
+    m_totalCount = 0;
+    m_countPending = true;
+    m_pendingCountGeneration = generation;
+    setHasMore(false);
+    setLoading(false);
+    updateDerivedState();
+
+    if (!m_libraryQueryService
+        || m_libraryQueryService->projectDatabasePath().trimmed().isEmpty()) {
+        m_countPending = false;
+        emit statusChanged();
+        return;
+    }
+
+    startPageQuery(generation, true);
+    m_countQueryTimer.start();
+}
+
+void LibraryWorkspaceViewModel::startPageQuery(quint64 generation, bool firstPage)
+{
+    if (!m_libraryQueryService || generation != m_queryGeneration || m_loading) {
+        return;
+    }
+    const auto projectDatabasePath = m_libraryQueryService->projectDatabasePath();
+    if (projectDatabasePath.trimmed().isEmpty()) {
+        return;
+    }
+
+    const auto request = queryRequest(!firstPage);
+    auto *queryService = m_libraryQueryService;
+    setLoading(true);
+    auto future = QtConcurrent::run([this,
+                                     queryService,
+                                     projectDatabasePath,
+                                     request,
+                                     generation,
+                                     firstPage]() {
+        const auto result = queryService->fetchAssetPageForPath(projectDatabasePath, request);
+        QMetaObject::invokeMethod(this,
+                                  [this, generation, firstPage, result]() {
+            applyPageResult(generation, firstPage, result);
+        },
+                                  Qt::QueuedConnection);
+    });
+    m_futures.addFuture(future);
+}
+
+void LibraryWorkspaceViewModel::startCountQuery(quint64 generation)
+{
+    if (!m_libraryQueryService || generation != m_queryGeneration) {
+        return;
+    }
+    const auto projectDatabasePath = m_libraryQueryService->projectDatabasePath();
+    if (projectDatabasePath.trimmed().isEmpty()) {
+        return;
+    }
+
+    auto request = queryRequest(false);
+    request.hasCursor = false;
+    auto *queryService = m_libraryQueryService;
+    auto future = QtConcurrent::run([this,
+                                     queryService,
+                                     projectDatabasePath,
+                                     request,
+                                     generation]() {
+        const auto result = queryService->assetCountForPath(projectDatabasePath, request);
+        QMetaObject::invokeMethod(this,
+                                  [this, generation, result]() {
+            applyCountResult(generation, result);
+        },
+                                  Qt::QueuedConnection);
+    });
+    m_futures.addFuture(future);
+}
+
+void LibraryWorkspaceViewModel::applyPageResult(
+    quint64 generation,
+    bool firstPage,
+    const LibraryAssetPageResult &result)
+{
+    if (generation != m_queryGeneration) {
+        return;
+    }
+    setLoading(false);
+    m_queryError = result.errorMessage;
+    if (!result.errorMessage.isEmpty()) {
+        setHasMore(false);
+        emit statusChanged();
+        return;
+    }
+
+    if (firstPage) {
+        m_assets = result.items;
+        m_model->setItems(m_assets);
+    } else {
+        QSet<qint64> loadedIds;
+        loadedIds.reserve(m_assets.size());
+        for (const auto &asset : std::as_const(m_assets)) {
+            loadedIds.insert(asset.id);
+        }
+        QVector<AssetFile> newItems;
+        newItems.reserve(result.items.size());
+        for (const auto &asset : result.items) {
+            if (!loadedIds.contains(asset.id)) {
+                loadedIds.insert(asset.id);
+                newItems.append(asset);
+            }
+        }
+        m_assets.append(newItems);
+        m_model->appendItems(newItems);
+    }
+    setHasMore(result.hasMore);
+    updateDerivedState();
+}
+
+void LibraryWorkspaceViewModel::applyCountResult(
+    quint64 generation,
+    const LibraryAssetCountResult &result)
+{
+    if (generation != m_queryGeneration) {
+        return;
+    }
+    m_countPending = false;
+    if (result.errorMessage.isEmpty()) {
+        m_totalCount = qMax<qint64>(result.count, m_assets.size());
+    } else if (m_queryError.isEmpty()) {
+        m_queryError = result.errorMessage;
+    }
+    emit statusChanged();
+}
+
+void LibraryWorkspaceViewModel::updateDerivedState()
 {
     const auto previousSelectedIndex = selectedAssetIndex();
-    m_assets = m_libraryQueryService->fetchAssets(m_searchText,
-                                                  m_sourceFilter,
-                                                  m_assetTypeFilter,
-                                                  m_favoritesOnly,
-                                                  m_modifiedTimeAscending);
-    m_model->setItems(m_assets);
-    m_totalCount = m_libraryQueryService->assetCount(m_searchText, m_sourceFilter, m_assetTypeFilter, m_favoritesOnly);
     m_readyCount = 0;
     m_pendingCount = 0;
     m_issueCount = 0;
@@ -375,4 +606,24 @@ void LibraryWorkspaceViewModel::refresh()
         emit selectionChanged();
     }
     emit statusChanged();
+    emit paginationChanged();
+}
+
+void LibraryWorkspaceViewModel::setLoading(bool loading)
+{
+    if (m_loading == loading) {
+        return;
+    }
+    m_loading = loading;
+    emit paginationChanged();
+    emit statusChanged();
+}
+
+void LibraryWorkspaceViewModel::setHasMore(bool hasMore)
+{
+    if (m_hasMore == hasMore) {
+        return;
+    }
+    m_hasMore = hasMore;
+    emit paginationChanged();
 }

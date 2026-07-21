@@ -1,8 +1,11 @@
 #include "application/MaterialCatalogSyncService.h"
 
+#include "application/IndexingWorkCoordinator.h"
+
 #include "application/ProjectService.h"
 #include "core/jobs/JobEngine.h"
 #include "core/search/CaptureTimeResolver.h"
+#include "infrastructure/db/DatabaseMigration.h"
 #include "infrastructure/db/GlobalDatabaseManager.h"
 #include "shared/FolderPathMetadata.h"
 #include "shared/Formatters.h"
@@ -15,11 +18,14 @@
 #include <QJsonDocument>
 #include <QMetaObject>
 #include <QRegularExpression>
+#include <QScopeGuard>
 #include <QSet>
 #include <QSqlDatabase>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QThread>
+
+#include <functional>
 
 namespace {
 struct ExistingVideoState {
@@ -54,6 +60,8 @@ struct ProjectFolderState {
     QString dateAnchor;
     bool available = true;
 };
+
+using CatalogDeltaSink = std::function<void(const CatalogChangeSet &)>;
 
 bool isSupportedTextAsset(AssetType assetType, const QString &extension)
 {
@@ -156,11 +164,6 @@ QString emptyIfNull(const QString &value)
     return value.isNull() ? QStringLiteral("") : value;
 }
 
-QString stablePathKey(QString path)
-{
-    return FolderPathMetadata::normalizedPathKey(path);
-}
-
 bool execQuery(QSqlQuery &query, QString *errorMessage)
 {
     if (query.exec()) {
@@ -183,9 +186,14 @@ QSqlDatabase openProjectConnection(const QString &databasePath, const QString &c
     }
     auto db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName);
     db.setDatabaseName(databasePath);
-    db.setConnectOptions(QStringLiteral("QSQLITE_OPEN_READONLY"));
-    if (!db.open() && errorMessage) {
-        *errorMessage = db.lastError().text();
+    if (!db.open()) {
+        if (errorMessage) {
+            *errorMessage = db.lastError().text();
+        }
+        return db;
+    }
+    if (!DatabaseMigration::configureSqlite(db, errorMessage)) {
+        db.close();
     }
     return db;
 }
@@ -213,11 +221,9 @@ bool hasUnstableSourceRoot(QSqlDatabase &projectDb, QString *errorMessage)
     return query.next();
 }
 
-QVector<GlobalVideoAsset> fetchProjectAssets(QSqlDatabase &projectDb, const Project &project, QString *errorMessage)
+QString projectAssetSelectSql(const QString &whereClause)
 {
-    QVector<GlobalVideoAsset> assets;
-    QSqlQuery query(projectDb);
-    query.prepare(QStringLiteral(
+    return QStringLiteral(
         "SELECT af.id, af.source_root_id, COALESCE(sr.name, ''), COALESCE(sr.path, ''), af.name, COALESCE(af.extension, ''), "
         "af.absolute_path, af.relative_path, af.asset_type, af.size_bytes, af.modified_at, "
         "COALESCE(mm.duration_ms, 0), COALESCE(mm.container, ''), COALESCE(mm.bit_rate, 0), COALESCE(mm.raw_json, ''), "
@@ -232,11 +238,12 @@ QVector<GlobalVideoAsset> fetchProjectAssets(QSqlDatabase &projectDb, const Proj
         "LEFT JOIN media_metadata mm ON mm.asset_id = af.id "
         "LEFT JOIN embedded_metadata em ON em.asset_id = af.id AND em.status = 1 "
         "LEFT JOIN thumbnail th ON th.asset_id = af.id "
-        "ORDER BY af.id"));
-    if (!execQuery(query, errorMessage)) {
-        return assets;
-    }
+        "%1 ORDER BY af.id").arg(whereClause);
+}
 
+QVector<GlobalVideoAsset> readProjectAssets(QSqlQuery &query, const Project &project)
+{
+    QVector<GlobalVideoAsset> assets;
     QHash<QString, bool> sourceAvailability;
     CaptureTimeResolver captureTimeResolver;
     while (query.next()) {
@@ -304,24 +311,59 @@ QVector<GlobalVideoAsset> fetchProjectAssets(QSqlDatabase &projectDb, const Proj
     return assets;
 }
 
-QVector<ProjectFolderState> fetchProjectFolders(QSqlDatabase &projectDb,
+QVector<GlobalVideoAsset> fetchProjectAssetPage(QSqlDatabase &projectDb,
                                                 const Project &project,
+                                                qint64 lastAssetId,
+                                                qsizetype limit,
                                                 QString *errorMessage)
 {
-    QVector<ProjectFolderState> folders;
     QSqlQuery query(projectDb);
-    query.prepare(QStringLiteral(
+    query.prepare(projectAssetSelectSql(QStringLiteral("WHERE af.id > ?")) + QStringLiteral(" LIMIT ?"));
+    query.addBindValue(lastAssetId);
+    query.addBindValue(qBound(qsizetype{1}, limit, qsizetype{1000}));
+    if (!execQuery(query, errorMessage)) {
+        return {};
+    }
+    return readProjectAssets(query, project);
+}
+
+QVector<GlobalVideoAsset> fetchProjectAssetsByIds(QSqlDatabase &projectDb,
+                                                  const Project &project,
+                                                  const QVector<qint64> &assetIds,
+                                                  QString *errorMessage)
+{
+    if (assetIds.isEmpty()) {
+        return {};
+    }
+    QStringList placeholders;
+    placeholders.fill(QStringLiteral("?"), assetIds.size());
+    QSqlQuery query(projectDb);
+    query.prepare(projectAssetSelectSql(
+        QStringLiteral("WHERE af.id IN (%1)").arg(placeholders.join(QLatin1Char(',')))));
+    for (const auto assetId : assetIds) {
+        query.addBindValue(assetId);
+    }
+    if (!execQuery(query, errorMessage)) {
+        return {};
+    }
+    return readProjectAssets(query, project);
+}
+
+QString projectFolderSelectSql(const QString &whereClause)
+{
+    return QStringLiteral(
         "SELECT fn.id, fn.source_root_id, COALESCE(sr.name, ''), COALESCE(sr.path, ''), "
         "COALESCE(fn.name, ''), fn.absolute_path, COALESCE(fn.path_key, ''), fn.relative_path, "
         "COALESCE(fn.parent_relative_path, ''), COALESCE(fn.depth, 0), "
         "COALESCE(fn.direct_file_count, fn.file_count, 0), COALESCE(fn.recursive_file_count, fn.file_count, 0), "
         "COALESCE(fn.normalized_date, ''), COALESCE(fn.date_anchor, '') "
         "FROM folder_node fn LEFT JOIN source_root sr ON sr.id = fn.source_root_id "
-        "ORDER BY fn.source_root_id, fn.depth, fn.relative_path"));
-    if (!execQuery(query, errorMessage)) {
-        return folders;
-    }
+        "%1 ORDER BY fn.id").arg(whereClause);
+}
 
+QVector<ProjectFolderState> readProjectFolders(QSqlQuery &query, const Project &project)
+{
+    QVector<ProjectFolderState> folders;
     QHash<QString, bool> sourceAvailability;
     while (query.next()) {
         ProjectFolderState folder;
@@ -358,32 +400,86 @@ QVector<ProjectFolderState> fetchProjectFolders(QSqlDatabase &projectDb,
     return folders;
 }
 
-QHash<QString, ExistingVideoState> loadExistingStates(QSqlDatabase &globalDb, const QString &projectUuid, QString *errorMessage)
+QVector<ProjectFolderState> fetchProjectFolderPage(QSqlDatabase &projectDb,
+                                                   const Project &project,
+                                                   qint64 lastFolderId,
+                                                   qsizetype limit,
+                                                   QString *errorMessage)
 {
-    QHash<QString, ExistingVideoState> states;
+    QSqlQuery query(projectDb);
+    query.prepare(projectFolderSelectSql(QStringLiteral("WHERE fn.id > ?")) + QStringLiteral(" LIMIT ?"));
+    query.addBindValue(lastFolderId);
+    query.addBindValue(qBound(qsizetype{1}, limit, qsizetype{1000}));
+    if (!execQuery(query, errorMessage)) {
+        return {};
+    }
+    return readProjectFolders(query, project);
+}
+
+QVector<ProjectFolderState> fetchProjectFoldersByIds(QSqlDatabase &projectDb,
+                                                     const Project &project,
+                                                     const QVector<qint64> &folderIds,
+                                                     QString *errorMessage)
+{
+    if (folderIds.isEmpty()) {
+        return {};
+    }
+    QStringList placeholders;
+    placeholders.fill(QStringLiteral("?"), folderIds.size());
+    QSqlQuery query(projectDb);
+    query.prepare(projectFolderSelectSql(
+        QStringLiteral("WHERE fn.id IN (%1)").arg(placeholders.join(QLatin1Char(',')))));
+    for (const auto folderId : folderIds) {
+        query.addBindValue(folderId);
+    }
+    if (!execQuery(query, errorMessage)) {
+        return {};
+    }
+    return readProjectFolders(query, project);
+}
+
+bool findExistingState(QSqlDatabase &globalDb,
+                       const QString &projectUuid,
+                       const QString &videoKey,
+                       const QString &absolutePath,
+                       ExistingVideoState *state,
+                       bool *found,
+                       QString *errorMessage)
+{
+    if (found) {
+        *found = false;
+    }
     QSqlQuery query(globalDb);
     query.prepare(QStringLiteral(
         "SELECT video_key, COALESCE(absolute_path, ''), size_bytes, modified_at, analysis_status, confirmation_status, "
         "COALESCE(source_text, ''), COALESCE(error_message, '') "
-        "FROM global_video_asset WHERE project_uuid = ?"));
+        "FROM global_video_asset WHERE project_uuid = ? "
+        "AND (video_key = ? OR absolute_path = ? COLLATE NOCASE) "
+        "ORDER BY CASE WHEN video_key = ? THEN 0 ELSE 1 END LIMIT 1"));
     query.addBindValue(projectUuid);
+    query.addBindValue(videoKey);
+    query.addBindValue(absolutePath);
+    query.addBindValue(videoKey);
     if (!execQuery(query, errorMessage)) {
-        return states;
+        return false;
     }
-
-    while (query.next()) {
-        ExistingVideoState state;
-        state.videoKey = query.value(0).toString();
-        state.absolutePath = query.value(1).toString();
-        state.sizeBytes = query.value(2).toLongLong();
-        state.modifiedAt = query.value(3).toString();
-        state.analysisStatus = static_cast<VideoAnalysisStatus>(query.value(4).toInt());
-        state.confirmationStatus = static_cast<ConfirmationStatus>(query.value(5).toInt());
-        state.sourceText = query.value(6).toString();
-        state.errorMessage = query.value(7).toString();
-        states.insert(state.videoKey, state);
+    if (!query.next()) {
+        return true;
     }
-    return states;
+    if (state) {
+        state->videoKey = query.value(0).toString();
+        state->absolutePath = query.value(1).toString();
+        state->sizeBytes = query.value(2).toLongLong();
+        state->modifiedAt = query.value(3).toString();
+        state->analysisStatus = static_cast<VideoAnalysisStatus>(query.value(4).toInt());
+        state->confirmationStatus = static_cast<ConfirmationStatus>(query.value(5).toInt());
+        state->sourceText = query.value(6).toString();
+        state->errorMessage = query.value(7).toString();
+    }
+    if (found) {
+        *found = true;
+    }
+    return true;
 }
 
 bool updateProjectRegistry(QSqlDatabase &globalDb,
@@ -609,232 +705,485 @@ bool migrateAnalysisArtifacts(QSqlDatabase &globalDb,
     return true;
 }
 
-bool syncProjectIntoGlobal(QSqlDatabase &globalDb,
-                           const Project &project,
-                           bool hasFts5,
-                           QString *errorMessage)
+bool acquireWriterLease(IndexingWorkCoordinator *workCoordinator,
+                        quint64 workGeneration,
+                        IndexingWorkCoordinator::Lease *lease,
+                        QString *errorMessage)
 {
+    if (!workCoordinator) {
+        return true;
+    }
+    *lease = workCoordinator->acquire({
+        IndexingWorkCoordinator::Resource::SqliteWriter,
+        IndexingWorkCoordinator::Priority::Background,
+        false,
+        workGeneration});
+    if (*lease) {
+        return true;
+    }
     if (errorMessage) {
-        errorMessage->clear();
+        *errorMessage = QStringLiteral("全局素材同步因项目切换、队列拥塞或应用退出而取消");
     }
-    const auto projectConnectionName = QStringLiteral("sync_project_%1_%2")
-        .arg(project.id)
-        .arg(reinterpret_cast<quintptr>(QThread::currentThreadId()));
-    QString openError;
-    auto projectDb = openProjectConnection(project.databasePath, projectConnectionName, &openError);
-    if (!projectDb.isOpen()) {
-        QString offlineError;
-        markProjectOffline(globalDb, project, openError, &offlineError);
-        if (errorMessage) {
-            *errorMessage = offlineError.isEmpty()
-                ? openError
-                : QStringLiteral("%1；更新离线状态失败：%2").arg(openError, offlineError);
-        }
-        projectDb = QSqlDatabase();
-        closeProjectConnection(projectConnectionName);
-        return false;
-    }
+    return false;
+}
 
-    QString sourceStateError;
-    const bool unstableSourceRoot = hasUnstableSourceRoot(projectDb, &sourceStateError);
-    if (!sourceStateError.isEmpty()) {
-        projectDb.close();
-        projectDb = QSqlDatabase();
-        closeProjectConnection(projectConnectionName);
-        if (errorMessage) {
-            *errorMessage = sourceStateError;
-        }
+struct CatalogLogState {
+    bool available = false;
+    qint64 targetWatermark = 0;
+    bool requiresFullRebuild = true;
+};
+
+bool readCatalogLogState(QSqlDatabase &projectDb, CatalogLogState *state, QString *errorMessage)
+{
+    if (state) {
+        *state = {};
+    }
+    QSqlQuery exists(projectDb);
+    exists.prepare(QStringLiteral(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'catalog_change_state'"));
+    if (!execQuery(exists, errorMessage)) {
         return false;
     }
-    if (unstableSourceRoot) {
-        projectDb.close();
-        projectDb = QSqlDatabase();
-        closeProjectConnection(projectConnectionName);
+    if (!exists.next()) {
         return true;
     }
 
-    QString fetchError;
-    const auto folders = fetchProjectFolders(projectDb, project, &fetchError);
-    const auto assets = fetchError.isEmpty()
-        ? fetchProjectAssets(projectDb, project, &fetchError)
-        : QVector<GlobalVideoAsset>();
-    projectDb.close();
-    projectDb = QSqlDatabase();
-    closeProjectConnection(projectConnectionName);
-    if (!fetchError.isEmpty()) {
+    QSqlQuery query(projectDb);
+    query.prepare(QStringLiteral(
+        "SELECT next_log_id, requires_full_rebuild FROM catalog_change_state WHERE singleton_id = 1"));
+    if (!execQuery(query, errorMessage)) {
+        return false;
+    }
+    if (!query.next()) {
         if (errorMessage) {
-            *errorMessage = fetchError;
+            *errorMessage = QStringLiteral("项目素材变化日志状态缺失");
         }
         return false;
     }
+    if (state) {
+        state->available = true;
+        state->targetWatermark = query.value(0).toLongLong();
+        state->requiresFullRebuild = query.value(1).toInt() != 0;
+    }
+    return true;
+}
 
-    const auto now = QDateTime::currentDateTime().toString(Qt::ISODate);
-    const auto existingStates = loadExistingStates(globalDb, project.id, errorMessage);
-    if (errorMessage && !errorMessage->isEmpty()) {
+bool readGlobalProjectState(QSqlDatabase &globalDb,
+                            const QString &projectUuid,
+                            qint64 *activeGeneration,
+                            QString *syncStatus,
+                            bool *hasIncompleteGeneration,
+                            QString *errorMessage)
+{
+    if (activeGeneration) {
+        *activeGeneration = 0;
+    }
+    if (syncStatus) {
+        syncStatus->clear();
+    }
+    if (hasIncompleteGeneration) {
+        *hasIncompleteGeneration = false;
+    }
+    QSqlQuery query(globalDb);
+    query.prepare(QStringLiteral(
+        "SELECT active_sync_generation, sync_status, "
+        "EXISTS(SELECT 1 FROM global_video_asset a WHERE a.project_uuid = project_registry.project_uuid "
+        "AND a.sync_generation != project_registry.active_sync_generation) OR "
+        "EXISTS(SELECT 1 FROM global_folder_node f WHERE f.project_uuid = project_registry.project_uuid "
+        "AND f.sync_generation != project_registry.active_sync_generation) "
+        "FROM project_registry WHERE project_uuid = ?"));
+    query.addBindValue(projectUuid);
+    if (!execQuery(query, errorMessage)) {
         return false;
     }
-    QHash<QString, ExistingVideoState> existingStatesByPath;
-    for (auto it = existingStates.cbegin(); it != existingStates.cend(); ++it) {
-        const auto key = stablePathKey(it.value().absolutePath);
-        if (!key.isEmpty() && !existingStatesByPath.contains(key)) {
-            existingStatesByPath.insert(key, it.value());
-        }
+    if (!query.next()) {
+        return true;
     }
+    if (activeGeneration) {
+        *activeGeneration = query.value(0).toLongLong();
+    }
+    if (syncStatus) {
+        *syncStatus = query.value(1).toString();
+    }
+    if (hasIncompleteGeneration) {
+        *hasIncompleteGeneration = query.value(2).toInt() != 0;
+    }
+    return true;
+}
 
+QVector<CatalogChange> fetchCatalogChangePage(QSqlDatabase &projectDb,
+                                              qint64 afterLogId,
+                                              qint64 targetWatermark,
+                                              qsizetype limit,
+                                              QString *errorMessage)
+{
+    QVector<CatalogChange> changes;
+    QSqlQuery query(projectDb);
+    query.prepare(QStringLiteral(
+        "SELECT log_id, entity_type, entity_id, entity_key, previous_entity_key, source_root_id, "
+        "previous_source_root_id, operation, change_mask FROM catalog_change_log "
+        "WHERE log_id > ? AND log_id <= ? ORDER BY log_id LIMIT ?"));
+    query.addBindValue(afterLogId);
+    query.addBindValue(targetWatermark);
+    query.addBindValue(qBound(qsizetype{1}, limit, qsizetype{500}));
+    if (!execQuery(query, errorMessage)) {
+        return changes;
+    }
+    while (query.next()) {
+        CatalogChange change;
+        change.logId = query.value(0).toLongLong();
+        change.entity = static_cast<CatalogChangeEntity>(query.value(1).toInt());
+        change.entityId = query.value(2).toLongLong();
+        change.entityKey = query.value(3).toString();
+        change.previousEntityKey = query.value(4).toString();
+        change.sourceRootId = query.value(5).toLongLong();
+        change.previousSourceRootId = query.value(6).toLongLong();
+        change.operation = static_cast<CatalogChangeOperation>(query.value(7).toInt());
+        change.changeMask = query.value(8).toUInt();
+        changes.append(change);
+    }
+    return changes;
+}
+
+bool acknowledgeCatalogChanges(QSqlDatabase &projectDb,
+                               qint64 throughLogId,
+                               QString *errorMessage)
+{
+    if (!projectDb.transaction()) {
+        if (errorMessage) {
+            *errorMessage = projectDb.lastError().text();
+        }
+        return false;
+    }
+    QSqlQuery remove(projectDb);
+    remove.prepare(QStringLiteral("DELETE FROM catalog_change_log WHERE log_id <= ?"));
+    remove.addBindValue(throughLogId);
+    if (!execQuery(remove, errorMessage)) {
+        projectDb.rollback();
+        return false;
+    }
+    QSqlQuery state(projectDb);
+    state.prepare(QStringLiteral(
+        "UPDATE catalog_change_state SET "
+        "pending_change_count = (SELECT COUNT(*) FROM catalog_change_log), "
+        "requires_full_rebuild = CASE WHEN (SELECT COUNT(*) FROM catalog_change_log) > 100000 "
+        "THEN 1 ELSE 0 END WHERE singleton_id = 1"));
+    if (!execQuery(state, errorMessage)) {
+        projectDb.rollback();
+        return false;
+    }
+    if (!projectDb.commit()) {
+        if (errorMessage) {
+            *errorMessage = projectDb.lastError().text();
+        }
+        projectDb.rollback();
+        return false;
+    }
+    return true;
+}
+
+bool beginDeltaSync(QSqlDatabase &globalDb,
+                    const Project &project,
+                    IndexingWorkCoordinator *workCoordinator,
+                    quint64 workGeneration,
+                    QString *errorMessage)
+{
+    IndexingWorkCoordinator::Lease writerLease;
+    if (!acquireWriterLease(workCoordinator, workGeneration, &writerLease, errorMessage)) {
+        return false;
+    }
     if (!globalDb.transaction()) {
         if (errorMessage) {
             *errorMessage = globalDb.lastError().text();
         }
         return false;
     }
-
     if (!updateProjectRegistry(globalDb, project, QStringLiteral("syncing"), QString(), errorMessage)) {
         globalDb.rollback();
         return false;
     }
-
-    QSet<QString> existingFolderKeys;
-    QSqlQuery readExistingFolders(globalDb);
-    readExistingFolders.prepare(QStringLiteral("SELECT folder_key FROM global_folder_node WHERE project_uuid = ?"));
-    readExistingFolders.addBindValue(project.id);
-    if (!execQuery(readExistingFolders, errorMessage)) {
+    if (!globalDb.commit()) {
+        if (errorMessage) {
+            *errorMessage = globalDb.lastError().text();
+        }
         globalDb.rollback();
         return false;
     }
-    while (readExistingFolders.next()) {
-        existingFolderKeys.insert(readExistingFolders.value(0).toString());
-    }
+    return true;
+}
 
-    QSet<QString> currentFolderKeys;
-    QSqlQuery upsertFolder(globalDb);
-    upsertFolder.prepare(QStringLiteral(
+bool finishDeltaSync(QSqlDatabase &globalDb,
+                     const Project &project,
+                     IndexingWorkCoordinator *workCoordinator,
+                     quint64 workGeneration,
+                     QString *errorMessage)
+{
+    IndexingWorkCoordinator::Lease writerLease;
+    if (!acquireWriterLease(workCoordinator, workGeneration, &writerLease, errorMessage)) {
+        return false;
+    }
+    QSqlQuery finish(globalDb);
+    finish.prepare(QStringLiteral(
+        "UPDATE project_registry SET project_name = ?, project_database_path = ?, last_synced_at = ?, "
+        "sync_status = 'ok', error_message = '' WHERE project_uuid = ?"));
+    finish.addBindValue(project.name);
+    finish.addBindValue(project.databasePath);
+    finish.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODate));
+    finish.addBindValue(project.id);
+    return execQuery(finish, errorMessage);
+}
+
+bool beginSyncGeneration(QSqlDatabase &globalDb,
+                         const Project &project,
+                         IndexingWorkCoordinator *workCoordinator,
+                         quint64 workGeneration,
+                         qint64 *syncGeneration,
+                         QString *errorMessage)
+{
+    IndexingWorkCoordinator::Lease writerLease;
+    if (!acquireWriterLease(workCoordinator, workGeneration, &writerLease, errorMessage)) {
+        return false;
+    }
+    if (!globalDb.transaction()) {
+        if (errorMessage) *errorMessage = globalDb.lastError().text();
+        return false;
+    }
+    if (!updateProjectRegistry(
+            globalDb, project, QStringLiteral("syncing"), QString(), errorMessage)) {
+        globalDb.rollback();
+        return false;
+    }
+    QSqlQuery generation(globalDb);
+    generation.prepare(QStringLiteral(
+        "SELECT COALESCE(MAX(value), 0) + 1 FROM ("
+        "SELECT active_sync_generation AS value FROM project_registry WHERE project_uuid = ? "
+        "UNION ALL SELECT COALESCE(MAX(sync_generation), 0) FROM global_video_asset WHERE project_uuid = ? "
+        "UNION ALL SELECT COALESCE(MAX(sync_generation), 0) FROM global_folder_node WHERE project_uuid = ?)"));
+    generation.addBindValue(project.id);
+    generation.addBindValue(project.id);
+    generation.addBindValue(project.id);
+    if (!execQuery(generation, errorMessage) || !generation.next()) {
+        globalDb.rollback();
+        return false;
+    }
+    *syncGeneration = qMax<qint64>(1, generation.value(0).toLongLong());
+    if (!globalDb.commit()) {
+        if (errorMessage) *errorMessage = globalDb.lastError().text();
+        globalDb.rollback();
+        return false;
+    }
+    return true;
+}
+
+void markSyncFailed(QSqlDatabase &globalDb,
+                    const Project &project,
+                    const QString &failure,
+                    IndexingWorkCoordinator *workCoordinator,
+                    quint64 workGeneration)
+{
+    globalDb.rollback();
+    IndexingWorkCoordinator::Lease writerLease;
+    QString ignored;
+    if (!acquireWriterLease(workCoordinator, workGeneration, &writerLease, &ignored)) {
+        return;
+    }
+    QSqlQuery query(globalDb);
+    query.prepare(QStringLiteral(
+        "UPDATE project_registry SET sync_status = 'failed', error_message = ?, last_synced_at = ? "
+        "WHERE project_uuid = ?"));
+    query.addBindValue(failure);
+    query.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODate));
+    query.addBindValue(project.id);
+    query.exec();
+}
+
+bool persistFolderPage(QSqlDatabase &globalDb,
+                       const QVector<ProjectFolderState> &folders,
+                       qint64 syncGeneration,
+                       IndexingWorkCoordinator *workCoordinator,
+                       quint64 workGeneration,
+                       QString *errorMessage)
+{
+    IndexingWorkCoordinator::Lease writerLease;
+    if (!acquireWriterLease(workCoordinator, workGeneration, &writerLease, errorMessage)) {
+        return false;
+    }
+    if (!globalDb.transaction()) {
+        if (errorMessage) *errorMessage = globalDb.lastError().text();
+        return false;
+    }
+    QSqlQuery upsert(globalDb);
+    upsert.prepare(QStringLiteral(
         "INSERT INTO global_folder_node "
         "(folder_key, project_uuid, project_name, project_database_path, source_root_id, source_root_name, "
         "source_root_path, source_root_path_key, folder_id, name, absolute_path, path_key, relative_path, "
         "parent_relative_path, depth, direct_file_count, recursive_file_count, normalized_date, date_anchor, "
-        "is_available, last_synced_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "is_available, sync_generation, last_synced_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(folder_key) DO UPDATE SET "
         "project_uuid = excluded.project_uuid, project_name = excluded.project_name, "
         "project_database_path = excluded.project_database_path, source_root_id = excluded.source_root_id, "
         "source_root_name = excluded.source_root_name, source_root_path = excluded.source_root_path, "
-        "source_root_path_key = excluded.source_root_path_key, folder_id = excluded.folder_id, name = excluded.name, "
-        "absolute_path = excluded.absolute_path, path_key = excluded.path_key, relative_path = excluded.relative_path, "
-        "parent_relative_path = excluded.parent_relative_path, depth = excluded.depth, "
-        "direct_file_count = excluded.direct_file_count, recursive_file_count = excluded.recursive_file_count, "
-        "normalized_date = excluded.normalized_date, date_anchor = excluded.date_anchor, "
-        "is_available = excluded.is_available, last_synced_at = excluded.last_synced_at, updated_at = excluded.updated_at"));
+        "source_root_path_key = excluded.source_root_path_key, folder_id = excluded.folder_id, "
+        "name = excluded.name, absolute_path = excluded.absolute_path, path_key = excluded.path_key, "
+        "relative_path = excluded.relative_path, parent_relative_path = excluded.parent_relative_path, "
+        "depth = excluded.depth, direct_file_count = excluded.direct_file_count, "
+        "recursive_file_count = excluded.recursive_file_count, normalized_date = excluded.normalized_date, "
+        "date_anchor = excluded.date_anchor, is_available = excluded.is_available, "
+        "sync_generation = excluded.sync_generation, last_synced_at = excluded.last_synced_at, "
+        "updated_at = excluded.updated_at"));
+    const auto now = QDateTime::currentDateTime().toString(Qt::ISODate);
     for (const auto &folder : folders) {
-        currentFolderKeys.insert(folder.folderKey);
-        upsertFolder.addBindValue(folder.folderKey);
-        upsertFolder.addBindValue(folder.projectUuid);
-        upsertFolder.addBindValue(folder.projectName);
-        upsertFolder.addBindValue(folder.projectDatabasePath);
-        upsertFolder.addBindValue(folder.sourceRootId);
-        upsertFolder.addBindValue(folder.sourceRootName);
-        upsertFolder.addBindValue(folder.sourceRootPath);
-        upsertFolder.addBindValue(FolderPathMetadata::normalizedPathKey(folder.sourceRootPath));
-        upsertFolder.addBindValue(folder.folderId);
-        upsertFolder.addBindValue(folder.name);
-        upsertFolder.addBindValue(folder.absolutePath);
-        upsertFolder.addBindValue(folder.pathKey);
-        upsertFolder.addBindValue(folder.relativePath);
-        upsertFolder.addBindValue(folder.parentRelativePath);
-        upsertFolder.addBindValue(folder.depth);
-        upsertFolder.addBindValue(folder.directFileCount);
-        upsertFolder.addBindValue(folder.recursiveFileCount);
-        upsertFolder.addBindValue(emptyIfNull(folder.normalizedDate));
-        upsertFolder.addBindValue(emptyIfNull(folder.dateAnchor));
-        upsertFolder.addBindValue(folder.available ? 1 : 0);
-        upsertFolder.addBindValue(now);
-        upsertFolder.addBindValue(now);
-        if (!execQuery(upsertFolder, errorMessage)) {
+        upsert.addBindValue(folder.folderKey);
+        upsert.addBindValue(folder.projectUuid);
+        upsert.addBindValue(folder.projectName);
+        upsert.addBindValue(folder.projectDatabasePath);
+        upsert.addBindValue(folder.sourceRootId);
+        upsert.addBindValue(folder.sourceRootName);
+        upsert.addBindValue(folder.sourceRootPath);
+        upsert.addBindValue(FolderPathMetadata::normalizedPathKey(folder.sourceRootPath));
+        upsert.addBindValue(folder.folderId);
+        upsert.addBindValue(folder.name);
+        upsert.addBindValue(folder.absolutePath);
+        upsert.addBindValue(folder.pathKey);
+        upsert.addBindValue(folder.relativePath);
+        upsert.addBindValue(folder.parentRelativePath);
+        upsert.addBindValue(folder.depth);
+        upsert.addBindValue(folder.directFileCount);
+        upsert.addBindValue(folder.recursiveFileCount);
+        upsert.addBindValue(emptyIfNull(folder.normalizedDate));
+        upsert.addBindValue(emptyIfNull(folder.dateAnchor));
+        upsert.addBindValue(folder.available ? 1 : 0);
+        upsert.addBindValue(syncGeneration);
+        upsert.addBindValue(now);
+        upsert.addBindValue(now);
+        if (!execQuery(upsert, errorMessage)) {
             globalDb.rollback();
             return false;
         }
-        upsertFolder.finish();
+        upsert.finish();
     }
+    if (!globalDb.commit()) {
+        if (errorMessage) *errorMessage = globalDb.lastError().text();
+        globalDb.rollback();
+        return false;
+    }
+    return true;
+}
 
-    QSet<QString> currentKeys;
-    QSqlQuery clearFrames(globalDb);
-    clearFrames.prepare(QStringLiteral("DELETE FROM video_frame_analysis WHERE video_key = ?"));
-    QSqlQuery clearPlan(globalDb);
-    clearPlan.prepare(QStringLiteral("DELETE FROM video_analysis_plan WHERE video_key = ?"));
-    QSqlQuery clearResult(globalDb);
-    clearResult.prepare(QStringLiteral("DELETE FROM video_analysis_result WHERE video_key = ?"));
-    QSqlQuery clearTask(globalDb);
-    clearTask.prepare(QStringLiteral("DELETE FROM video_analysis_task WHERE video_key = ?"));
-    QSqlQuery clearDimensions(globalDb);
-    clearDimensions.prepare(QStringLiteral("DELETE FROM material_dimension_analysis WHERE video_key = ?"));
-    QSqlQuery clearDimensionFrames(globalDb);
-    clearDimensionFrames.prepare(QStringLiteral("DELETE FROM material_dimension_frame_analysis WHERE video_key = ?"));
+bool clearAnalysisArtifacts(QSqlDatabase &globalDb,
+                            const QString &videoKey,
+                            bool hasFts5,
+                            QString *errorMessage)
+{
+    const QStringList statements = {
+        QStringLiteral("DELETE FROM video_analysis_plan WHERE video_key = ?"),
+        QStringLiteral("DELETE FROM video_frame_analysis WHERE video_key = ?"),
+        QStringLiteral("DELETE FROM video_analysis_result WHERE video_key = ?"),
+        QStringLiteral("DELETE FROM video_analysis_task WHERE video_key = ?"),
+        QStringLiteral("DELETE FROM material_dimension_analysis WHERE video_key = ?"),
+        QStringLiteral("DELETE FROM material_dimension_frame_analysis WHERE video_key = ?")
+    };
+    for (const auto &statement : statements) {
+        QSqlQuery query(globalDb);
+        query.prepare(statement);
+        query.addBindValue(videoKey);
+        if (!execQuery(query, errorMessage)) {
+            return false;
+        }
+    }
+    return deleteFtsRow(globalDb, videoKey, hasFts5, errorMessage);
+}
+
+bool persistAssetPage(QSqlDatabase &globalDb,
+                      const Project &project,
+                      QVector<GlobalVideoAsset> assets,
+                      qint64 syncGeneration,
+                      bool hasFts5,
+                      IndexingWorkCoordinator *workCoordinator,
+                      quint64 workGeneration,
+                      QString *errorMessage)
+{
+    IndexingWorkCoordinator::Lease writerLease;
+    if (!acquireWriterLease(workCoordinator, workGeneration, &writerLease, errorMessage)) {
+        return false;
+    }
+    if (!globalDb.transaction()) {
+        if (errorMessage) *errorMessage = globalDb.lastError().text();
+        return false;
+    }
     QSqlQuery upsert(globalDb);
     upsert.prepare(QStringLiteral(
         "INSERT INTO global_video_asset "
-        "(video_key, project_uuid, project_name, project_database_path, source_root_id, source_root_name, folder_key, is_available, asset_id, "
-        "file_name, extension, absolute_path, relative_path, asset_type, size_bytes, modified_at, "
-        "capture_time, capture_date, capture_time_source, capture_time_confidence, duration_ms, "
-        "thumbnail_path, thumbnail_status, analysis_status, confirmation_status, technical_summary, embedded_metadata_text, source_text, "
-        "error_message, last_synced_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "(video_key, project_uuid, project_name, project_database_path, source_root_id, source_root_name, "
+        "folder_key, is_available, asset_id, file_name, extension, absolute_path, relative_path, asset_type, "
+        "size_bytes, modified_at, capture_time, capture_date, capture_time_source, capture_time_confidence, "
+        "duration_ms, thumbnail_path, thumbnail_status, analysis_status, confirmation_status, "
+        "technical_summary, embedded_metadata_text, source_text, error_message, sync_generation, "
+        "last_synced_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(video_key) DO UPDATE SET "
-        "project_uuid = excluded.project_uuid, "
-        "project_name = excluded.project_name, "
-        "project_database_path = excluded.project_database_path, "
-        "source_root_id = excluded.source_root_id, "
-        "source_root_name = excluded.source_root_name, "
-        "folder_key = excluded.folder_key, "
-        "is_available = excluded.is_available, "
-        "asset_id = excluded.asset_id, "
-        "file_name = excluded.file_name, "
-        "extension = excluded.extension, "
-        "absolute_path = excluded.absolute_path, "
-        "relative_path = excluded.relative_path, "
-        "asset_type = excluded.asset_type, "
-        "size_bytes = excluded.size_bytes, "
-        "modified_at = excluded.modified_at, "
-        "capture_time = excluded.capture_time, "
-        "capture_date = excluded.capture_date, "
+        "project_uuid = excluded.project_uuid, project_name = excluded.project_name, "
+        "project_database_path = excluded.project_database_path, source_root_id = excluded.source_root_id, "
+        "source_root_name = excluded.source_root_name, folder_key = excluded.folder_key, "
+        "is_available = excluded.is_available, asset_id = excluded.asset_id, file_name = excluded.file_name, "
+        "extension = excluded.extension, absolute_path = excluded.absolute_path, "
+        "relative_path = excluded.relative_path, asset_type = excluded.asset_type, "
+        "analysis_status = CASE "
+        "WHEN global_video_asset.size_bytes != excluded.size_bytes "
+        "OR global_video_asset.modified_at != excluded.modified_at THEN excluded.analysis_status "
+        "WHEN global_video_asset.analysis_status = ? AND excluded.analysis_status != ? "
+        "THEN excluded.analysis_status ELSE global_video_asset.analysis_status END, "
+        "confirmation_status = CASE "
+        "WHEN global_video_asset.size_bytes != excluded.size_bytes "
+        "OR global_video_asset.modified_at != excluded.modified_at "
+        "OR (global_video_asset.analysis_status = ? AND excluded.analysis_status != ?) "
+        "THEN excluded.confirmation_status ELSE global_video_asset.confirmation_status END, "
+        "source_text = CASE WHEN global_video_asset.size_bytes != excluded.size_bytes "
+        "OR global_video_asset.modified_at != excluded.modified_at "
+        "THEN excluded.source_text ELSE global_video_asset.source_text END, "
+        "error_message = CASE WHEN global_video_asset.size_bytes != excluded.size_bytes "
+        "OR global_video_asset.modified_at != excluded.modified_at "
+        "OR (global_video_asset.analysis_status = ? AND excluded.analysis_status != ?) "
+        "THEN excluded.error_message ELSE global_video_asset.error_message END, "
+        "size_bytes = excluded.size_bytes, modified_at = excluded.modified_at, "
+        "capture_time = excluded.capture_time, capture_date = excluded.capture_date, "
         "capture_time_source = excluded.capture_time_source, "
-        "capture_time_confidence = excluded.capture_time_confidence, "
-        "duration_ms = excluded.duration_ms, "
-        "thumbnail_path = excluded.thumbnail_path, "
-        "thumbnail_status = excluded.thumbnail_status, "
-        "analysis_status = excluded.analysis_status, "
-        "confirmation_status = excluded.confirmation_status, "
+        "capture_time_confidence = excluded.capture_time_confidence, duration_ms = excluded.duration_ms, "
+        "thumbnail_path = excluded.thumbnail_path, thumbnail_status = excluded.thumbnail_status, "
         "technical_summary = excluded.technical_summary, "
         "embedded_metadata_text = excluded.embedded_metadata_text, "
-        "source_text = CASE WHEN global_video_asset.size_bytes != excluded.size_bytes "
-        "OR global_video_asset.modified_at != excluded.modified_at THEN excluded.source_text ELSE global_video_asset.source_text END, "
-        "error_message = excluded.error_message, "
-        "last_synced_at = excluded.last_synced_at, "
+        "sync_generation = excluded.sync_generation, last_synced_at = excluded.last_synced_at, "
         "updated_at = excluded.updated_at"));
-
-    QSet<QString> claimedExistingKeys;
-    for (auto asset : assets) {
-        currentKeys.insert(asset.videoKey);
-        const bool exactMatch = existingStates.contains(asset.videoKey);
-        auto existing = existingStates.value(asset.videoKey);
-        bool remappedExisting = false;
-        if (!exactMatch) {
-            const auto pathKey = stablePathKey(asset.absolutePath);
-            const auto pathMatch = existingStatesByPath.constFind(pathKey);
-            if (pathMatch != existingStatesByPath.cend() && !claimedExistingKeys.contains(pathMatch.value().videoKey)) {
-                existing = pathMatch.value();
-                remappedExisting = true;
-            }
+    const auto indexedOnly = static_cast<int>(VideoAnalysisStatus::IndexedOnly);
+    const auto now = QDateTime::currentDateTime().toString(Qt::ISODate);
+    for (auto &asset : assets) {
+        ExistingVideoState existing;
+        bool hasExisting = false;
+        if (!findExistingState(globalDb,
+                               project.id,
+                               asset.videoKey,
+                               asset.absolutePath,
+                               &existing,
+                               &hasExisting,
+                               errorMessage)) {
+            globalDb.rollback();
+            return false;
         }
-        const bool hasExisting = exactMatch || remappedExisting;
-        if (hasExisting) {
-            claimedExistingKeys.insert(existing.videoKey);
-        }
+        const bool remappedExisting = hasExisting && existing.videoKey != asset.videoKey;
         const bool changed = !hasExisting
             || existing.sizeBytes != asset.sizeBytes
             || existing.modifiedAt != asset.modifiedAt;
-        const bool newlyAnalyzable = hasExisting
-            && !changed
+        const bool newlyAnalyzable = hasExisting && !changed
             && existing.analysisStatus == VideoAnalysisStatus::IndexedOnly
             && canAnalyzeAsset(asset.assetType, asset.extension);
+        const auto initialStatus = initialAnalysisStatusForAsset(asset.assetType, asset.extension);
+        const auto analysisStatus = remappedExisting && !changed && !newlyAnalyzable
+            ? existing.analysisStatus
+            : initialStatus;
+        const auto confirmationStatus = remappedExisting && !changed && !newlyAnalyzable
+            ? existing.confirmationStatus
+            : ConfirmationStatus::Pending;
         asset.technicalSummary = emptyIfNull(asset.technicalSummary);
         asset.captureTime = emptyIfNull(asset.captureTime);
         asset.captureDate = emptyIfNull(asset.captureDate);
@@ -844,53 +1193,10 @@ bool syncProjectIntoGlobal(QSqlDatabase &globalDb,
             ? QStringLiteral("")
             : emptyIfNull(existing.errorMessage);
 
-        if (changed) {
-            clearPlan.addBindValue(asset.videoKey);
-            if (!execQuery(clearPlan, errorMessage)) {
-                globalDb.rollback();
-                return false;
-            }
-            clearPlan.finish();
-
-            clearFrames.addBindValue(asset.videoKey);
-            if (!execQuery(clearFrames, errorMessage)) {
-                globalDb.rollback();
-                return false;
-            }
-            clearFrames.finish();
-
-            clearResult.addBindValue(asset.videoKey);
-            if (!execQuery(clearResult, errorMessage)) {
-                globalDb.rollback();
-                return false;
-            }
-            clearResult.finish();
-
-            clearTask.addBindValue(asset.videoKey);
-            if (!execQuery(clearTask, errorMessage)) {
-                globalDb.rollback();
-                return false;
-            }
-            clearTask.finish();
-
-            clearDimensions.addBindValue(asset.videoKey);
-            if (!execQuery(clearDimensions, errorMessage)) {
-                globalDb.rollback();
-                return false;
-            }
-            clearDimensions.finish();
-
-            clearDimensionFrames.addBindValue(asset.videoKey);
-            if (!execQuery(clearDimensionFrames, errorMessage)) {
-                globalDb.rollback();
-                return false;
-            }
-            clearDimensionFrames.finish();
-
-            if (!deleteFtsRow(globalDb, asset.videoKey, hasFts5, errorMessage)) {
-                globalDb.rollback();
-                return false;
-            }
+        if ((changed || newlyAnalyzable)
+            && !clearAnalysisArtifacts(globalDb, asset.videoKey, hasFts5, errorMessage)) {
+            globalDb.rollback();
+            return false;
         }
 
         upsert.addBindValue(asset.videoKey);
@@ -916,63 +1222,131 @@ bool syncProjectIntoGlobal(QSqlDatabase &globalDb,
         upsert.addBindValue(asset.durationMs);
         upsert.addBindValue(asset.thumbnailPath);
         upsert.addBindValue(static_cast<int>(asset.thumbnailStatus));
-        upsert.addBindValue(static_cast<int>((changed || newlyAnalyzable)
-                                                 ? initialAnalysisStatusForAsset(asset.assetType, asset.extension)
-                                                 : existing.analysisStatus));
-        upsert.addBindValue(static_cast<int>((changed || newlyAnalyzable)
-                                                 ? ConfirmationStatus::Pending
-                                                 : existing.confirmationStatus));
+        upsert.addBindValue(static_cast<int>(analysisStatus));
+        upsert.addBindValue(static_cast<int>(confirmationStatus));
         upsert.addBindValue(asset.technicalSummary);
         upsert.addBindValue(asset.embeddedMetadataText);
         upsert.addBindValue(asset.sourceText);
         upsert.addBindValue(errorMessageText);
+        upsert.addBindValue(syncGeneration);
         upsert.addBindValue(now);
         upsert.addBindValue(now);
+        upsert.addBindValue(indexedOnly);
+        upsert.addBindValue(indexedOnly);
+        upsert.addBindValue(indexedOnly);
+        upsert.addBindValue(indexedOnly);
+        upsert.addBindValue(indexedOnly);
+        upsert.addBindValue(indexedOnly);
         if (!execQuery(upsert, errorMessage)) {
             globalDb.rollback();
             return false;
         }
         upsert.finish();
 
-        if (remappedExisting && !changed
-            && !migrateAnalysisArtifacts(globalDb, existing.videoKey, asset.videoKey, hasFts5, errorMessage)) {
+        if (remappedExisting && !changed && !newlyAnalyzable
+            && !migrateAnalysisArtifacts(
+                globalDb, existing.videoKey, asset.videoKey, hasFts5, errorMessage)) {
             globalDb.rollback();
             return false;
         }
-
         if (!upsertSearchRow(globalDb, asset, hasFts5, errorMessage)) {
             globalDb.rollback();
             return false;
         }
     }
+    if (!globalDb.commit()) {
+        if (errorMessage) *errorMessage = globalDb.lastError().text();
+        globalDb.rollback();
+        return false;
+    }
+    return true;
+}
 
-    for (auto it = existingStates.cbegin(); it != existingStates.cend(); ++it) {
-        if (currentKeys.contains(it.key())) {
-            continue;
-        }
-
-        QSqlQuery deleteAsset(globalDb);
-        deleteAsset.prepare(QStringLiteral("DELETE FROM global_video_asset WHERE video_key = ?"));
-        deleteAsset.addBindValue(it.key());
-        if (!execQuery(deleteAsset, errorMessage)) {
-            globalDb.rollback();
-            return false;
-        }
-        if (!deleteFtsRow(globalDb, it.key(), hasFts5, errorMessage)) {
-            globalDb.rollback();
-            return false;
-        }
+bool applyDeltaCleanup(QSqlDatabase &globalDb,
+                       const Project &project,
+                       QVector<CatalogChange> *changes,
+                       const QVector<GlobalVideoAsset> &assets,
+                       const QVector<ProjectFolderState> &folders,
+                       bool hasFts5,
+                       IndexingWorkCoordinator *workCoordinator,
+                       quint64 workGeneration,
+                       QString *errorMessage)
+{
+    QSet<qint64> existingAssetIds;
+    for (const auto &asset : assets) {
+        existingAssetIds.insert(asset.assetId);
+    }
+    QHash<qint64, QString> currentFolderKeys;
+    for (const auto &folder : folders) {
+        currentFolderKeys.insert(folder.folderId, folder.folderKey);
     }
 
-    for (const auto &folderKey : existingFolderKeys) {
-        if (currentFolderKeys.contains(folderKey)) {
+    IndexingWorkCoordinator::Lease writerLease;
+    if (!acquireWriterLease(workCoordinator, workGeneration, &writerLease, errorMessage)) {
+        return false;
+    }
+    if (!globalDb.transaction()) {
+        if (errorMessage) {
+            *errorMessage = globalDb.lastError().text();
+        }
+        return false;
+    }
+
+    for (auto &change : *changes) {
+        if (change.entity == CatalogChangeEntity::Asset) {
+            if (existingAssetIds.contains(change.entityId)) {
+                continue;
+            }
+            change.operation = CatalogChangeOperation::Removed;
+            const auto videoKey = QStringLiteral("%1:%2").arg(project.id).arg(change.entityId);
+            if (!clearAnalysisArtifacts(globalDb, videoKey, hasFts5, errorMessage)) {
+                globalDb.rollback();
+                return false;
+            }
+            QSqlQuery remove(globalDb);
+            remove.prepare(QStringLiteral(
+                "DELETE FROM global_video_asset WHERE project_uuid = ? AND asset_id = ?"));
+            remove.addBindValue(project.id);
+            remove.addBindValue(change.entityId);
+            if (!execQuery(remove, errorMessage)) {
+                globalDb.rollback();
+                return false;
+            }
             continue;
         }
-        QSqlQuery deleteFolder(globalDb);
-        deleteFolder.prepare(QStringLiteral("DELETE FROM global_folder_node WHERE folder_key = ? AND project_uuid = ?"));
-        deleteFolder.addBindValue(folderKey);
-        deleteFolder.addBindValue(project.id);
-        if (!execQuery(deleteFolder, errorMessage)) {
+
+        const auto hasCurrentFolder = currentFolderKeys.contains(change.entityId);
+        const auto currentFolderKey = currentFolderKeys.value(change.entityId);
+        auto oldRelativePath = change.previousEntityKey;
+        auto oldSourceRootId = change.previousSourceRootId;
+        if (!hasCurrentFolder) {
+            change.operation = CatalogChangeOperation::Removed;
+            oldRelativePath = change.entityKey;
+            oldSourceRootId = change.sourceRootId;
+        }
+        const auto oldFolderKey = oldRelativePath.isEmpty() && oldSourceRootId == 0
+            ? QString()
+            : FolderPathMetadata::globalFolderKey(project.id, oldSourceRootId, oldRelativePath);
+        if (oldFolderKey.isEmpty() || oldFolderKey == currentFolderKey) {
+            continue;
+        }
+
+        QSqlQuery relink(globalDb);
+        relink.prepare(QStringLiteral(
+            "UPDATE global_video_asset SET folder_key = ? WHERE project_uuid = ? AND folder_key = ?"));
+        relink.addBindValue(hasCurrentFolder ? currentFolderKey : QString());
+        relink.addBindValue(project.id);
+        relink.addBindValue(oldFolderKey);
+        if (!execQuery(relink, errorMessage)) {
+            globalDb.rollback();
+            return false;
+        }
+        QSqlQuery removeFolder(globalDb);
+        removeFolder.prepare(QStringLiteral(
+            "DELETE FROM global_folder_node WHERE project_uuid = ? AND folder_key = ?"));
+        removeFolder.addBindValue(project.id);
+        removeFolder.addBindValue(oldFolderKey);
+        if (!execQuery(removeFolder, errorMessage)) {
             globalDb.rollback();
             return false;
         }
@@ -980,19 +1354,14 @@ bool syncProjectIntoGlobal(QSqlDatabase &globalDb,
 
     QSqlQuery cleanupFolderLinks(globalDb);
     cleanupFolderLinks.prepare(QStringLiteral(
-        "UPDATE global_video_asset SET folder_key = '' WHERE project_uuid = ? AND folder_key <> '' AND NOT EXISTS ("
-        "SELECT 1 FROM global_folder_node gf WHERE gf.folder_key = global_video_asset.folder_key)"));
+        "UPDATE global_video_asset SET folder_key = '' WHERE project_uuid = ? AND folder_key <> '' "
+        "AND NOT EXISTS (SELECT 1 FROM global_folder_node gf "
+        "WHERE gf.folder_key = global_video_asset.folder_key)"));
     cleanupFolderLinks.addBindValue(project.id);
     if (!execQuery(cleanupFolderLinks, errorMessage)) {
         globalDb.rollback();
         return false;
     }
-
-    if (!updateProjectRegistry(globalDb, project, QStringLiteral("ok"), QString(), errorMessage)) {
-        globalDb.rollback();
-        return false;
-    }
-
     if (!globalDb.commit()) {
         if (errorMessage) {
             *errorMessage = globalDb.lastError().text();
@@ -1002,6 +1371,419 @@ bool syncProjectIntoGlobal(QSqlDatabase &globalDb,
     }
     return true;
 }
+
+bool finishSyncGeneration(QSqlDatabase &globalDb,
+                          const Project &project,
+                          qint64 syncGeneration,
+                          bool hasFts5,
+                          IndexingWorkCoordinator *workCoordinator,
+                          quint64 workGeneration,
+                          QString *errorMessage)
+{
+    IndexingWorkCoordinator::Lease writerLease;
+    if (!acquireWriterLease(workCoordinator, workGeneration, &writerLease, errorMessage)) {
+        return false;
+    }
+    if (!globalDb.transaction()) {
+        if (errorMessage) *errorMessage = globalDb.lastError().text();
+        return false;
+    }
+    if (hasFts5) {
+        QSqlQuery deleteFts(globalDb);
+        deleteFts.prepare(QStringLiteral(
+            "DELETE FROM video_search_fts WHERE video_key IN ("
+            "SELECT video_key FROM global_video_asset WHERE project_uuid = ? AND sync_generation != ?)"));
+        deleteFts.addBindValue(project.id);
+        deleteFts.addBindValue(syncGeneration);
+        if (!execQuery(deleteFts, errorMessage)) {
+            globalDb.rollback();
+            return false;
+        }
+    }
+    QSqlQuery deleteAssets(globalDb);
+    deleteAssets.prepare(QStringLiteral(
+        "DELETE FROM global_video_asset WHERE project_uuid = ? AND sync_generation != ?"));
+    deleteAssets.addBindValue(project.id);
+    deleteAssets.addBindValue(syncGeneration);
+    if (!execQuery(deleteAssets, errorMessage)) {
+        globalDb.rollback();
+        return false;
+    }
+    QSqlQuery deleteFolders(globalDb);
+    deleteFolders.prepare(QStringLiteral(
+        "DELETE FROM global_folder_node WHERE project_uuid = ? AND sync_generation != ?"));
+    deleteFolders.addBindValue(project.id);
+    deleteFolders.addBindValue(syncGeneration);
+    if (!execQuery(deleteFolders, errorMessage)) {
+        globalDb.rollback();
+        return false;
+    }
+    QSqlQuery cleanupFolderLinks(globalDb);
+    cleanupFolderLinks.prepare(QStringLiteral(
+        "UPDATE global_video_asset SET folder_key = '' WHERE project_uuid = ? AND folder_key <> '' "
+        "AND NOT EXISTS (SELECT 1 FROM global_folder_node gf "
+        "WHERE gf.folder_key = global_video_asset.folder_key)"));
+    cleanupFolderLinks.addBindValue(project.id);
+    if (!execQuery(cleanupFolderLinks, errorMessage)) {
+        globalDb.rollback();
+        return false;
+    }
+    QSqlQuery finish(globalDb);
+    finish.prepare(QStringLiteral(
+        "UPDATE project_registry SET project_name = ?, project_database_path = ?, last_synced_at = ?, "
+        "sync_status = 'ok', active_sync_generation = ?, error_message = '' WHERE project_uuid = ?"));
+    finish.addBindValue(project.name);
+    finish.addBindValue(project.databasePath);
+    finish.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODate));
+    finish.addBindValue(syncGeneration);
+    finish.addBindValue(project.id);
+    if (!execQuery(finish, errorMessage)) {
+        globalDb.rollback();
+        return false;
+    }
+    if (!globalDb.commit()) {
+        if (errorMessage) *errorMessage = globalDb.lastError().text();
+        globalDb.rollback();
+        return false;
+    }
+    return true;
+}
+
+bool syncProjectIntoGlobalFull(QSqlDatabase &globalDb,
+                               const Project &project,
+                               bool hasFts5,
+                               QString *errorMessage,
+                               IndexingWorkCoordinator *workCoordinator,
+                               quint64 workGeneration,
+                               const CatalogDeltaSink &deltaSink)
+{
+    if (errorMessage) {
+        errorMessage->clear();
+    }
+    const auto connectionName = QStringLiteral("sync_project_full_%1_%2")
+        .arg(project.id)
+        .arg(reinterpret_cast<quintptr>(QThread::currentThreadId()));
+    QString openError;
+    auto projectDb = openProjectConnection(project.databasePath, connectionName, &openError);
+    if (!projectDb.isOpen()) {
+        QString offlineError;
+        markProjectOffline(globalDb, project, openError, &offlineError);
+        if (errorMessage) {
+            *errorMessage = offlineError.isEmpty()
+                ? openError
+                : QStringLiteral("%1；更新离线状态失败：%2").arg(openError, offlineError);
+        }
+        projectDb = QSqlDatabase();
+        closeProjectConnection(connectionName);
+        return false;
+    }
+    const auto closeGuard = qScopeGuard([&]() {
+        projectDb.close();
+        projectDb = QSqlDatabase();
+        closeProjectConnection(connectionName);
+    });
+
+    QString sourceStateError;
+    const bool unstableSourceRoot = hasUnstableSourceRoot(projectDb, &sourceStateError);
+    if (!sourceStateError.isEmpty()) {
+        if (errorMessage) *errorMessage = sourceStateError;
+        return false;
+    }
+    if (unstableSourceRoot) {
+        return true;
+    }
+
+    CatalogLogState catalogLogState;
+    if (!readCatalogLogState(projectDb, &catalogLogState, errorMessage)) {
+        return false;
+    }
+
+    qint64 syncGeneration = 0;
+    if (!beginSyncGeneration(globalDb,
+                             project,
+                             workCoordinator,
+                             workGeneration,
+                             &syncGeneration,
+                             errorMessage)) {
+        return false;
+    }
+    bool completed = false;
+    const auto failureGuard = qScopeGuard([&]() {
+        if (!completed) {
+            markSyncFailed(globalDb,
+                           project,
+                           errorMessage ? *errorMessage : QStringLiteral("全局素材同步失败"),
+                           workCoordinator,
+                           workGeneration);
+        }
+    });
+
+    constexpr qsizetype PageSize = 500;
+    qint64 lastFolderId = 0;
+    while (true) {
+        auto folders = fetchProjectFolderPage(
+            projectDb, project, lastFolderId, PageSize, errorMessage);
+        if (errorMessage && !errorMessage->isEmpty()) {
+            return false;
+        }
+        if (folders.isEmpty()) {
+            break;
+        }
+        lastFolderId = folders.constLast().folderId;
+        if (!persistFolderPage(globalDb,
+                               folders,
+                               syncGeneration,
+                               workCoordinator,
+                               workGeneration,
+                               errorMessage)) {
+            return false;
+        }
+    }
+
+    qint64 lastAssetId = 0;
+    while (true) {
+        auto assets = fetchProjectAssetPage(
+            projectDb, project, lastAssetId, PageSize, errorMessage);
+        if (errorMessage && !errorMessage->isEmpty()) {
+            return false;
+        }
+        if (assets.isEmpty()) {
+            break;
+        }
+        lastAssetId = assets.constLast().assetId;
+        if (!persistAssetPage(globalDb,
+                              project,
+                              std::move(assets),
+                              syncGeneration,
+                              hasFts5,
+                              workCoordinator,
+                              workGeneration,
+                              errorMessage)) {
+            return false;
+        }
+    }
+
+    if (!finishSyncGeneration(globalDb,
+                              project,
+                              syncGeneration,
+                              hasFts5,
+                              workCoordinator,
+                              workGeneration,
+                              errorMessage)) {
+        return false;
+    }
+    if (catalogLogState.available
+        && !acknowledgeCatalogChanges(projectDb, catalogLogState.targetWatermark, errorMessage)) {
+        return false;
+    }
+    if (deltaSink) {
+        CatalogChangeSet changeSet;
+        changeSet.projectUuid = project.id;
+        changeSet.throughLogId = catalogLogState.targetWatermark;
+        changeSet.fullRebuild = true;
+        deltaSink(changeSet);
+    }
+    completed = true;
+    return true;
+}
+
+bool syncProjectIntoGlobalDelta(QSqlDatabase &globalDb,
+                                QSqlDatabase &projectDb,
+                                const Project &project,
+                                qint64 activeGeneration,
+                                qint64 targetWatermark,
+                                bool hasFts5,
+                                QString *errorMessage,
+                                IndexingWorkCoordinator *workCoordinator,
+                                quint64 workGeneration,
+                                const CatalogDeltaSink &deltaSink)
+{
+    if (!beginDeltaSync(globalDb, project, workCoordinator, workGeneration, errorMessage)) {
+        return false;
+    }
+    bool completed = false;
+    const auto failureGuard = qScopeGuard([&]() {
+        if (!completed) {
+            markSyncFailed(globalDb,
+                           project,
+                           errorMessage ? *errorMessage : QStringLiteral("全局素材增量同步失败"),
+                           workCoordinator,
+                           workGeneration);
+        }
+    });
+
+    constexpr qsizetype PageSize = 500;
+    qint64 lastLogId = 0;
+    while (lastLogId < targetWatermark) {
+        auto changes = fetchCatalogChangePage(
+            projectDb, lastLogId, targetWatermark, PageSize, errorMessage);
+        if (errorMessage && !errorMessage->isEmpty()) {
+            return false;
+        }
+        if (changes.isEmpty()) {
+            break;
+        }
+
+        QVector<qint64> assetIds;
+        QVector<qint64> folderIds;
+        assetIds.reserve(changes.size());
+        folderIds.reserve(changes.size());
+        for (const auto &change : changes) {
+            if (change.entity == CatalogChangeEntity::Asset) {
+                assetIds.append(change.entityId);
+            } else if (change.entity == CatalogChangeEntity::Folder) {
+                folderIds.append(change.entityId);
+            }
+        }
+        const auto assets = fetchProjectAssetsByIds(projectDb, project, assetIds, errorMessage);
+        if (errorMessage && !errorMessage->isEmpty()) {
+            return false;
+        }
+        const auto folders = fetchProjectFoldersByIds(projectDb, project, folderIds, errorMessage);
+        if (errorMessage && !errorMessage->isEmpty()) {
+            return false;
+        }
+        if (!folders.isEmpty()
+            && !persistFolderPage(globalDb,
+                                  folders,
+                                  activeGeneration,
+                                  workCoordinator,
+                                  workGeneration,
+                                  errorMessage)) {
+            return false;
+        }
+        if (!assets.isEmpty()
+            && !persistAssetPage(globalDb,
+                                 project,
+                                 assets,
+                                 activeGeneration,
+                                 hasFts5,
+                                 workCoordinator,
+                                 workGeneration,
+                                 errorMessage)) {
+            return false;
+        }
+        if (!applyDeltaCleanup(globalDb,
+                               project,
+                               &changes,
+                               assets,
+                               folders,
+                               hasFts5,
+                               workCoordinator,
+                               workGeneration,
+                               errorMessage)) {
+            return false;
+        }
+
+        lastLogId = changes.constLast().logId;
+        if (deltaSink) {
+            CatalogChangeSet changeSet;
+            changeSet.projectUuid = project.id;
+            changeSet.changes = changes;
+            changeSet.throughLogId = lastLogId;
+            deltaSink(changeSet);
+        }
+    }
+
+    if (!finishDeltaSync(globalDb, project, workCoordinator, workGeneration, errorMessage)) {
+        return false;
+    }
+    if (!acknowledgeCatalogChanges(projectDb, targetWatermark, errorMessage)) {
+        return false;
+    }
+    completed = true;
+    return true;
+}
+
+bool syncProjectIntoGlobal(QSqlDatabase &globalDb,
+                           const Project &project,
+                           bool hasFts5,
+                           bool forceFullRebuild,
+                           QString *errorMessage,
+                           IndexingWorkCoordinator *workCoordinator = nullptr,
+                           quint64 workGeneration = 0,
+                           const CatalogDeltaSink &deltaSink = {})
+{
+    if (errorMessage) {
+        errorMessage->clear();
+    }
+    const auto connectionName = QStringLiteral("sync_project_dispatch_%1_%2")
+        .arg(project.id)
+        .arg(reinterpret_cast<quintptr>(QThread::currentThreadId()));
+    QString openError;
+    auto projectDb = openProjectConnection(project.databasePath, connectionName, &openError);
+    if (!projectDb.isOpen()) {
+        QString offlineError;
+        markProjectOffline(globalDb, project, openError, &offlineError);
+        if (errorMessage) {
+            *errorMessage = offlineError.isEmpty()
+                ? openError
+                : QStringLiteral("%1；更新离线状态失败：%2").arg(openError, offlineError);
+        }
+        projectDb = QSqlDatabase();
+        closeProjectConnection(connectionName);
+        return false;
+    }
+    const auto closeGuard = qScopeGuard([&]() {
+        projectDb.close();
+        projectDb = QSqlDatabase();
+        closeProjectConnection(connectionName);
+    });
+
+    QString sourceStateError;
+    const bool unstableSourceRoot = hasUnstableSourceRoot(projectDb, &sourceStateError);
+    if (!sourceStateError.isEmpty()) {
+        if (errorMessage) {
+            *errorMessage = sourceStateError;
+        }
+        return false;
+    }
+    if (unstableSourceRoot) {
+        return true;
+    }
+
+    CatalogLogState catalogLogState;
+    if (!readCatalogLogState(projectDb, &catalogLogState, errorMessage)) {
+        return false;
+    }
+    qint64 activeGeneration = 0;
+    QString syncStatus;
+    bool hasIncompleteGeneration = false;
+    if (!readGlobalProjectState(globalDb,
+                                project.id,
+                                &activeGeneration,
+                                &syncStatus,
+                                &hasIncompleteGeneration,
+                                errorMessage)) {
+        return false;
+    }
+    const bool needsFullRebuild = forceFullRebuild
+        || !catalogLogState.available
+        || catalogLogState.requiresFullRebuild
+        || activeGeneration <= 0
+        || hasIncompleteGeneration
+        || syncStatus.compare(QStringLiteral("offline"), Qt::CaseInsensitive) == 0;
+    if (needsFullRebuild) {
+        return syncProjectIntoGlobalFull(globalDb,
+                                         project,
+                                         hasFts5,
+                                         errorMessage,
+                                         workCoordinator,
+                                         workGeneration,
+                                         deltaSink);
+    }
+    return syncProjectIntoGlobalDelta(globalDb,
+                                      projectDb,
+                                      project,
+                                      activeGeneration,
+                                      catalogLogState.targetWatermark,
+                                      hasFts5,
+                                      errorMessage,
+                                      workCoordinator,
+                                      workGeneration,
+                                      deltaSink);
+}
+
 
 QVector<Project> loadRegisteredProjects(QSqlDatabase &globalDb, QString *errorMessage)
 {
@@ -1027,7 +1809,36 @@ QVector<Project> loadRegisteredProjects(QSqlDatabase &globalDb, QString *errorMe
 #ifdef CINEVAULT_TESTING
 bool syncProjectIntoGlobalForTest(QSqlDatabase &globalDb, const Project &project, bool hasFts5, QString *errorMessage)
 {
-    return syncProjectIntoGlobal(globalDb, project, hasFts5, errorMessage);
+    return syncProjectIntoGlobal(globalDb, project, hasFts5, false, errorMessage);
+}
+
+bool syncProjectIntoGlobalWithDeltasForTest(QSqlDatabase &globalDb,
+                                            const Project &project,
+                                            bool hasFts5,
+                                            QVector<CatalogChangeSet> *changeSets,
+                                            QString *errorMessage)
+{
+    return syncProjectIntoGlobal(
+        globalDb,
+        project,
+        hasFts5,
+        false,
+        errorMessage,
+        nullptr,
+        0,
+        [changeSets](const CatalogChangeSet &changeSet) {
+            if (changeSets) {
+                changeSets->append(changeSet);
+            }
+        });
+}
+
+bool rebuildProjectIntoGlobalForTest(QSqlDatabase &globalDb,
+                                     const Project &project,
+                                     bool hasFts5,
+                                     QString *errorMessage)
+{
+    return syncProjectIntoGlobal(globalDb, project, hasFts5, true, errorMessage);
 }
 #endif
 
@@ -1050,6 +1861,11 @@ MaterialCatalogSyncService::~MaterialCatalogSyncService()
 void MaterialCatalogSyncService::waitForIdle()
 {
     m_futures.waitForFinished();
+}
+
+void MaterialCatalogSyncService::setWorkCoordinator(IndexingWorkCoordinator *workCoordinator)
+{
+    m_workCoordinator = workCoordinator;
 }
 
 void MaterialCatalogSyncService::syncCurrentProject()
@@ -1094,7 +1910,10 @@ void MaterialCatalogSyncService::syncProjectRecord(const Project &project)
                                  projectProgressContext(QStringLiteral("同步项目索引"), 0, 1))
         : 0;
 
-    auto future = QtConcurrent::run([this, project, jobProjectDatabasePath, jobId]() {
+    const auto workGeneration = m_workCoordinator
+        ? m_workCoordinator->currentGeneration()
+        : quint64{0};
+    auto future = QtConcurrent::run([this, project, jobProjectDatabasePath, jobId, workGeneration]() {
         const auto connectionName = QStringLiteral("global_sync_%1_%2")
             .arg(project.id)
             .arg(reinterpret_cast<quintptr>(QThread::currentThreadId()));
@@ -1113,7 +1932,16 @@ void MaterialCatalogSyncService::syncProjectRecord(const Project &project)
         }
 
         updateJob(jobProjectDatabasePath, jobId, 25, QStringLiteral("正在读取项目素材索引"), projectProgressContext(QStringLiteral("同步项目索引"), 0, 1));
-        if (!syncProjectIntoGlobal(db, project, m_globalDatabaseManager->hasFts5(), &errorMessage)) {
+        if (!syncProjectIntoGlobal(db,
+                                   project,
+                                   m_globalDatabaseManager->hasFts5(),
+                                   false,
+                                   &errorMessage,
+                                   m_workCoordinator,
+                                   workGeneration,
+                                   [this](const CatalogChangeSet &changeSet) {
+                                       notifyCatalogDelta(changeSet);
+                                   })) {
             failJob(jobProjectDatabasePath, jobId, errorMessage);
         } else {
             updateJob(jobProjectDatabasePath, jobId, 100, QStringLiteral("当前项目素材已同步到素材管理中心"), projectProgressContext(QStringLiteral("同步项目索引"), 1, 1));
@@ -1150,7 +1978,10 @@ void MaterialCatalogSyncService::rebuildAllProjects()
                                  projectProgressContext(QStringLiteral("重建项目索引"), 0, 0))
         : 0;
 
-    auto future = QtConcurrent::run([this, jobProjectDatabasePath, jobId]() {
+    const auto workGeneration = m_workCoordinator
+        ? m_workCoordinator->currentGeneration()
+        : quint64{0};
+    auto future = QtConcurrent::run([this, jobProjectDatabasePath, jobId, workGeneration]() {
         const auto connectionName = QStringLiteral("global_rebuild_%1").arg(reinterpret_cast<quintptr>(QThread::currentThreadId()));
         QString errorMessage;
         auto db = m_globalDatabaseManager->openThreadConnection(connectionName, &errorMessage);
@@ -1193,7 +2024,16 @@ void MaterialCatalogSyncService::rebuildAllProjects()
                       projectProgressContext(QStringLiteral("重建项目索引"), index + 1, projects.size()));
 
             QString syncError;
-            if (syncProjectIntoGlobal(db, project, m_globalDatabaseManager->hasFts5(), &syncError)) {
+            if (syncProjectIntoGlobal(db,
+                                      project,
+                                      m_globalDatabaseManager->hasFts5(),
+                                      true,
+                                      &syncError,
+                                      m_workCoordinator,
+                                      workGeneration,
+                                      [this](const CatalogChangeSet &changeSet) {
+                                          notifyCatalogDelta(changeSet);
+                                      })) {
                 ++successCount;
             } else {
                 ++failedCount;
@@ -1266,5 +2106,12 @@ void MaterialCatalogSyncService::notifyCatalogChanged()
 {
     QMetaObject::invokeMethod(this, [this]() {
         emit catalogChanged();
+    }, Qt::QueuedConnection);
+}
+
+void MaterialCatalogSyncService::notifyCatalogDelta(const CatalogChangeSet &changeSet)
+{
+    QMetaObject::invokeMethod(this, [this, changeSet]() {
+        emit catalogDeltaReady(changeSet);
     }, Qt::QueuedConnection);
 }

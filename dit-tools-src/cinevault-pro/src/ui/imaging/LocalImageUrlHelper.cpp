@@ -1,5 +1,7 @@
 #include "ui/imaging/LocalImageUrlHelper.h"
 
+#include "shared/ThumbnailCacheQuota.h"
+
 #include <QDir>
 #include <QFileInfo>
 #include <QUrl>
@@ -73,6 +75,7 @@ QString LocalImageUrlHelper::sourceForInputString(const QString &input)
     if (localPath.isEmpty()) {
         return trimmed;
     }
+    ThumbnailCacheQuota::recordAccess(localPath);
 
     const auto fileUrl = QUrl::fromLocalFile(localPath).toString();
     if (isWebpFile(localPath)) {

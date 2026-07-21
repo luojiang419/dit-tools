@@ -4,6 +4,7 @@
 #include "core/scan/FileTypeService.h"
 #include "core/scan/ScanEngine.h"
 #include "infrastructure/db/DatabaseManager.h"
+#include "infrastructure/monitoring/PerformanceTelemetry.h"
 
 #include <QtTest>
 
@@ -160,7 +161,7 @@ class ImportServiceLegacyRescanTest : public QObject {
     Q_OBJECT
 
 private slots:
-    void lockedFile_isIndexedAsUnreadableAndDoesNotFailVolumeScan()
+    void lockedFile_isLightweightIndexedWithoutOpeningDuringScan()
     {
 #ifndef Q_OS_WIN
         QSKIP("此回归测试依赖 Windows 独占共享锁语义");
@@ -210,11 +211,11 @@ private slots:
         QSqlQuery lockedAsset(databaseManager.database());
         lockedAsset.prepare(QStringLiteral("SELECT is_readable FROM asset_file WHERE name = 'locked.mp4'"));
         QVERIFY2(lockedAsset.exec() && lockedAsset.next(), qPrintable(lockedAsset.lastError().text()));
-        QCOMPARE(lockedAsset.value(0).toInt(), 0);
+        QCOMPARE(lockedAsset.value(0).toInt(), 1);
         lockedAsset.finish();
         const auto lockedSource = sourceRootById(databaseManager.database(), sourceRootId);
-        QCOMPARE(lockedSource.status, QStringLiteral("warning"));
-        QVERIFY(lockedSource.warningCount >= 1);
+        QCOMPARE(lockedSource.status, QStringLiteral("ok"));
+        QCOMPARE(lockedSource.warningCount, qint64{0});
 
         CloseHandle(lockedHandle);
         lockedHandle = INVALID_HANDLE_VALUE;
@@ -462,6 +463,273 @@ private slots:
         QCOMPARE(assetNames(databaseManager.database()).join(QLatin1Char(',')),
                  QStringLiteral("clip-after-resume.mov,clip-b.mov,notes.txt"));
         QCOMPARE(scanSessionCount(databaseManager.database(), &errorMessage), qint64{0});
+    }
+
+    void singleLayerScan_recoversAfterCommittedBatchWithoutStaleEntries()
+    {
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        const auto projectDb = QDir(temp.path()).filePath(QStringLiteral("batched-resume.cvdb"));
+        const auto sourcePath = QDir(temp.path()).filePath(QStringLiteral("Flat"));
+        for (int index = 0; index < 600; ++index) {
+            writeFile(
+                QDir(sourcePath).filePath(QStringLiteral("asset-%1.jpg").arg(index, 4, 10, QLatin1Char('0'))),
+                "x");
+        }
+
+        DatabaseManager databaseManager;
+        QString errorMessage;
+        QVERIFY2(databaseManager.openProjectDatabase(projectDb, &errorMessage), qPrintable(errorMessage));
+        const auto sourceRootId = insertSourceRoot(
+            databaseManager.database(), QStringLiteral("Flat"), sourcePath);
+        QVERIFY(sourceRootId > 0);
+
+        auto &telemetry = PerformanceTelemetry::global();
+        telemetry.resetForTesting();
+        JobEngine jobEngine(&databaseManager);
+        ScanEngine scanEngine(&databaseManager, &jobEngine, nullptr, nullptr);
+        scanEngine.setFailureAfterEntriesForTesting(300);
+        QSignalSpy failedSpy(&scanEngine, &ScanEngine::scanFailed);
+        const auto failedJobId = jobEngine.createJob(
+            JobType::Scan,
+            QStringLiteral("批次中断"),
+            QStringLiteral("验证目录内批次恢复"),
+            sourceRootId);
+        scanEngine.startScan(sourceRootById(databaseManager.database(), sourceRootId), failedJobId);
+        scanEngine.waitForIdle();
+        QCoreApplication::processEvents();
+
+        QCOMPARE(failedSpy.count(), 1);
+        QCOMPARE(countAssets(databaseManager.database(), &errorMessage), qint64{0});
+        QSqlQuery stagedCount(databaseManager.database());
+        QVERIFY(stagedCount.exec(QStringLiteral("SELECT COUNT(*) FROM scan_stage_asset"))
+                && stagedCount.next());
+        QCOMPARE(stagedCount.value(0).toLongLong(), qint64{256});
+        stagedCount.finish();
+        QCOMPARE(telemetry.snapshot().value(QStringLiteral("peak_queue_depths")).toObject()
+                     .value(QStringLiteral("scan.directory_entries")).toInteger(),
+                 qint64{256});
+
+        QVERIFY(QFile::remove(QDir(sourcePath).filePath(QStringLiteral("asset-0000.jpg"))));
+        writeFile(QDir(sourcePath).filePath(QStringLiteral("asset-new.jpg")), "new");
+        scanEngine.setFailureAfterEntriesForTesting(-1);
+        QSignalSpy finishedSpy(&scanEngine, &ScanEngine::scanFinished);
+        const auto retryJobId = jobEngine.createJob(
+            JobType::Scan,
+            QStringLiteral("批次恢复"),
+            QStringLiteral("重新枚举未完成目录"),
+            sourceRootId);
+        scanEngine.startScan(sourceRootById(databaseManager.database(), sourceRootId), retryJobId);
+        scanEngine.waitForIdle();
+        QCoreApplication::processEvents();
+
+        QCOMPARE(finishedSpy.count(), 1);
+        QCOMPARE(countAssets(databaseManager.database(), &errorMessage), qint64{600});
+        const auto names = assetNames(databaseManager.database());
+        QVERIFY(!names.contains(QStringLiteral("asset-0000.jpg")));
+        QVERIFY(names.contains(QStringLiteral("asset-new.jpg")));
+        QCOMPARE(scanSessionCount(databaseManager.database(), &errorMessage), qint64{0});
+    }
+
+    void cancellation_preservesResumeStateAndRetryCompletes()
+    {
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        const auto projectDb = QDir(temp.path()).filePath(QStringLiteral("cancel.cvdb"));
+        const auto sourcePath = QDir(temp.path()).filePath(QStringLiteral("CancelSource"));
+        for (int index = 0; index < 2000; ++index) {
+            writeFile(
+                QDir(sourcePath).filePath(QStringLiteral("asset-%1.txt").arg(index, 4, 10, QLatin1Char('0'))),
+                "x");
+        }
+
+        DatabaseManager databaseManager;
+        QString errorMessage;
+        QVERIFY2(databaseManager.openProjectDatabase(projectDb, &errorMessage), qPrintable(errorMessage));
+        const auto sourceRootId = insertSourceRoot(
+            databaseManager.database(), QStringLiteral("CancelSource"), sourcePath);
+        QVERIFY(sourceRootId > 0);
+
+        JobEngine jobEngine(&databaseManager);
+        ScanEngine scanEngine(&databaseManager, &jobEngine, nullptr, nullptr);
+        QSignalSpy failedSpy(&scanEngine, &ScanEngine::scanFailed);
+        const auto cancelledJobId = jobEngine.createJob(
+            JobType::Scan,
+            QStringLiteral("取消扫描"),
+            QStringLiteral("验证取消响应"),
+            sourceRootId);
+        scanEngine.startScan(
+            sourceRootById(databaseManager.database(), sourceRootId), cancelledJobId);
+        scanEngine.requestCancel(sourceRootId);
+        scanEngine.waitForIdle();
+        QCoreApplication::processEvents();
+
+        QCOMPARE(failedSpy.count(), 1);
+        QVERIFY(failedSpy.first().at(1).toString().contains(QStringLiteral("取消")));
+        QCOMPARE(countAssets(databaseManager.database(), &errorMessage), qint64{0});
+        QCOMPARE(scanSessionCount(databaseManager.database(), &errorMessage), qint64{1});
+
+        QSignalSpy finishedSpy(&scanEngine, &ScanEngine::scanFinished);
+        const auto retryJobId = jobEngine.createJob(
+            JobType::Scan,
+            QStringLiteral("取消后恢复"),
+            QStringLiteral("验证取消标记不会污染重试"),
+            sourceRootId);
+        scanEngine.startScan(sourceRootById(databaseManager.database(), sourceRootId), retryJobId);
+        scanEngine.waitForIdle();
+        QCoreApplication::processEvents();
+
+        QCOMPARE(finishedSpy.count(), 1);
+        QCOMPARE(countAssets(databaseManager.database(), &errorMessage), qint64{2000});
+        QCOMPARE(scanSessionCount(databaseManager.database(), &errorMessage), qint64{0});
+    }
+
+    void targetedDirectoryRescan_updatesOnlyDirtyDirectories()
+    {
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        const auto projectDb = QDir(temp.path()).filePath(QStringLiteral("targeted.cvdb"));
+        const auto sourcePath = QDir(temp.path()).filePath(QStringLiteral("TargetedSource"));
+        const auto dirtyPath = QDir(sourcePath).filePath(QStringLiteral("A"));
+        writeFile(QDir(dirtyPath).filePath(QStringLiteral("changed.mov")), "old");
+        writeFile(QDir(dirtyPath).filePath(QStringLiteral("removed.txt")), "remove");
+        writeFile(QDir(sourcePath).filePath(QStringLiteral("B/untouched.mov")), "untouched");
+
+        DatabaseManager databaseManager;
+        QString errorMessage;
+        QVERIFY2(databaseManager.openProjectDatabase(projectDb, &errorMessage), qPrintable(errorMessage));
+        const auto sourceRootId = insertSourceRoot(
+            databaseManager.database(), QStringLiteral("TargetedSource"), sourcePath);
+        QVERIFY(sourceRootId > 0);
+
+        JobEngine jobEngine(&databaseManager);
+        JobService jobService(&jobEngine);
+        ScanEngine scanEngine(&databaseManager, &jobEngine, nullptr, nullptr);
+        ImportService importService(&databaseManager, &jobService, &scanEngine);
+        const auto initialJobId = jobEngine.createJob(
+            JobType::Scan,
+            QStringLiteral("初始扫描"),
+            QStringLiteral("建立定向更新基线"),
+            sourceRootId);
+        scanEngine.startScan(sourceRootById(databaseManager.database(), sourceRootId), initialJobId);
+        scanEngine.waitForIdle();
+        QCoreApplication::processEvents();
+        QCOMPARE(countAssets(databaseManager.database(), &errorMessage), qint64{3});
+
+        QSqlQuery untouchedIdQuery(databaseManager.database());
+        QVERIFY(untouchedIdQuery.exec(QStringLiteral(
+                    "SELECT id FROM asset_file WHERE name = 'untouched.mov'"))
+                && untouchedIdQuery.next());
+        const auto untouchedId = untouchedIdQuery.value(0).toLongLong();
+        untouchedIdQuery.finish();
+        QSqlQuery protectUntouched(databaseManager.database());
+        QVERIFY2(protectUntouched.exec(QStringLiteral(
+                     "CREATE TRIGGER reject_unrelated_asset_update BEFORE UPDATE ON asset_file "
+                     "WHEN OLD.name = 'untouched.mov' BEGIN "
+                     "SELECT RAISE(ABORT, 'unrelated directory was traversed'); END")),
+                 qPrintable(protectUntouched.lastError().text()));
+
+        writeFile(QDir(dirtyPath).filePath(QStringLiteral("changed.mov")), "new-content");
+        QVERIFY(QFile::remove(QDir(dirtyPath).filePath(QStringLiteral("removed.txt"))));
+        writeFile(QDir(dirtyPath).filePath(QStringLiteral("New/nested.raw")), "raw");
+
+        QSignalSpy finished(&scanEngine, &ScanEngine::scanFinished);
+        QSignalSpy failed(&scanEngine, &ScanEngine::scanFailed);
+        QVERIFY2(importService.rescanSourceDirectories(
+                     sourceRootId,
+                     {dirtyPath},
+                     false,
+                     QStringLiteral("测试定向更新"),
+                     &errorMessage),
+                 qPrintable(errorMessage));
+        scanEngine.waitForIdle();
+        QCoreApplication::processEvents();
+
+        QCOMPARE(failed.count(), 0);
+        QCOMPARE(finished.count(), 1);
+        QCOMPARE(assetNames(databaseManager.database()).join(QLatin1Char(',')),
+                 QStringLiteral("changed.mov,nested.raw,untouched.mov"));
+        QSqlQuery untouchedAfter(databaseManager.database());
+        QVERIFY(untouchedAfter.exec(QStringLiteral(
+                    "SELECT id FROM asset_file WHERE name = 'untouched.mov'"))
+                && untouchedAfter.next());
+        QCOMPARE(untouchedAfter.value(0).toLongLong(), untouchedId);
+
+        const auto root = folderRow(databaseManager.database(), QString(), &errorMessage);
+        QCOMPARE(root.at(3).toLongLong(), qint64{3});
+        const auto dirtyFolder = folderRow(
+            databaseManager.database(), QStringLiteral("A"), &errorMessage);
+        QCOMPARE(dirtyFolder.at(2).toLongLong(), qint64{1});
+        QCOMPARE(dirtyFolder.at(3).toLongLong(), qint64{2});
+    }
+
+    void importDirectory_rejectsParentAndChildSourceOverlap()
+    {
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        const auto projectDb = QDir(temp.path()).filePath(QStringLiteral("overlap.cvdb"));
+        const auto parentPath = QDir(temp.path()).filePath(QStringLiteral("Library"));
+        const auto existingPath = QDir(parentPath).filePath(QStringLiteral("Existing"));
+        const auto childPath = QDir(existingPath).filePath(QStringLiteral("Nested"));
+        QVERIFY(QDir().mkpath(childPath));
+
+        DatabaseManager databaseManager;
+        QString errorMessage;
+        QVERIFY2(databaseManager.openProjectDatabase(projectDb, &errorMessage), qPrintable(errorMessage));
+        QVERIFY(insertSourceRoot(databaseManager.database(), QStringLiteral("Existing"), existingPath) > 0);
+        JobEngine jobEngine(&databaseManager);
+        JobService jobService(&jobEngine);
+        ScanEngine scanEngine(&databaseManager, &jobEngine, nullptr, nullptr);
+        ImportService importService(&databaseManager, &jobService, &scanEngine);
+
+        QVERIFY(!importService.importDirectory(parentPath, &errorMessage));
+        QVERIFY(errorMessage.contains(QStringLiteral("父子目录重叠")));
+        errorMessage.clear();
+        QVERIFY(!importService.importDirectory(childPath, &errorMessage));
+        QVERIFY(errorMessage.contains(QStringLiteral("父子目录重叠")));
+        QCOMPARE(importService.sourceRoots().size(), 1);
+    }
+
+    void fullScan_excludesProjectCachesDatabaseAndDirectoryLinks()
+    {
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        const auto sourcePath = QDir(temp.path()).filePath(QStringLiteral("WholeSource"));
+        const auto projectDb = QDir(sourcePath).filePath(QStringLiteral("project.cvdb"));
+        writeFile(QDir(sourcePath).filePath(QStringLiteral("Media/photo.jpg")), "photo");
+        writeFile(QDir(sourcePath).filePath(QStringLiteral("cache/thumbnails/generated.jpg")), "cache");
+        writeFile(QDir(sourcePath).filePath(QStringLiteral("analysis/frames/generated.jpg")), "analysis");
+
+#ifdef Q_OS_WIN
+        const auto linkedTarget = QDir(temp.path()).filePath(QStringLiteral("LinkedTarget"));
+        writeFile(QDir(linkedTarget).filePath(QStringLiteral("must-not-follow.mov")), "linked");
+        const auto linkedPath = QDir(sourcePath).filePath(QStringLiteral("Linked"));
+        constexpr DWORD allowUnprivilegedCreate = 0x2;
+        CreateSymbolicLinkW(reinterpret_cast<LPCWSTR>(QDir::toNativeSeparators(linkedPath).utf16()),
+                            reinterpret_cast<LPCWSTR>(QDir::toNativeSeparators(linkedTarget).utf16()),
+                            SYMBOLIC_LINK_FLAG_DIRECTORY | allowUnprivilegedCreate);
+#endif
+
+        DatabaseManager databaseManager;
+        QString errorMessage;
+        QVERIFY2(databaseManager.openProjectDatabase(projectDb, &errorMessage), qPrintable(errorMessage));
+        const auto sourceRootId = insertSourceRoot(
+            databaseManager.database(), QStringLiteral("WholeSource"), sourcePath);
+        QVERIFY(sourceRootId > 0);
+        JobEngine jobEngine(&databaseManager);
+        ScanEngine scanEngine(&databaseManager, &jobEngine, nullptr, nullptr);
+        QSignalSpy failed(&scanEngine, &ScanEngine::scanFailed);
+        const auto jobId = jobEngine.createJob(
+            JobType::Scan,
+            QStringLiteral("排除路径扫描"),
+            QStringLiteral("验证项目生成数据不会反向入库"),
+            sourceRootId);
+        scanEngine.startScan(sourceRootById(databaseManager.database(), sourceRootId), jobId);
+        scanEngine.waitForIdle();
+        QCoreApplication::processEvents();
+
+        QCOMPARE(failed.count(), 0);
+        QCOMPARE(assetNames(databaseManager.database()), QStringList{QStringLiteral("photo.jpg")});
     }
 };
 

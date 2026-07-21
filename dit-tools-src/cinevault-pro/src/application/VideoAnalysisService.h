@@ -26,6 +26,8 @@ public:
                                   QObject *parent = nullptr);
     ~VideoAnalysisService() override;
     void waitForIdle();
+    void cancelPendingWork(const QString &reason);
+    void beginShutdown();
 
     bool enqueueVideo(const QString &videoKey, QString *errorMessage = nullptr);
     int enqueueVideos(const QStringList &videoKeys, QString *errorMessage = nullptr);
@@ -52,6 +54,7 @@ public slots:
 
 signals:
     void catalogChanged();
+    void searchDocumentChanged(const QString &videoKey);
     void analysisProgressChanged(const QString &videoKey,
                                  qint64 progress,
                                  const QString &detail,
@@ -102,7 +105,7 @@ private:
     void updateJobSubject(const QString &projectDatabasePath, qint64 jobId, const JobSubject &subject);
     void completeJob(const QString &projectDatabasePath, qint64 jobId, const QString &detail);
     void failJob(const QString &projectDatabasePath, qint64 jobId, const QString &errorMessage);
-    void notifyCatalogChanged();
+    void notifyCatalogChanged(const QString &videoKey);
 
     GlobalDatabaseManager *m_globalDatabaseManager = nullptr;
     JobEngine *m_jobEngine = nullptr;
@@ -121,4 +124,5 @@ private:
     QHash<QString, QString> m_batchLabels;
     qint64 m_batchCurrentProgress = 0;
     QString m_batchCurrentDetail;
+    bool m_shuttingDown = false;
 };

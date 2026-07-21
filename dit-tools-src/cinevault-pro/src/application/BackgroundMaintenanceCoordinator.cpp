@@ -53,7 +53,7 @@ BackgroundMaintenanceCoordinator::BackgroundMaintenanceCoordinator(
             [this]() { reloadSourceRoots(false); },
             Qt::QueuedConnection);
     connect(m_sourceChangeMonitor,
-            &SourceChangeMonitor::sourceChanged,
+            &SourceChangeMonitor::sourceChangesDetected,
             this,
             &BackgroundMaintenanceCoordinator::markSourceDirty);
     connect(m_sourceChangeMonitor,
@@ -130,7 +130,7 @@ void BackgroundMaintenanceCoordinator::stop()
     m_systemIdleMonitor->stop();
     m_sourceChangeMonitor->stop();
     m_sourceRoots.clear();
-    m_dirtyGenerations.clear();
+    m_dirtySources.clear();
     m_attemptedThisIdle.clear();
     m_scanningSourceId = 0;
     m_scanningGeneration = 0;
@@ -152,7 +152,7 @@ bool BackgroundMaintenanceCoordinator::isSystemIdle() const
 
 int BackgroundMaintenanceCoordinator::pendingSourceCount() const
 {
-    return m_dirtyGenerations.size();
+    return m_dirtySources.size();
 }
 
 QString BackgroundMaintenanceCoordinator::statusText() const
@@ -175,7 +175,7 @@ void BackgroundMaintenanceCoordinator::handleProjectChanged()
     }
     m_sourceChangeMonitor->stop();
     m_sourceRoots.clear();
-    m_dirtyGenerations.clear();
+    m_dirtySources.clear();
     m_attemptedThisIdle.clear();
     m_scanningSourceId = 0;
     m_scanningGeneration = 0;
@@ -200,13 +200,16 @@ void BackgroundMaintenanceCoordinator::reloadSourceRoots(bool markAllDirty)
     for (const auto &root : roots) {
         nextRoots.insert(root.id, root);
         if (markAllDirty) {
-            m_dirtyGenerations.insert(root.id, m_dirtyGenerations.value(root.id, 0) + 1);
+            auto &dirty = m_dirtySources[root.id];
+            ++dirty.generation;
+            dirty.changedPaths.clear();
+            dirty.forceFullScan = true;
         }
     }
 
-    for (auto it = m_dirtyGenerations.begin(); it != m_dirtyGenerations.end();) {
+    for (auto it = m_dirtySources.begin(); it != m_dirtySources.end();) {
         if (!nextRoots.contains(it.key())) {
-            it = m_dirtyGenerations.erase(it);
+            it = m_dirtySources.erase(it);
         } else {
             ++it;
         }
@@ -223,24 +226,31 @@ void BackgroundMaintenanceCoordinator::reloadSourceRoots(bool markAllDirty)
     }
 }
 
-void BackgroundMaintenanceCoordinator::markSourceDirty(qint64 sourceRootId,
-                                                       const QString &sourcePath)
+void BackgroundMaintenanceCoordinator::markSourceDirty(const SourceChangeBatch &batch)
 {
-    if (!m_running || !m_sourceRoots.contains(sourceRootId)) {
+    if (!m_running || !m_sourceRoots.contains(batch.sourceRootId)) {
         return;
     }
-    m_dirtyGenerations.insert(sourceRootId,
-                              m_dirtyGenerations.value(sourceRootId, 0) + 1);
+    auto &dirty = m_dirtySources[batch.sourceRootId];
+    ++dirty.generation;
+    dirty.forceFullScan = dirty.forceFullScan || batch.overflowed;
+    if (dirty.forceFullScan) {
+        dirty.changedPaths.clear();
+    } else {
+        for (const auto &changedPath : batch.changedPaths) {
+            dirty.changedPaths.insert(changedPath);
+        }
+    }
     // 系统盘即使无人操作也会持续产生系统日志、缓存等变化。一个素材源在同一次
     // 空闲会话中最多扫描一次，扫描期间/之后的新变化保留到下一次空闲会话处理，
     // 避免全盘索引在机器长时间空闲时形成连续重扫循环。
     if (!m_systemIdleMonitor->isIdle()) {
-        m_attemptedThisIdle.remove(sourceRootId);
+        m_attemptedThisIdle.remove(batch.sourceRootId);
     }
-    setStatusText(QStringLiteral("已检测到文件变化：%1；将在电脑空闲 1 小时后自动更新并解析。")
-                      .arg(QFileInfo(sourcePath).fileName().isEmpty()
-                               ? sourcePath
-                               : QFileInfo(sourcePath).fileName()));
+    setStatusText(batch.overflowed
+                      ? QStringLiteral("素材源变化通知已溢出；将在空闲时按目录分片执行一次全量校验。")
+                      : QStringLiteral("已合并 %1 个变化路径；将在电脑空闲 1 小时后定向更新。")
+                            .arg(dirty.changedPaths.size()));
     emit stateChanged();
     if (m_systemIdleMonitor->isIdle()) {
         QTimer::singleShot(0, this, &BackgroundMaintenanceCoordinator::processNext);
@@ -256,7 +266,7 @@ void BackgroundMaintenanceCoordinator::processNext()
         return;
     }
 
-    QList<qint64> dirtyIds = m_dirtyGenerations.keys();
+    QList<qint64> dirtyIds = m_dirtySources.keys();
     std::sort(dirtyIds.begin(), dirtyIds.end());
     for (const auto sourceRootId : std::as_const(dirtyIds)) {
         if (m_attemptedThisIdle.contains(sourceRootId) || !m_sourceRoots.contains(sourceRootId)) {
@@ -265,14 +275,23 @@ void BackgroundMaintenanceCoordinator::processNext()
 
         m_attemptedThisIdle.insert(sourceRootId);
         m_scanningSourceId = sourceRootId;
-        m_scanningGeneration = m_dirtyGenerations.value(sourceRootId);
+        const auto dirty = m_dirtySources.value(sourceRootId);
+        m_scanningGeneration = dirty.generation;
         QString errorMessage;
-        if (m_importService->rescanSourceRoot(
+        if (m_importService->rescanSourceDirectories(
                 sourceRootId,
-                QStringLiteral("系统空闲，正在无感更新全量文件索引"),
+                dirty.changedPaths.values(),
+                dirty.forceFullScan,
+                dirty.forceFullScan
+                    ? QStringLiteral("变化通知溢出，正在按目录检查点校验全量索引")
+                    : QStringLiteral("系统空闲，正在定向更新变化目录"),
                 &errorMessage)) {
-            setStatusText(QStringLiteral("正在无感更新：%1")
-                              .arg(m_sourceRoots.value(sourceRootId).name));
+            setStatusText(dirty.forceFullScan
+                              ? QStringLiteral("正在分片校验全量索引：%1")
+                                    .arg(m_sourceRoots.value(sourceRootId).name)
+                              : QStringLiteral("正在定向更新 %1 个变化路径：%2")
+                                    .arg(dirty.changedPaths.size())
+                                    .arg(m_sourceRoots.value(sourceRootId).name));
             emit stateChanged();
             return;
         }
@@ -345,8 +364,8 @@ void BackgroundMaintenanceCoordinator::handleSourceScanFinished(qint64 sourceRoo
         return;
     }
     if (sourceRootId == m_scanningSourceId) {
-        if (m_dirtyGenerations.value(sourceRootId) == m_scanningGeneration) {
-            m_dirtyGenerations.remove(sourceRootId);
+        if (m_dirtySources.value(sourceRootId).generation == m_scanningGeneration) {
+            m_dirtySources.remove(sourceRootId);
         }
         m_scanningSourceId = 0;
         m_scanningGeneration = 0;

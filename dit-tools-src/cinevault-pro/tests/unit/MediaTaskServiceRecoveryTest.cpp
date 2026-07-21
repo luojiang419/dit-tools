@@ -2,18 +2,25 @@
 #include "core/jobs/JobEngine.h"
 #include "core/thumbnail/ThumbnailEngine.h"
 #include "infrastructure/db/DatabaseManager.h"
+#include "infrastructure/monitoring/PerformanceTelemetry.h"
+#include "shared/Paths.h"
+#include "shared/ThumbnailCacheQuota.h"
 
 #include <QtTest>
 
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QElapsedTimer>
+#include <QEvent>
+#include <QEventLoop>
 #include <QSemaphore>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QTemporaryDir>
 
 #include <algorithm>
+#include <stdexcept>
 
 namespace {
 class FakeThumbnailEngine : public ThumbnailEngine {
@@ -66,6 +73,17 @@ private:
     mutable QSemaphore m_continue;
 };
 
+class ThrowingThumbnailEngine : public FakeThumbnailEngine {
+public:
+    ThumbnailResult createPlaceholder(const ThumbnailRequest &request) const override
+    {
+        if (QFileInfo(request.sourcePath).fileName() == QStringLiteral("tool-crash.mp4")) {
+            throw std::runtime_error("simulated external tool crash");
+        }
+        return FakeThumbnailEngine::createPlaceholder(request);
+    }
+};
+
 bool execSql(QSqlDatabase db, const QString &sql, QString *errorMessage = nullptr)
 {
     QSqlQuery query(db);
@@ -115,6 +133,19 @@ void insertThumbnail(QSqlDatabase db, qint64 assetId, ThumbnailStatus status, co
     QVERIFY(query.exec());
 }
 
+void insertCompletedMetadata(QSqlDatabase db, qint64 assetId)
+{
+    QSqlQuery query(db);
+    query.prepare(QStringLiteral(
+        "INSERT INTO media_metadata "
+        "(asset_id, probe_status, media_type, container, duration_ms, bit_rate, raw_json, error_message, updated_at) "
+        "VALUES (?, ?, ?, 'mp4', 0, 0, '{}', '', '2026-07-21T12:00:00')"));
+    query.addBindValue(assetId);
+    query.addBindValue(static_cast<int>(ProbeStatus::Success));
+    query.addBindValue(static_cast<int>(AssetType::Video));
+    QVERIFY2(query.exec(), qPrintable(query.lastError().text()));
+}
+
 QPair<ThumbnailStatus, QString> readThumbnail(QSqlDatabase db, qint64 assetId)
 {
     QSqlQuery query(db);
@@ -135,6 +166,9 @@ private slots:
     void unchangedCompletedAssetsDoNotCreateDuplicateJobs();
     void simultaneousRecoveryTriggersCreateOnlyOneWorker();
     void newImportsGenerateThumbnailBeforeMetadataProbe();
+    void thumbnailPaginationThrottlesHighFrequencyUpdates();
+    void singleThumbnailDatabaseFailureDoesNotAbortRemainingSource();
+    void recoveryMarkerAuditsMissingCacheReferencesBeforeDispatch();
 };
 
 void MediaTaskServiceRecoveryTest::recoversRunningEmptyThumbnails()
@@ -356,6 +390,222 @@ void MediaTaskServiceRecoveryTest::newImportsGenerateThumbnailBeforeMetadataProb
                    return job.state == JobState::Running;
                });
     })(), 10000);
+    databaseManager.closeProjectDatabase();
+}
+
+void MediaTaskServiceRecoveryTest::thumbnailPaginationThrottlesHighFrequencyUpdates()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const auto sourcePath = QDir(tempDir.path()).filePath(QStringLiteral("source"));
+    QVERIFY(QDir().mkpath(sourcePath));
+
+    DatabaseManager databaseManager;
+    QString errorMessage;
+    const auto databasePath = QDir(tempDir.path()).filePath(QStringLiteral("project.cvdb"));
+    QVERIFY2(databaseManager.openProjectDatabase(databasePath, &errorMessage), qPrintable(errorMessage));
+    auto db = databaseManager.database();
+
+    QSqlQuery source(db);
+    source.prepare(QStringLiteral(
+        "INSERT INTO source_root "
+        "(name, path, status, total_files, total_folders, total_size_bytes, video_count, audio_count, image_count, "
+        "other_count, warning_count, scan_version, created_at, updated_at) "
+        "VALUES ('Paged', ?, 'ok', 300, 0, 3600, 300, 0, 0, 0, 0, 5, "
+        "'2026-07-21T12:00:00', '2026-07-21T12:00:00')"));
+    source.addBindValue(sourcePath);
+    QVERIFY2(source.exec(), qPrintable(source.lastError().text()));
+    const auto sourceRootId = source.lastInsertId().toLongLong();
+    QVERIFY(sourceRootId > 0);
+    for (int index = 0; index < 300; ++index) {
+        const auto assetId = insertAsset(
+            db,
+            sourceRootId,
+            sourcePath,
+            QStringLiteral("paged-%1.mp4").arg(index, 4, 10, QLatin1Char('0')));
+        QVERIFY(assetId > 0);
+        insertCompletedMetadata(db, assetId);
+    }
+
+    QVERIFY(execSql(db, QStringLiteral(
+        "CREATE TABLE job_write_audit (write_count INTEGER NOT NULL DEFAULT 0);")));
+    QVERIFY(execSql(db, QStringLiteral(
+        "INSERT INTO job_write_audit (write_count) VALUES (0);")));
+    QVERIFY(execSql(db, QStringLiteral(
+        "CREATE TRIGGER count_job_writes AFTER INSERT ON job "
+        "BEGIN UPDATE job_write_audit SET write_count = write_count + 1; END;")));
+
+    auto &telemetry = PerformanceTelemetry::global();
+    telemetry.resetForTesting();
+    JobEngine jobEngine(&databaseManager);
+    FakeThumbnailEngine thumbnailEngine;
+    MediaTaskService service(&databaseManager, &jobEngine, nullptr, &thumbnailEngine);
+    QSignalSpy jobsChangedSpy(&jobEngine, &JobEngine::jobsChanged);
+    QSignalSpy catalogChangedSpy(&service, &MediaTaskService::mediaCatalogChanged);
+    QElapsedTimer elapsed;
+    elapsed.start();
+    service.startForSourceRoot(sourceRootId);
+    service.waitForIdle();
+    const auto workerElapsedMs = qMax<qint64>(1, elapsed.elapsed());
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+
+    QSqlQuery thumbnailCount(db);
+    thumbnailCount.prepare(QStringLiteral(
+        "SELECT COUNT(*) FROM thumbnail WHERE status = ? AND image_path <> ''"));
+    thumbnailCount.addBindValue(static_cast<int>(ThumbnailStatus::Success));
+    QVERIFY(thumbnailCount.exec() && thumbnailCount.next());
+    QCOMPARE(thumbnailCount.value(0).toLongLong(), qint64{300});
+    thumbnailCount.finish();
+
+    const auto peakDepth = telemetry.snapshot()
+        .value(QStringLiteral("peak_queue_depths")).toObject()
+        .value(QStringLiteral("media.thumbnail_assets")).toInteger();
+    QCOMPARE(peakDepth, qint64{128});
+
+    const auto jobs = jobEngine.jobs();
+    QCOMPARE(jobs.size(), 1);
+    QCOMPARE(jobs.constFirst().type, JobType::Thumbnail);
+    QCOMPARE(jobs.constFirst().state, JobState::Completed);
+    QCOMPARE(jobs.constFirst().progress, qint64{100});
+    QCOMPARE(jobs.constFirst().progressContext.currentItem, qint64{300});
+    QCOMPARE(jobs.constFirst().progressContext.totalItems, qint64{300});
+
+    QSqlQuery persistedJob(db);
+    QVERIFY(persistedJob.exec(QStringLiteral(
+        "SELECT state, progress, progress_context_json FROM job LIMIT 1")));
+    QVERIFY(persistedJob.next());
+    QCOMPARE(persistedJob.value(0).toInt(), static_cast<int>(JobState::Completed));
+    QCOMPARE(persistedJob.value(1).toLongLong(), qint64{100});
+    QVERIFY(persistedJob.value(2).toString().contains(QStringLiteral("\"currentItem\":300")));
+
+    QSqlQuery jobWriteCount(db);
+    QVERIFY(jobWriteCount.exec(QStringLiteral("SELECT write_count FROM job_write_audit")));
+    QVERIFY(jobWriteCount.next());
+    const auto persistedWrites = jobWriteCount.value(0).toLongLong();
+    const auto maxExpectedWrites = ((workerElapsedMs + 249) / 250) + 4;
+    QVERIFY2(persistedWrites <= maxExpectedWrites,
+             qPrintable(QStringLiteral("任务写库次数 %1 超过时长 %2ms 对应上界 %3")
+                            .arg(persistedWrites).arg(workerElapsedMs).arg(maxExpectedWrites)));
+    QCOMPARE(jobsChangedSpy.count(), static_cast<int>(persistedWrites));
+
+    const auto maxExpectedCatalogSignals = ((workerElapsedMs + 499) / 500) + 2;
+    QVERIFY(catalogChangedSpy.count() >= 1);
+    QVERIFY2(catalogChangedSpy.count() <= maxExpectedCatalogSignals,
+             qPrintable(QStringLiteral("目录变化信号 %1 次超过时长 %2ms 对应上界 %3")
+                            .arg(catalogChangedSpy.count()).arg(workerElapsedMs).arg(maxExpectedCatalogSignals)));
+    databaseManager.closeProjectDatabase();
+}
+
+void MediaTaskServiceRecoveryTest::singleThumbnailDatabaseFailureDoesNotAbortRemainingSource()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const auto sourcePath = QDir(tempDir.path()).filePath(QStringLiteral("source"));
+    QVERIFY(QDir().mkpath(sourcePath));
+
+    DatabaseManager databaseManager;
+    QString errorMessage;
+    const auto databasePath = QDir(tempDir.path()).filePath(QStringLiteral("project.cvdb"));
+    QVERIFY2(databaseManager.openProjectDatabase(databasePath, &errorMessage), qPrintable(errorMessage));
+    auto db = databaseManager.database();
+    QSqlQuery source(db);
+    source.prepare(QStringLiteral(
+        "INSERT INTO source_root "
+        "(name, path, status, total_files, total_folders, total_size_bytes, video_count, audio_count, image_count, "
+        "other_count, warning_count, scan_version, created_at, updated_at) "
+        "VALUES ('Source', ?, 'ok', 3, 0, 36, 3, 0, 0, 0, 0, 5, "
+        "'2026-07-21T12:00:00', '2026-07-21T12:00:00')"));
+    source.addBindValue(sourcePath);
+    QVERIFY2(source.exec(), qPrintable(source.lastError().text()));
+    const auto sourceRootId = source.lastInsertId().toLongLong();
+    const auto failedAssetId = insertAsset(
+        db, sourceRootId, sourcePath, QStringLiteral("fails-to-persist.mp4"));
+    const auto crashingAssetId = insertAsset(
+        db, sourceRootId, sourcePath, QStringLiteral("tool-crash.mp4"));
+    const auto successfulAssetId = insertAsset(
+        db, sourceRootId, sourcePath, QStringLiteral("still-runs.mp4"));
+    QVERIFY(failedAssetId > 0);
+    QVERIFY(crashingAssetId > failedAssetId);
+    QVERIFY(successfulAssetId > crashingAssetId);
+    insertCompletedMetadata(db, failedAssetId);
+    insertCompletedMetadata(db, crashingAssetId);
+    insertCompletedMetadata(db, successfulAssetId);
+
+    QSqlQuery failureTrigger(db);
+    QVERIFY2(failureTrigger.exec(QStringLiteral(
+                 "CREATE TRIGGER reject_one_thumbnail BEFORE INSERT ON thumbnail "
+                 "WHEN NEW.asset_id = %1 BEGIN "
+                 "SELECT RAISE(FAIL, 'simulated db busy for one asset'); END")
+                                     .arg(failedAssetId)),
+             qPrintable(failureTrigger.lastError().text()));
+
+    JobEngine jobEngine(&databaseManager);
+    ThrowingThumbnailEngine thumbnailEngine;
+    MediaTaskService service(&databaseManager, &jobEngine, nullptr, &thumbnailEngine);
+    service.startForSourceRoot(sourceRootId);
+    service.waitForIdle();
+    QCoreApplication::processEvents();
+
+    QCOMPARE(readThumbnail(db, failedAssetId).first, ThumbnailStatus::Pending);
+    QCOMPARE(readThumbnail(db, successfulAssetId).first, ThumbnailStatus::Success);
+    QVERIFY(QFileInfo::exists(readThumbnail(db, successfulAssetId).second));
+    QCOMPARE(readThumbnail(db, crashingAssetId).first, ThumbnailStatus::Failed);
+    const auto jobs = jobEngine.jobs();
+    QVERIFY(std::any_of(jobs.cbegin(), jobs.cend(), [](const Job &job) {
+        return job.type == JobType::Thumbnail && job.state == JobState::Completed;
+    }));
+    databaseManager.closeProjectDatabase();
+}
+
+void MediaTaskServiceRecoveryTest::recoveryMarkerAuditsMissingCacheReferencesBeforeDispatch()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const auto sourcePath = QDir(tempDir.path()).filePath(QStringLiteral("source"));
+    QVERIFY(QDir().mkpath(sourcePath));
+    const auto databasePath = QDir(tempDir.path()).filePath(QStringLiteral("project.cvdb"));
+
+    DatabaseManager databaseManager;
+    QString errorMessage;
+    QVERIFY2(databaseManager.openProjectDatabase(databasePath, &errorMessage), qPrintable(errorMessage));
+    auto db = databaseManager.database();
+    QSqlQuery source(db);
+    source.prepare(QStringLiteral(
+        "INSERT INTO source_root "
+        "(name, path, status, total_files, total_folders, total_size_bytes, video_count, audio_count, image_count, "
+        "other_count, warning_count, scan_version, created_at, updated_at) "
+        "VALUES ('Source', ?, 'ok', 1, 0, 12, 1, 0, 0, 0, 0, 5, "
+        "'2026-07-21T12:00:00', '2026-07-21T12:00:00')"));
+    source.addBindValue(sourcePath);
+    QVERIFY2(source.exec(), qPrintable(source.lastError().text()));
+    const auto sourceRootId = source.lastInsertId().toLongLong();
+    const auto assetId = insertAsset(
+        db, sourceRootId, sourcePath, QStringLiteral("recover-cache.mp4"));
+    QVERIFY(assetId > 0);
+    insertCompletedMetadata(db, assetId);
+    const auto cachedPath = Paths::projectThumbnailCachePath(
+        databasePath, sourceRootId, assetId);
+    QVERIFY(QDir().mkpath(QFileInfo(cachedPath).absolutePath()));
+    QFile cachedFile(cachedPath);
+    QVERIFY(cachedFile.open(QIODevice::WriteOnly));
+    cachedFile.write("old-cache");
+    cachedFile.close();
+    insertThumbnail(db, assetId, ThumbnailStatus::Success, cachedPath);
+
+    const auto eviction = ThumbnailCacheQuota::enforceDirectory(
+        Paths::projectThumbnailCacheRoot(databasePath), 0, 0);
+    QCOMPARE(eviction.removedFiles, qint64{1});
+    QVERIFY(ThumbnailCacheQuota::referenceAuditRequiredForProject(databasePath));
+
+    JobEngine jobEngine(&databaseManager);
+    FakeThumbnailEngine thumbnailEngine;
+    MediaTaskService service(&databaseManager, &jobEngine, nullptr, &thumbnailEngine);
+    service.recoverStaleThumbnails();
+    QTRY_VERIFY_WITH_TIMEOUT(readThumbnail(db, assetId).first == ThumbnailStatus::Success, 10000);
+    QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(readThumbnail(db, assetId).second), 10000);
+    QVERIFY(!ThumbnailCacheQuota::referenceAuditRequiredForProject(databasePath));
+    service.waitForIdle();
     databaseManager.closeProjectDatabase();
 }
 

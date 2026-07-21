@@ -12,6 +12,7 @@
 #include "ui/viewmodels/MinimalSourceRailViewModel.h"
 #else
 #include "application/ImportService.h"
+#include "application/IndexingWorkCoordinator.h"
 #include "application/StorageVolumeService.h"
 #include "application/SourceChangeMonitor.h"
 #include "application/SystemIdleMonitor.h"
@@ -40,6 +41,8 @@
 #include "infrastructure/db/GlobalDatabaseManager.h"
 #include "infrastructure/ffmpeg/FFmpegAdapter.h"
 #include "infrastructure/metadata/ExifToolAdapter.h"
+#include "infrastructure/logging/Logger.h"
+#include "infrastructure/monitoring/PerformanceTelemetry.h"
 #include "infrastructure/network/VisionApiClient.h"
 #include "infrastructure/search/LocalSearchAssistantRuntime.h"
 #include "infrastructure/search/SearchAssistantClient.h"
@@ -54,11 +57,56 @@
 #include "ui/viewmodels/ShellViewModel.h"
 #include "ui/viewmodels/SourceRailViewModel.h"
 #include "ui/window/QuickSearchController.h"
+#include "shared/Paths.h"
 #endif
 
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QCoreApplication>
+
+#if !CINEVAULT_BUILD_MINIMAL_GUI
+#include <QDateTime>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QSaveFile>
+
+#include <chrono>
+#include <condition_variable>
+#include <cstdlib>
+#include <mutex>
+#include <thread>
+
+namespace {
+constexpr auto ShutdownBarrierTimeout = std::chrono::seconds(8);
+
+QString shutdownRecoveryMarkerPath()
+{
+    return QDir(Paths::resolvedDataRoot())
+        .filePath(QStringLiteral("shutdown-recovery.json"));
+}
+
+void writeShutdownRecoveryMarker(const QString &projectDatabasePath)
+{
+    const auto markerPath = shutdownRecoveryMarkerPath();
+    QDir().mkpath(QFileInfo(markerPath).absolutePath());
+    QSaveFile marker(markerPath);
+    if (!marker.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return;
+    }
+    const QJsonObject state{
+        {QStringLiteral("state"), QStringLiteral("shutdown_in_progress")},
+        {QStringLiteral("recorded_at"), QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
+        {QStringLiteral("project_database"), projectDatabasePath},
+        {QStringLiteral("recovery"), QStringLiteral("保留任务与扫描会话，下次启动自动恢复")}
+    };
+    marker.write(QJsonDocument(state).toJson(QJsonDocument::Compact));
+    marker.commit();
+}
+}
+#endif
 
 AppContext::AppContext(QObject *parent)
     : QObject(parent)
@@ -80,9 +128,11 @@ AppContext::AppContext(QObject *parent)
 }
 
 #else
+    , m_uiHeartbeatMonitor(new UiHeartbeatMonitor(&PerformanceTelemetry::global(), this))
     , m_quickSearchController(new QuickSearchController(&m_settings, this))
     , m_databaseManager(new DatabaseManager(this))
     , m_globalDatabaseManager(new GlobalDatabaseManager(this))
+    , m_indexingWorkCoordinator(new IndexingWorkCoordinator(64, this))
     , m_semanticSearchIndexService(new SemanticSearchIndexService(m_globalDatabaseManager))
     , m_searchDocumentSyncService(new SearchDocumentSyncService(m_globalDatabaseManager, m_semanticSearchIndexService, this))
     , m_searchEngine(new SearchEngine(m_globalDatabaseManager, m_semanticSearchIndexService))
@@ -146,6 +196,32 @@ AppContext::AppContext(QObject *parent)
                                                 this))
     , m_feedbackViewModel(new FeedbackViewModel(m_feedbackService, this))
 {
+    m_scanEngine->setWorkCoordinator(m_indexingWorkCoordinator);
+    m_mediaTaskService->setWorkCoordinator(m_indexingWorkCoordinator);
+    m_metadataExtractionService->setWorkCoordinator(m_indexingWorkCoordinator);
+    m_materialCatalogSyncService->setWorkCoordinator(m_indexingWorkCoordinator);
+    m_searchDocumentSyncService->setWorkCoordinator(m_indexingWorkCoordinator);
+    connect(m_projectService,
+            &ProjectService::projectAboutToChange,
+            this,
+            [this](const QString &, const QString &) {
+                m_sourceChangeMonitor->stop();
+                m_indexingWorkCoordinator->advanceGeneration();
+                m_scanEngine->requestCancelAll();
+                m_videoAnalysisService->cancelPendingWork(
+                    QStringLiteral("项目正在切换，未开始的解析任务保留待恢复"));
+                Logger::info(QStringLiteral(
+                    "project_transition reason=user_switch action=cancel_pending_and_advance_generation"));
+            });
+    connect(m_systemIdleMonitor,
+            &SystemIdleMonitor::becameIdle,
+            m_indexingWorkCoordinator,
+            [this]() { m_indexingWorkCoordinator->setSystemIdle(true); });
+    connect(m_systemIdleMonitor,
+            &SystemIdleMonitor::activityResumed,
+            m_indexingWorkCoordinator,
+            [this]() { m_indexingWorkCoordinator->setSystemIdle(false); });
+
     QString globalDbError;
     m_globalDatabaseManager->openDatabase(&globalDbError);
     if (m_globalDatabaseManager->isOpen()) {
@@ -163,7 +239,7 @@ AppContext::AppContext(QObject *parent)
     connect(m_projectService, &ProjectService::projectChanged, m_importService, &ImportService::resumeInterruptedScans);
     connect(m_projectService, &ProjectService::projectChanged, m_importService, &ImportService::rescanLegacySourceRoots);
     connect(m_importService, &ImportService::catalogChanged, m_sourceRailViewModel, &SourceRailViewModel::reload, Qt::QueuedConnection);
-    connect(m_importService, &ImportService::catalogChanged, m_libraryWorkspaceViewModel, &LibraryWorkspaceViewModel::reload, Qt::QueuedConnection);
+    connect(m_importService, &ImportService::catalogChanged, m_libraryWorkspaceViewModel, &LibraryWorkspaceViewModel::scheduleReload, Qt::QueuedConnection);
     connect(m_importService, &ImportService::catalogChanged, m_materialCatalogSyncService, &MaterialCatalogSyncService::syncCurrentProject, Qt::QueuedConnection);
 
     connect(m_scanEngine, &ScanEngine::scanFinished, m_mediaTaskService, &MediaTaskService::startForSourceRoot);
@@ -171,13 +247,13 @@ AppContext::AppContext(QObject *parent)
             &ScanEngine::scanFinished,
             m_metadataExtractionService,
             &MetadataExtractionService::startForSourceRoot);
-    connect(m_mediaTaskService, &MediaTaskService::mediaCatalogChanged, m_libraryWorkspaceViewModel, &LibraryWorkspaceViewModel::reload, Qt::QueuedConnection);
+    connect(m_mediaTaskService, &MediaTaskService::mediaCatalogChanged, m_libraryWorkspaceViewModel, &LibraryWorkspaceViewModel::scheduleReload, Qt::QueuedConnection);
     connect(m_mediaTaskService, &MediaTaskService::mediaCatalogChanged, m_inspectorViewModel, &InspectorViewModel::reload, Qt::QueuedConnection);
     connect(m_mediaTaskService, &MediaTaskService::mediaCatalogChanged, m_materialCatalogSyncService, &MaterialCatalogSyncService::syncProject, Qt::QueuedConnection);
     connect(m_metadataExtractionService,
             &MetadataExtractionService::metadataCatalogChanged,
             m_libraryWorkspaceViewModel,
-            &LibraryWorkspaceViewModel::reload,
+            &LibraryWorkspaceViewModel::scheduleReload,
             Qt::QueuedConnection);
     connect(m_metadataExtractionService,
             &MetadataExtractionService::metadataCatalogChanged,
@@ -192,10 +268,10 @@ AppContext::AppContext(QObject *parent)
     connect(m_libraryQueryService, &LibraryQueryService::dataChanged, m_sourceRailViewModel, &SourceRailViewModel::reload, Qt::QueuedConnection);
     connect(m_libraryQueryService, &LibraryQueryService::dataChanged, m_inspectorViewModel, &InspectorViewModel::reload, Qt::QueuedConnection);
     connect(m_libraryQueryService, &LibraryQueryService::dataChanged, m_materialCatalogSyncService, &MaterialCatalogSyncService::syncCurrentProject, Qt::QueuedConnection);
-    connect(m_materialCatalogSyncService, &MaterialCatalogSyncService::catalogChanged,
-            m_searchDocumentSyncService, &SearchDocumentSyncService::scheduleFullSync);
-    connect(m_videoAnalysisService, &VideoAnalysisService::catalogChanged,
-            m_searchDocumentSyncService, &SearchDocumentSyncService::scheduleFullSync);
+    connect(m_materialCatalogSyncService, &MaterialCatalogSyncService::catalogDeltaReady,
+            m_searchDocumentSyncService, &SearchDocumentSyncService::scheduleCatalogChanges);
+    connect(m_videoAnalysisService, &VideoAnalysisService::searchDocumentChanged,
+            m_searchDocumentSyncService, &SearchDocumentSyncService::scheduleAssetSync);
     connect(m_settingsViewModel, &SettingsViewModel::searchSettingsChanged,
             m_materialCenterViewModel, &MaterialCenterViewModel::reload);
     connect(m_settingsViewModel,
@@ -243,11 +319,59 @@ AppContext::AppContext(QObject *parent)
 AppContext::~AppContext()
 {
 #if !CINEVAULT_BUILD_MINIMAL_GUI
+    const auto currentProjectPath = m_projectService
+        ? m_projectService->currentProject().databasePath
+        : QString();
+    const auto recoveryMarker = shutdownRecoveryMarkerPath();
+    writeShutdownRecoveryMarker(currentProjectPath);
+    Logger::info(QStringLiteral("process_exit phase=shutdown_barrier_started timeout_ms=8000"));
+
+    std::mutex shutdownMutex;
+    std::condition_variable shutdownCondition;
+    bool shutdownCompleted = false;
+    std::jthread shutdownWatchdog([&](std::stop_token stopToken) {
+        std::unique_lock lock(shutdownMutex);
+        const auto completed = shutdownCondition.wait_for(
+            lock,
+            ShutdownBarrierTimeout,
+            [&]() { return shutdownCompleted || stopToken.stop_requested(); });
+        if (completed) {
+            return;
+        }
+        lock.unlock();
+        Logger::error(QStringLiteral(
+            "process_exit reason=shutdown_barrier_timeout recovery_marker=%1")
+                          .arg(recoveryMarker));
+        Logger::shutdown();
+        std::_Exit(EXIT_SUCCESS);
+    });
+
+    if (m_videoAnalysisService) {
+        m_videoAnalysisService->beginShutdown();
+    }
+    if (m_indexingWorkCoordinator) {
+        m_indexingWorkCoordinator->shutdown();
+    }
+    if (m_scanEngine) {
+        m_scanEngine->requestCancelAll();
+    }
+    if (m_backgroundMaintenanceCoordinator) {
+        m_backgroundMaintenanceCoordinator->stop();
+    }
+    if (m_uiHeartbeatMonitor) {
+        m_uiHeartbeatMonitor->stop();
+    }
+    if (m_libraryWorkspaceViewModel) {
+        m_libraryWorkspaceViewModel->waitForIdle();
+    }
     if (m_settingsViewModel) {
         m_settingsViewModel->waitForIdle();
     }
     if (m_videoAnalysisService) {
         m_videoAnalysisService->waitForIdle();
+    }
+    if (m_searchDocumentSyncService) {
+        m_searchDocumentSyncService->waitForIdle();
     }
     if (m_materialCatalogSyncService) {
         m_materialCatalogSyncService->waitForIdle();
@@ -261,6 +385,15 @@ AppContext::~AppContext()
     if (m_scanEngine) {
         m_scanEngine->waitForIdle();
     }
+    PerformanceTelemetry::global().logSnapshot(QStringLiteral("app_shutdown"));
+    QFile::remove(recoveryMarker);
+    Logger::info(QStringLiteral("process_exit phase=shutdown_barrier_completed recovery_state=clean"));
+    {
+        std::lock_guard lock(shutdownMutex);
+        shutdownCompleted = true;
+    }
+    shutdownCondition.notify_all();
+    shutdownWatchdog.request_stop();
 #endif
 }
 
@@ -295,6 +428,9 @@ void AppContext::expose(QQmlApplicationEngine &engine)
 void AppContext::startInteractiveServices()
 {
 #if !CINEVAULT_BUILD_MINIMAL_GUI
+    if (m_uiHeartbeatMonitor) {
+        m_uiHeartbeatMonitor->start();
+    }
     if (m_searchAssistantLifecycleController) {
         m_searchAssistantLifecycleController->start();
         if (QCoreApplication::arguments().contains(

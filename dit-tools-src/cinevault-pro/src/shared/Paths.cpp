@@ -106,8 +106,14 @@ QString Paths::projectRootFromDatabasePath(const QString &databasePath)
 
 QString Paths::projectThumbnailCachePath(const QString &databasePath, qint64 sourceRootId, qint64 assetId)
 {
+    return QDir(projectThumbnailCacheRoot(databasePath))
+        .filePath(QStringLiteral("source_%1/%2.jpg").arg(sourceRootId).arg(assetId));
+}
+
+QString Paths::projectThumbnailCacheRoot(const QString &databasePath)
+{
     return QDir(projectRootFromDatabasePath(databasePath))
-        .filePath(QStringLiteral("cache/thumbnails/source_%1/%2.jpg").arg(sourceRootId).arg(assetId));
+        .filePath(QStringLiteral("cache/thumbnails"));
 }
 
 QString Paths::projectReportPreviewRoot(const QString &projectRoot)

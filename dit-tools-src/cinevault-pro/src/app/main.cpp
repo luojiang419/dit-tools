@@ -1,6 +1,7 @@
 #include "app/AppBootstrap.h"
 #include "app/AppContext.h"
 #include "app/SingleInstanceGuard.h"
+#include "infrastructure/logging/Logger.h"
 #if !CINEVAULT_BUILD_MINIMAL_GUI
 #include "application/UpdaterSession.h"
 #include "ui/widgets/UpdaterWindow.h"
@@ -164,6 +165,9 @@ int main(int argc, char *argv[])
 
     bootstrap = std::make_unique<AppBootstrap>();
     if (!bootstrap->run()) {
+        Logger::error(QStringLiteral("process_exit reason=bootstrap_failed code=1"));
+        bootstrap.reset();
+        Logger::shutdown();
         return 1;
     }
     if (activationPending) {
@@ -172,5 +176,13 @@ int main(int argc, char *argv[])
         });
     }
 
-    return app.exec();
+    QObject::connect(&app, &QCoreApplication::aboutToQuit, []() {
+        Logger::info(QStringLiteral("process_exit reason=qt_about_to_quit"));
+    });
+    const auto exitCode = app.exec();
+    bootstrap.reset();
+    Logger::info(QStringLiteral("process_exit reason=event_loop_return code=%1")
+                     .arg(exitCode));
+    Logger::shutdown();
+    return exitCode;
 }

@@ -1,3 +1,4 @@
+#include "application/MaterialCatalogSyncService.h"
 #include "domain/Entities.h"
 #include "domain/Enums.h"
 #include "infrastructure/db/DatabaseManager.h"
@@ -15,6 +16,15 @@
 #include <QTemporaryDir>
 
 bool syncProjectIntoGlobalForTest(QSqlDatabase &globalDb, const Project &project, bool hasFts5, QString *errorMessage);
+bool syncProjectIntoGlobalWithDeltasForTest(QSqlDatabase &globalDb,
+                                            const Project &project,
+                                            bool hasFts5,
+                                            QVector<CatalogChangeSet> *changeSets,
+                                            QString *errorMessage);
+bool rebuildProjectIntoGlobalForTest(QSqlDatabase &globalDb,
+                                     const Project &project,
+                                     bool hasFts5,
+                                     QString *errorMessage);
 
 namespace {
 QString globalDatabasePath()
@@ -31,6 +41,8 @@ void removeGlobalDatabaseFiles()
     QFile::remove(path + QStringLiteral(".pre-v8.bak"));
     QFile::remove(path + QStringLiteral(".pre-v9.bak"));
     QFile::remove(path + QStringLiteral(".pre-v11.bak"));
+    QFile::remove(path + QStringLiteral(".pre-v13.bak"));
+    QFile::remove(path + QStringLiteral(".pre-v14.bak"));
 }
 
 bool insertProjectRecord(QSqlDatabase db, const Project &project, QString *errorMessage)
@@ -182,6 +194,48 @@ bool insertBareVideoAsset(QSqlDatabase db, qint64 sourceRootId, const QString &s
         if (errorMessage) {
             *errorMessage = query.lastError().text();
         }
+        return false;
+    }
+    return true;
+}
+
+bool insertSyntheticAssets(QSqlDatabase db,
+                           qint64 sourceRootId,
+                           const QString &sourcePath,
+                           int count,
+                           QString *errorMessage)
+{
+    if (!db.transaction()) {
+        if (errorMessage) *errorMessage = db.lastError().text();
+        return false;
+    }
+    QSqlQuery query(db);
+    query.prepare(QStringLiteral(
+        "INSERT INTO asset_file "
+        "(source_root_id, name, extension, absolute_path, relative_path, parent_path, asset_type, "
+        "size_bytes, modified_at, is_readable, created_at) "
+        "VALUES (?, ?, 'mov', ?, ?, ?, ?, ?, ?, 1, '2026-07-05T10:00:00')"));
+    for (int index = 0; index < count; ++index) {
+        const auto name = QStringLiteral("clip-%1.mov").arg(index, 6, 10, QLatin1Char('0'));
+        const auto path = QDir(sourcePath).filePath(name);
+        query.addBindValue(sourceRootId);
+        query.addBindValue(name);
+        query.addBindValue(path);
+        query.addBindValue(name);
+        query.addBindValue(sourcePath);
+        query.addBindValue(static_cast<int>(AssetType::Video));
+        query.addBindValue(100 + index);
+        query.addBindValue(QStringLiteral("2026-07-05T10:%1:00").arg(index % 60, 2, 10, QLatin1Char('0')));
+        if (!query.exec()) {
+            if (errorMessage) *errorMessage = query.lastError().text();
+            db.rollback();
+            return false;
+        }
+        query.finish();
+    }
+    if (!db.commit()) {
+        if (errorMessage) *errorMessage = db.lastError().text();
+        db.rollback();
         return false;
     }
     return true;
@@ -428,10 +482,10 @@ private slots:
         downgradeStatus.addBindValue(static_cast<int>(VideoAnalysisStatus::IndexedOnly));
         downgradeStatus.addBindValue(project.id);
         QVERIFY2(downgradeStatus.exec(), qPrintable(downgradeStatus.lastError().text()));
-        QVERIFY2(syncProjectIntoGlobalForTest(globalDb,
-                                              project,
-                                              globalDatabaseManager.hasFts5(),
-                                              &errorMessage),
+        QVERIFY2(rebuildProjectIntoGlobalForTest(globalDb,
+                                                 project,
+                                                 globalDatabaseManager.hasFts5(),
+                                                 &errorMessage),
                  qPrintable(errorMessage));
         QSqlQuery upgradedStatus(globalDb);
         upgradedStatus.prepare(QStringLiteral(
@@ -851,6 +905,469 @@ private slots:
         QCOMPARE(state.value(2).toInt(), 0);
         QCOMPARE(state.value(3).toInt(), 1);
         QCOMPARE(state.value(4).toInt(), 0);
+
+        globalDatabaseManager.closeDatabase();
+    }
+
+    void deltaSync_updatesOnlyChangedAssetAndReportsThumbnailMask()
+    {
+        removeGlobalDatabaseFiles();
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+
+        DatabaseManager databaseManager;
+        GlobalDatabaseManager globalDatabaseManager;
+        QString errorMessage;
+        QVERIFY2(globalDatabaseManager.openDatabase(&errorMessage), qPrintable(errorMessage));
+
+        Project project;
+        project.id = QStringLiteral("project-delta-one");
+        project.name = QStringLiteral("DeltaOneProject");
+        project.rootPath = QDir(temp.path()).filePath(project.name);
+        project.databasePath = QDir(project.rootPath).filePath(QStringLiteral("project.cvdb"));
+        project.createdAt = QStringLiteral("2026-07-21T10:00:00");
+        QVERIFY(QDir().mkpath(project.rootPath));
+        QVERIFY2(databaseManager.openProjectDatabase(project.databasePath, &errorMessage), qPrintable(errorMessage));
+        QVERIFY2(insertProjectRecord(databaseManager.database(), project, &errorMessage), qPrintable(errorMessage));
+
+        const auto sourcePath = QDir(project.rootPath).filePath(QStringLiteral("Source"));
+        QVERIFY(QDir().mkpath(sourcePath));
+        qint64 sourceRootId = 0;
+        QVERIFY2(insertSourceRoot(databaseManager.database(), sourcePath, &sourceRootId, &errorMessage),
+                 qPrintable(errorMessage));
+        QVERIFY2(insertFolderNode(databaseManager.database(), sourceRootId, sourcePath, QString(), 3, 3, &errorMessage),
+                 qPrintable(errorMessage));
+        QVERIFY2(insertSyntheticAssets(databaseManager.database(), sourceRootId, sourcePath, 3, &errorMessage),
+                 qPrintable(errorMessage));
+
+        auto globalDb = globalDatabaseManager.database();
+        QVERIFY2(syncProjectIntoGlobalForTest(globalDb, project, globalDatabaseManager.hasFts5(), &errorMessage),
+                 qPrintable(errorMessage));
+        const auto assetId = firstAssetId(databaseManager.database(), &errorMessage);
+        QVERIFY(assetId > 0);
+
+        QSqlQuery generation(globalDb);
+        generation.prepare(QStringLiteral(
+            "SELECT active_sync_generation FROM project_registry WHERE project_uuid = ?"));
+        generation.addBindValue(project.id);
+        QVERIFY2(generation.exec(), qPrintable(generation.lastError().text()));
+        QVERIFY(generation.next());
+        const auto activeGeneration = generation.value(0).toLongLong();
+
+        QSqlQuery projectUpdate(databaseManager.database());
+        projectUpdate.prepare(QStringLiteral(
+            "UPDATE asset_file SET size_bytes = 999, modified_at = '2026-07-21T11:00:00' WHERE id = ?"));
+        projectUpdate.addBindValue(assetId);
+        QVERIFY2(projectUpdate.exec(), qPrintable(projectUpdate.lastError().text()));
+        projectUpdate.prepare(QStringLiteral(
+            "INSERT INTO thumbnail (asset_id, status, image_path, updated_at) "
+            "VALUES (?, 1, 'thumb-delta.jpg', '2026-07-21T11:01:00')"));
+        projectUpdate.addBindValue(assetId);
+        QVERIFY2(projectUpdate.exec(), qPrintable(projectUpdate.lastError().text()));
+
+        QSqlQuery rejectUnrelated(globalDb);
+        QVERIFY2(rejectUnrelated.exec(QStringLiteral(
+                     "CREATE TRIGGER reject_unrelated_delta BEFORE UPDATE ON global_video_asset "
+                     "WHEN NEW.project_uuid = 'project-delta-one' AND NEW.asset_id != %1 "
+                     "BEGIN SELECT RAISE(ABORT, 'delta touched unrelated asset'); END").arg(assetId)),
+                 qPrintable(rejectUnrelated.lastError().text()));
+
+        QVector<CatalogChangeSet> changeSets;
+        QVERIFY2(syncProjectIntoGlobalWithDeltasForTest(globalDb,
+                                                        project,
+                                                        globalDatabaseManager.hasFts5(),
+                                                        &changeSets,
+                                                        &errorMessage),
+                 qPrintable(errorMessage));
+        QVERIFY2(rejectUnrelated.exec(QStringLiteral("DROP TRIGGER reject_unrelated_delta")),
+                 qPrintable(rejectUnrelated.lastError().text()));
+
+        QCOMPARE(changeSets.size(), 1);
+        QVERIFY(!changeSets.constFirst().fullRebuild);
+        QCOMPARE(changeSets.constFirst().changes.size(), 1);
+        const auto &change = changeSets.constFirst().changes.constFirst();
+        QCOMPARE(change.entity, CatalogChangeEntity::Asset);
+        QCOMPARE(change.entityId, assetId);
+        QCOMPARE(change.operation, CatalogChangeOperation::Updated);
+        QCOMPARE(change.changeMask,
+                 CatalogChangeMask::AssetCore | CatalogChangeMask::Thumbnail);
+
+        QSqlQuery globalAsset(globalDb);
+        globalAsset.prepare(QStringLiteral(
+            "SELECT size_bytes, modified_at, thumbnail_path, sync_generation "
+            "FROM global_video_asset WHERE project_uuid = ? AND asset_id = ?"));
+        globalAsset.addBindValue(project.id);
+        globalAsset.addBindValue(assetId);
+        QVERIFY2(globalAsset.exec(), qPrintable(globalAsset.lastError().text()));
+        QVERIFY(globalAsset.next());
+        QCOMPARE(globalAsset.value(0).toLongLong(), qint64{999});
+        QCOMPARE(globalAsset.value(1).toString(), QStringLiteral("2026-07-21T11:00:00"));
+        QCOMPARE(globalAsset.value(2).toString(), QStringLiteral("thumb-delta.jpg"));
+        QCOMPARE(globalAsset.value(3).toLongLong(), activeGeneration);
+
+        QSqlQuery cleared(databaseManager.database());
+        QVERIFY2(cleared.exec(QStringLiteral("SELECT COUNT(*) FROM catalog_change_log")),
+                 qPrintable(cleared.lastError().text()));
+        QVERIFY(cleared.next());
+        QCOMPARE(cleared.value(0).toInt(), 0);
+        globalDatabaseManager.closeDatabase();
+    }
+
+    void deltaSync_emptyInitialProjectClearsMigrationRebuildFlag()
+    {
+        removeGlobalDatabaseFiles();
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+
+        DatabaseManager databaseManager;
+        GlobalDatabaseManager globalDatabaseManager;
+        QString errorMessage;
+        QVERIFY2(globalDatabaseManager.openDatabase(&errorMessage), qPrintable(errorMessage));
+
+        Project project;
+        project.id = QStringLiteral("project-delta-empty");
+        project.name = QStringLiteral("DeltaEmptyProject");
+        project.rootPath = QDir(temp.path()).filePath(project.name);
+        project.databasePath = QDir(project.rootPath).filePath(QStringLiteral("project.cvdb"));
+        project.createdAt = QStringLiteral("2026-07-21T10:00:00");
+        QVERIFY(QDir().mkpath(project.rootPath));
+        QVERIFY2(databaseManager.openProjectDatabase(project.databasePath, &errorMessage), qPrintable(errorMessage));
+        QVERIFY2(insertProjectRecord(databaseManager.database(), project, &errorMessage), qPrintable(errorMessage));
+
+        auto globalDb = globalDatabaseManager.database();
+        QVERIFY2(syncProjectIntoGlobalForTest(globalDb, project, globalDatabaseManager.hasFts5(), &errorMessage),
+                 qPrintable(errorMessage));
+        QSqlQuery state(databaseManager.database());
+        QVERIFY2(state.exec(QStringLiteral(
+                     "SELECT requires_full_rebuild, pending_change_count FROM catalog_change_state")),
+                 qPrintable(state.lastError().text()));
+        QVERIFY(state.next());
+        QCOMPARE(state.value(0).toInt(), 0);
+        QCOMPARE(state.value(1).toInt(), 0);
+
+        QSqlQuery generation(globalDb);
+        generation.prepare(QStringLiteral(
+            "SELECT active_sync_generation FROM project_registry WHERE project_uuid = ?"));
+        generation.addBindValue(project.id);
+        QVERIFY2(generation.exec(), qPrintable(generation.lastError().text()));
+        QVERIFY(generation.next());
+        const auto activeGeneration = generation.value(0).toLongLong();
+        QVERIFY2(syncProjectIntoGlobalForTest(globalDb, project, globalDatabaseManager.hasFts5(), &errorMessage),
+                 qPrintable(errorMessage));
+        QVERIFY2(generation.exec(), qPrintable(generation.lastError().text()));
+        QVERIFY(generation.next());
+        QCOMPARE(generation.value(0).toLongLong(), activeGeneration);
+        globalDatabaseManager.closeDatabase();
+    }
+
+    void deltaSync_appliesAddedUpdatedRemovedAssetsAndFolders()
+    {
+        removeGlobalDatabaseFiles();
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+
+        DatabaseManager databaseManager;
+        GlobalDatabaseManager globalDatabaseManager;
+        QString errorMessage;
+        QVERIFY2(globalDatabaseManager.openDatabase(&errorMessage), qPrintable(errorMessage));
+
+        Project project;
+        project.id = QStringLiteral("project-delta-entities");
+        project.name = QStringLiteral("DeltaEntitiesProject");
+        project.rootPath = QDir(temp.path()).filePath(project.name);
+        project.databasePath = QDir(project.rootPath).filePath(QStringLiteral("project.cvdb"));
+        project.createdAt = QStringLiteral("2026-07-21T10:00:00");
+        QVERIFY(QDir().mkpath(project.rootPath));
+        QVERIFY2(databaseManager.openProjectDatabase(project.databasePath, &errorMessage), qPrintable(errorMessage));
+        QVERIFY2(insertProjectRecord(databaseManager.database(), project, &errorMessage), qPrintable(errorMessage));
+
+        const auto sourcePath = QDir(project.rootPath).filePath(QStringLiteral("Source"));
+        QVERIFY(QDir().mkpath(sourcePath));
+        qint64 sourceRootId = 0;
+        QVERIFY2(insertSourceRoot(databaseManager.database(), sourcePath, &sourceRootId, &errorMessage),
+                 qPrintable(errorMessage));
+        QVERIFY2(insertFolderNode(databaseManager.database(), sourceRootId, sourcePath, QString(), 0, 2, &errorMessage),
+                 qPrintable(errorMessage));
+        QVERIFY2(insertFolderNode(databaseManager.database(), sourceRootId, sourcePath, QStringLiteral("RenameMe"), 1, 1, &errorMessage),
+                 qPrintable(errorMessage));
+        QVERIFY2(insertFolderNode(databaseManager.database(), sourceRootId, sourcePath, QStringLiteral("RemoveMe"), 1, 1, &errorMessage),
+                 qPrintable(errorMessage));
+        QVERIFY2(insertVideoAssetAt(databaseManager.database(), sourceRootId, sourcePath, QStringLiteral("old.mov"), &errorMessage),
+                 qPrintable(errorMessage));
+
+        auto globalDb = globalDatabaseManager.database();
+        QVERIFY2(syncProjectIntoGlobalForTest(globalDb, project, globalDatabaseManager.hasFts5(), &errorMessage),
+                 qPrintable(errorMessage));
+        const auto removedAssetId = firstAssetId(databaseManager.database(), &errorMessage);
+        const auto removedVideoKey = QStringLiteral("%1:%2").arg(project.id).arg(removedAssetId);
+        QSqlQuery analysis(globalDb);
+        analysis.prepare(QStringLiteral(
+            "INSERT INTO video_analysis_result "
+            "(video_key, summary, keywords_json, scenes_json, search_text, model_name, prompt_version, "
+            "analyzed_at, confirmed_at) VALUES (?, 'to remove', '[]', '[]', 'to remove', 'test', 'v1', "
+            "'2026-07-21T10:30:00', '')"));
+        analysis.addBindValue(removedVideoKey);
+        QVERIFY2(analysis.exec(), qPrintable(analysis.lastError().text()));
+
+        QSqlQuery mutate(databaseManager.database());
+        mutate.prepare(QStringLiteral(
+            "UPDATE folder_node SET name = 'Renamed', absolute_path = ?, path_key = ?, relative_path = 'Renamed' "
+            "WHERE relative_path = 'RenameMe'"));
+        const auto renamedPath = QDir(sourcePath).filePath(QStringLiteral("Renamed"));
+        mutate.addBindValue(renamedPath);
+        mutate.addBindValue(FolderPathMetadata::normalizedPathKey(renamedPath));
+        QVERIFY2(mutate.exec(), qPrintable(mutate.lastError().text()));
+        QVERIFY2(mutate.exec(QStringLiteral("DELETE FROM folder_node WHERE relative_path = 'RemoveMe'")),
+                 qPrintable(mutate.lastError().text()));
+        QVERIFY2(insertFolderNode(databaseManager.database(), sourceRootId, sourcePath, QStringLiteral("Added"), 1, 1, &errorMessage),
+                 qPrintable(errorMessage));
+        QVERIFY2(mutate.exec(QStringLiteral("DELETE FROM asset_file WHERE relative_path = 'old.mov'")),
+                 qPrintable(mutate.lastError().text()));
+        QVERIFY2(insertVideoAssetAt(databaseManager.database(), sourceRootId, sourcePath, QStringLiteral("Added/new.mov"), &errorMessage),
+                 qPrintable(errorMessage));
+
+        QVector<CatalogChangeSet> changeSets;
+        QVERIFY2(syncProjectIntoGlobalWithDeltasForTest(globalDb,
+                                                        project,
+                                                        globalDatabaseManager.hasFts5(),
+                                                        &changeSets,
+                                                        &errorMessage),
+                 qPrintable(errorMessage));
+        int totalChanges = 0;
+        bool assetAdded = false;
+        bool assetRemoved = false;
+        bool folderAdded = false;
+        bool folderUpdated = false;
+        bool folderRemoved = false;
+        for (const auto &changeSet : changeSets) {
+            QVERIFY(changeSet.changes.size() <= 500);
+            totalChanges += changeSet.changes.size();
+            for (const auto &change : changeSet.changes) {
+                if (change.entity == CatalogChangeEntity::Asset) {
+                    assetAdded |= change.operation == CatalogChangeOperation::Added;
+                    assetRemoved |= change.operation == CatalogChangeOperation::Removed;
+                } else {
+                    folderAdded |= change.operation == CatalogChangeOperation::Added;
+                    folderUpdated |= change.operation == CatalogChangeOperation::Updated;
+                    folderRemoved |= change.operation == CatalogChangeOperation::Removed;
+                }
+            }
+        }
+        QCOMPARE(totalChanges, 5);
+        QVERIFY(assetAdded);
+        QVERIFY(assetRemoved);
+        QVERIFY(folderAdded);
+        QVERIFY(folderUpdated);
+        QVERIFY(folderRemoved);
+
+        QSqlQuery assets(globalDb);
+        assets.prepare(QStringLiteral(
+            "SELECT SUM(CASE WHEN asset_id = ? THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN relative_path = 'Added/new.mov' THEN 1 ELSE 0 END) "
+            "FROM global_video_asset WHERE project_uuid = ?"));
+        assets.addBindValue(removedAssetId);
+        assets.addBindValue(project.id);
+        QVERIFY2(assets.exec(), qPrintable(assets.lastError().text()));
+        QVERIFY(assets.next());
+        QCOMPARE(assets.value(0).toInt(), 0);
+        QCOMPARE(assets.value(1).toInt(), 1);
+        analysis.prepare(QStringLiteral(
+            "SELECT COUNT(*) FROM video_analysis_result WHERE video_key = ?"));
+        analysis.addBindValue(removedVideoKey);
+        QVERIFY2(analysis.exec(), qPrintable(analysis.lastError().text()));
+        QVERIFY(analysis.next());
+        QCOMPARE(analysis.value(0).toInt(), 0);
+
+        const auto renamedFolderKey = FolderPathMetadata::globalFolderKey(project.id, sourceRootId, QStringLiteral("Renamed"));
+        const auto removedFolderKey = FolderPathMetadata::globalFolderKey(project.id, sourceRootId, QStringLiteral("RemoveMe"));
+        const auto addedFolderKey = FolderPathMetadata::globalFolderKey(project.id, sourceRootId, QStringLiteral("Added"));
+        QSqlQuery folders(globalDb);
+        folders.prepare(QStringLiteral(
+            "SELECT SUM(CASE WHEN folder_key = ? THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN folder_key = ? THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN folder_key = ? THEN 1 ELSE 0 END) "
+            "FROM global_folder_node WHERE project_uuid = ?"));
+        folders.addBindValue(renamedFolderKey);
+        folders.addBindValue(removedFolderKey);
+        folders.addBindValue(addedFolderKey);
+        folders.addBindValue(project.id);
+        QVERIFY2(folders.exec(), qPrintable(folders.lastError().text()));
+        QVERIFY(folders.next());
+        QCOMPARE(folders.value(0).toInt(), 1);
+        QCOMPARE(folders.value(1).toInt(), 0);
+        QCOMPARE(folders.value(2).toInt(), 1);
+        globalDatabaseManager.closeDatabase();
+    }
+
+    void deltaSync_secondPageFailureKeepsWatermarkAndRetryDoesNotMissChanges()
+    {
+        removeGlobalDatabaseFiles();
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+
+        DatabaseManager databaseManager;
+        GlobalDatabaseManager globalDatabaseManager;
+        QString errorMessage;
+        QVERIFY2(globalDatabaseManager.openDatabase(&errorMessage), qPrintable(errorMessage));
+
+        Project project;
+        project.id = QStringLiteral("project-delta-retry");
+        project.name = QStringLiteral("DeltaRetryProject");
+        project.rootPath = QDir(temp.path()).filePath(project.name);
+        project.databasePath = QDir(project.rootPath).filePath(QStringLiteral("project.cvdb"));
+        project.createdAt = QStringLiteral("2026-07-21T10:00:00");
+        QVERIFY(QDir().mkpath(project.rootPath));
+        QVERIFY2(databaseManager.openProjectDatabase(project.databasePath, &errorMessage), qPrintable(errorMessage));
+        QVERIFY2(insertProjectRecord(databaseManager.database(), project, &errorMessage), qPrintable(errorMessage));
+
+        const auto sourcePath = QDir(project.rootPath).filePath(QStringLiteral("Source"));
+        QVERIFY(QDir().mkpath(sourcePath));
+        qint64 sourceRootId = 0;
+        QVERIFY2(insertSourceRoot(databaseManager.database(), sourcePath, &sourceRootId, &errorMessage),
+                 qPrintable(errorMessage));
+        QVERIFY2(insertFolderNode(databaseManager.database(), sourceRootId, sourcePath, QString(), 1205, 1205, &errorMessage),
+                 qPrintable(errorMessage));
+        QVERIFY2(insertSyntheticAssets(databaseManager.database(), sourceRootId, sourcePath, 1205, &errorMessage),
+                 qPrintable(errorMessage));
+
+        auto globalDb = globalDatabaseManager.database();
+        QVERIFY2(syncProjectIntoGlobalForTest(globalDb, project, globalDatabaseManager.hasFts5(), &errorMessage),
+                 qPrintable(errorMessage));
+        QSqlQuery updateAll(databaseManager.database());
+        QVERIFY2(updateAll.exec(QStringLiteral(
+                     "UPDATE asset_file SET size_bytes = size_bytes + 1, modified_at = '2026-07-21T12:00:00'")),
+                 qPrintable(updateAll.lastError().text()));
+
+        QSqlQuery failSecondPage(globalDb);
+        QVERIFY2(failSecondPage.exec(QStringLiteral(
+                     "CREATE TRIGGER fail_delta_second_page BEFORE UPDATE ON global_video_asset "
+                     "WHEN NEW.project_uuid = 'project-delta-retry' AND NEW.asset_id > 500 "
+                     "BEGIN SELECT RAISE(ABORT, 'delta second page failure'); END")),
+                 qPrintable(failSecondPage.lastError().text()));
+        QVERIFY(!syncProjectIntoGlobalForTest(
+            globalDb, project, globalDatabaseManager.hasFts5(), &errorMessage));
+        QVERIFY(errorMessage.contains(QStringLiteral("delta second page failure")));
+
+        QSqlQuery retained(databaseManager.database());
+        QVERIFY2(retained.exec(QStringLiteral("SELECT COUNT(*) FROM catalog_change_log")),
+                 qPrintable(retained.lastError().text()));
+        QVERIFY(retained.next());
+        QCOMPARE(retained.value(0).toInt(), 1205);
+
+        QVERIFY2(failSecondPage.exec(QStringLiteral("DROP TRIGGER fail_delta_second_page")),
+                 qPrintable(failSecondPage.lastError().text()));
+        QVERIFY2(syncProjectIntoGlobalForTest(globalDb, project, globalDatabaseManager.hasFts5(), &errorMessage),
+                 qPrintable(errorMessage));
+        QVERIFY2(retained.exec(QStringLiteral("SELECT COUNT(*) FROM catalog_change_log")),
+                 qPrintable(retained.lastError().text()));
+        QVERIFY(retained.next());
+        QCOMPARE(retained.value(0).toInt(), 0);
+
+        QSqlQuery complete(globalDb);
+        complete.prepare(QStringLiteral(
+            "SELECT COUNT(*), SUM(CASE WHEN modified_at = '2026-07-21T12:00:00' THEN 1 ELSE 0 END) "
+            "FROM global_video_asset WHERE project_uuid = ?"));
+        complete.addBindValue(project.id);
+        QVERIFY2(complete.exec(), qPrintable(complete.lastError().text()));
+        QVERIFY(complete.next());
+        QCOMPARE(complete.value(0).toInt(), 1205);
+        QCOMPARE(complete.value(1).toInt(), 1205);
+        globalDatabaseManager.closeDatabase();
+    }
+
+    void generationSync_pagesLargeProjectsAndKeepsCompletedGenerationOnFailure()
+    {
+        removeGlobalDatabaseFiles();
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+
+        DatabaseManager databaseManager;
+        GlobalDatabaseManager globalDatabaseManager;
+        QString errorMessage;
+        QVERIFY2(globalDatabaseManager.openDatabase(&errorMessage), qPrintable(errorMessage));
+
+        Project project;
+        project.id = QStringLiteral("project-generation");
+        project.name = QStringLiteral("GenerationProject");
+        project.rootPath = QDir(temp.path()).filePath(project.name);
+        project.databasePath = QDir(project.rootPath).filePath(QStringLiteral("project.cvdb"));
+        project.createdAt = QStringLiteral("2026-07-05T10:00:00");
+        QVERIFY(QDir().mkpath(project.rootPath));
+        QVERIFY2(databaseManager.openProjectDatabase(project.databasePath, &errorMessage), qPrintable(errorMessage));
+        QVERIFY2(insertProjectRecord(databaseManager.database(), project, &errorMessage), qPrintable(errorMessage));
+
+        const auto sourcePath = QDir(project.rootPath).filePath(QStringLiteral("Source"));
+        QVERIFY(QDir().mkpath(sourcePath));
+        qint64 sourceRootId = 0;
+        QVERIFY2(insertSourceRoot(databaseManager.database(), sourcePath, &sourceRootId, &errorMessage),
+                 qPrintable(errorMessage));
+        QVERIFY2(insertFolderNode(databaseManager.database(), sourceRootId, sourcePath, QString(), 1205, 1205, &errorMessage),
+                 qPrintable(errorMessage));
+        QVERIFY2(insertSyntheticAssets(databaseManager.database(), sourceRootId, sourcePath, 1205, &errorMessage),
+                 qPrintable(errorMessage));
+
+        auto globalDb = globalDatabaseManager.database();
+        QVERIFY2(syncProjectIntoGlobalForTest(globalDb, project, globalDatabaseManager.hasFts5(), &errorMessage),
+                 qPrintable(errorMessage));
+
+        QSqlQuery initial(globalDb);
+        initial.prepare(QStringLiteral(
+            "SELECT pr.active_sync_generation, pr.sync_status, COUNT(a.video_key), "
+            "COUNT(DISTINCT a.sync_generation), MIN(a.sync_generation), MAX(a.sync_generation) "
+            "FROM project_registry pr JOIN global_video_asset a ON a.project_uuid = pr.project_uuid "
+            "WHERE pr.project_uuid = ? GROUP BY pr.project_uuid"));
+        initial.addBindValue(project.id);
+        QVERIFY2(initial.exec(), qPrintable(initial.lastError().text()));
+        QVERIFY(initial.next());
+        const auto completedGeneration = initial.value(0).toLongLong();
+        QVERIFY(completedGeneration > 0);
+        QCOMPARE(initial.value(1).toString(), QStringLiteral("ok"));
+        QCOMPARE(initial.value(2).toInt(), 1205);
+        QCOMPARE(initial.value(3).toInt(), 1);
+        QCOMPARE(initial.value(4).toLongLong(), completedGeneration);
+        QCOMPARE(initial.value(5).toLongLong(), completedGeneration);
+
+        QSqlQuery failSecondPage(globalDb);
+        QVERIFY2(failSecondPage.exec(QStringLiteral(
+                     "CREATE TRIGGER fail_generation_second_page BEFORE UPDATE ON global_video_asset "
+                     "WHEN NEW.asset_id > 500 BEGIN SELECT RAISE(ABORT, 'second page failure'); END")),
+                 qPrintable(failSecondPage.lastError().text()));
+        QVERIFY(!rebuildProjectIntoGlobalForTest(
+            globalDb, project, globalDatabaseManager.hasFts5(), &errorMessage));
+        QVERIFY(errorMessage.contains(QStringLiteral("second page failure")));
+
+        QSqlQuery failedState(globalDb);
+        failedState.prepare(QStringLiteral(
+            "SELECT active_sync_generation, sync_status, "
+            "(SELECT COUNT(*) FROM global_video_asset a WHERE a.project_uuid = ? "
+            "AND a.sync_generation != project_registry.active_sync_generation) "
+            "FROM project_registry WHERE project_uuid = ?"));
+        failedState.addBindValue(project.id);
+        failedState.addBindValue(project.id);
+        QVERIFY2(failedState.exec(), qPrintable(failedState.lastError().text()));
+        QVERIFY(failedState.next());
+        QCOMPARE(failedState.value(0).toLongLong(), completedGeneration);
+        QCOMPARE(failedState.value(1).toString(), QStringLiteral("failed"));
+        QCOMPARE(failedState.value(2).toInt(), 500);
+
+        QVERIFY2(failSecondPage.exec(QStringLiteral("DROP TRIGGER fail_generation_second_page")),
+                 qPrintable(failSecondPage.lastError().text()));
+        QVERIFY2(rebuildProjectIntoGlobalForTest(globalDb, project, globalDatabaseManager.hasFts5(), &errorMessage),
+                 qPrintable(errorMessage));
+        QSqlQuery recovered(globalDb);
+        recovered.prepare(QStringLiteral(
+            "SELECT pr.active_sync_generation, pr.sync_status, COUNT(a.video_key), "
+            "COUNT(DISTINCT a.sync_generation), MIN(a.sync_generation) "
+            "FROM project_registry pr JOIN global_video_asset a ON a.project_uuid = pr.project_uuid "
+            "WHERE pr.project_uuid = ? GROUP BY pr.project_uuid"));
+        recovered.addBindValue(project.id);
+        QVERIFY2(recovered.exec(), qPrintable(recovered.lastError().text()));
+        QVERIFY(recovered.next());
+        QVERIFY(recovered.value(0).toLongLong() > completedGeneration);
+        QCOMPARE(recovered.value(1).toString(), QStringLiteral("ok"));
+        QCOMPARE(recovered.value(2).toInt(), 1205);
+        QCOMPARE(recovered.value(3).toInt(), 1);
+        QCOMPARE(recovered.value(4).toLongLong(), recovered.value(0).toLongLong());
 
         globalDatabaseManager.closeDatabase();
     }

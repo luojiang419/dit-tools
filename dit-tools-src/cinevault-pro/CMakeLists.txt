@@ -28,11 +28,14 @@ option(CINEVAULT_ENABLE_LOCAL_SEARCH "Enable offline BGE and USearch semantic se
 option(CINEVAULT_ENABLE_LOCAL_SEARCH_ASSISTANT "Enable the offline text query assistant" OFF)
 option(CINEVAULT_BUNDLE_SEARCH_ASSISTANT_MODEL "Copy the Qwen model into build and install payloads" OFF)
 option(CINEVAULT_ENABLE_EXIFTOOL "Bundle ExifTool for embedded media metadata" ON)
+option(CINEVAULT_ENABLE_RAW_PREVIEW "Enable isolated camera RAW preview support" ON)
+option(CINEVAULT_ENABLE_RAW_EXTENDED_SDKS "Enable license-approved extended RAW SDKs" ON)
 set(QT_ROOT "" CACHE PATH "Qt 6 kit root directory")
 set(FFMPEG_DEV_ROOT "" CACHE PATH "FFmpeg development package root directory")
 set(CINEVAULT_LOCAL_SEARCH_CACHE_ROOT "" CACHE PATH "Prepared local-search dependency cache")
 set(CINEVAULT_SEARCH_ASSISTANT_CACHE_ROOT "" CACHE PATH "Prepared search-assistant dependency cache")
 set(CINEVAULT_EXIFTOOL_CACHE_ROOT "" CACHE PATH "Prepared ExifTool dependency cache")
+set(CINEVAULT_LIBRAW_CACHE_ROOT "" CACHE PATH "Prepared LibRaw dependency cache")
 if(DEFINED CINEVAULT_APP_VERSION
    AND NOT CINEVAULT_APP_VERSION STREQUAL PROJECT_VERSION)
     message(FATAL_ERROR
@@ -84,6 +87,92 @@ if(CINEVAULT_ENABLE_EXIFTOOL AND NOT CINEVAULT_BUILD_MINIMAL_GUI AND WIN32)
     else()
         message(WARNING
             "ExifTool cache is not configured; runtime will fall back to CINEVAULT_EXIFTOOL_PATH or PATH")
+    endif()
+endif()
+
+set(CINEVAULT_HAS_BUNDLED_LIBRAW OFF)
+set(CINEVAULT_HAS_BUNDLED_GPR OFF)
+if(CINEVAULT_ENABLE_RAW_PREVIEW AND NOT CINEVAULT_BUILD_MINIMAL_GUI AND WIN32)
+    if(NOT CINEVAULT_LIBRAW_CACHE_ROOT
+       AND DEFINED ENV{CINEVAULT_LIBRAW_CACHE}
+       AND NOT "$ENV{CINEVAULT_LIBRAW_CACHE}" STREQUAL "")
+        set(CINEVAULT_LIBRAW_CACHE_ROOT "$ENV{CINEVAULT_LIBRAW_CACHE}")
+    endif()
+    if(CINEVAULT_LIBRAW_CACHE_ROOT)
+        cmake_path(ABSOLUTE_PATH CINEVAULT_LIBRAW_CACHE_ROOT NORMALIZE
+                   OUTPUT_VARIABLE CINEVAULT_LIBRAW_CACHE_ROOT)
+        set(CINEVAULT_LIBRAW_LOCK
+            "${CMAKE_CURRENT_SOURCE_DIR}/cmake/raw-preview-dependencies.lock.json")
+        set(CINEVAULT_LIBRAW_READY
+            "${CINEVAULT_LIBRAW_CACHE_ROOT}/libraw-dependency.ready")
+        if(NOT EXISTS "${CINEVAULT_LIBRAW_READY}")
+            message(FATAL_ERROR
+                "LibRaw cache is not prepared. Run cmake/PrepareRawPreviewDependencies.cmake first.")
+        endif()
+        file(SHA256 "${CINEVAULT_LIBRAW_LOCK}" CINEVAULT_LIBRAW_LOCK_SHA256)
+        file(READ "${CINEVAULT_LIBRAW_READY}" CINEVAULT_LIBRAW_READY_CONTENTS)
+        string(FIND "${CINEVAULT_LIBRAW_READY_CONTENTS}"
+                    "lock_sha256=${CINEVAULT_LIBRAW_LOCK_SHA256}"
+                    CINEVAULT_LIBRAW_LOCK_MATCH)
+        string(FIND "${CINEVAULT_LIBRAW_READY_CONTENTS}"
+                    "selected_license=CDDL-1.0"
+                    CINEVAULT_LIBRAW_LICENSE_MATCH)
+        if(CINEVAULT_LIBRAW_LOCK_MATCH EQUAL -1
+           OR CINEVAULT_LIBRAW_LICENSE_MATCH EQUAL -1)
+            message(FATAL_ERROR "LibRaw cache does not match the audited dependency lock and license")
+        endif()
+        file(READ "${CINEVAULT_LIBRAW_LOCK}" CINEVAULT_LIBRAW_LOCK_JSON)
+        string(JSON CINEVAULT_LIBRAW_VERSION GET
+               "${CINEVAULT_LIBRAW_LOCK_JSON}" dependencies libRaw version)
+        set(CINEVAULT_LIBRAW_RUNTIME_ROOT
+            "${CINEVAULT_LIBRAW_CACHE_ROOT}/runtimes/libraw-${CINEVAULT_LIBRAW_VERSION}-win-x64")
+        foreach(CINEVAULT_LIBRAW_REQUIRED_FILE IN ITEMS
+                "include/libraw/libraw.h"
+                "lib/libraw.lib"
+                "bin/libraw.dll"
+                "licenses/LICENSE.CDDL"
+                "licenses/LICENSE.LGPL"
+                "licenses/COPYRIGHT")
+            if(NOT EXISTS
+               "${CINEVAULT_LIBRAW_RUNTIME_ROOT}/${CINEVAULT_LIBRAW_REQUIRED_FILE}")
+                message(FATAL_ERROR
+                    "Prepared LibRaw runtime is incomplete: ${CINEVAULT_LIBRAW_REQUIRED_FILE}")
+            endif()
+        endforeach()
+        set(CINEVAULT_HAS_BUNDLED_LIBRAW ON)
+        if(CINEVAULT_ENABLE_RAW_EXTENDED_SDKS)
+            string(JSON CINEVAULT_GPR_SDK_VERSION GET
+                   "${CINEVAULT_LIBRAW_LOCK_JSON}" extendedSdks 0 version)
+            set(CINEVAULT_GPR_RUNTIME_ROOT
+                "${CINEVAULT_LIBRAW_CACHE_ROOT}/runtimes/gpr-sdk-${CINEVAULT_GPR_SDK_VERSION}-win-x64")
+            string(FIND "${CINEVAULT_LIBRAW_READY_CONTENTS}"
+                        "gpr_version=${CINEVAULT_GPR_SDK_VERSION}"
+                        CINEVAULT_GPR_VERSION_MATCH)
+            string(FIND "${CINEVAULT_LIBRAW_READY_CONTENTS}"
+                        "gpr_selected_license=MIT"
+                        CINEVAULT_GPR_LICENSE_MATCH)
+            if(CINEVAULT_GPR_VERSION_MATCH EQUAL -1
+               OR CINEVAULT_GPR_LICENSE_MATCH EQUAL -1)
+                message(FATAL_ERROR
+                    "GoPro GPR SDK cache does not match the audited dependency lock and license")
+            endif()
+            foreach(CINEVAULT_GPR_REQUIRED_FILE IN ITEMS
+                    "bin/gpr_tools.exe"
+                    "licenses/LICENSE-MIT"
+                    "licenses/LICENSE-APACHE"
+                    "licenses/LICENSE.txt"
+                    "licenses/AUTHORS.md")
+                if(NOT EXISTS
+                   "${CINEVAULT_GPR_RUNTIME_ROOT}/${CINEVAULT_GPR_REQUIRED_FILE}")
+                    message(FATAL_ERROR
+                        "Prepared GoPro GPR SDK runtime is incomplete: ${CINEVAULT_GPR_REQUIRED_FILE}")
+                endif()
+            endforeach()
+            set(CINEVAULT_HAS_BUNDLED_GPR ON)
+        endif()
+    else()
+        message(WARNING
+            "LibRaw cache is not configured; RAW preview will use non-LibRaw fallback providers")
     endif()
 endif()
 
@@ -364,6 +453,8 @@ set(APP_SOURCES
     src/domain/SearchTypes.h
     src/shared/Paths.h
     src/shared/Paths.cpp
+    src/shared/ThumbnailCacheQuota.h
+    src/shared/ThumbnailCacheQuota.cpp
     src/shared/FolderPathMetadata.h
     src/shared/FolderPathMetadata.cpp
     src/shared/SearchConfiguration.h
@@ -423,6 +514,8 @@ else()
     src/infrastructure/security/WindowsCredentialStore.h
     src/infrastructure/logging/Logger.h
     src/infrastructure/logging/Logger.cpp
+    src/infrastructure/monitoring/PerformanceTelemetry.h
+    src/infrastructure/monitoring/PerformanceTelemetry.cpp
     src/infrastructure/db/DatabaseManager.h
     src/infrastructure/db/DatabaseManager.cpp
     src/infrastructure/db/DatabaseMigration.h
@@ -445,6 +538,10 @@ else()
     src/core/search/SearchQueryUnderstanding.cpp
     src/core/scan/FileTypeService.h
     src/core/scan/FileTypeService.cpp
+    src/core/scan/ScanPathPolicy.h
+    src/core/scan/ScanPathPolicy.cpp
+    src/core/thumbnail/RawFormatRegistry.h
+    src/core/thumbnail/RawFormatRegistry.cpp
     src/core/media/MediaProbeEngine.h
     src/core/media/MediaProbeEngine.cpp
     src/core/jobs/JobEngine.h
@@ -484,6 +581,8 @@ else()
     src/application/SourceChangeMonitor.cpp
     src/application/SystemIdleMonitor.h
     src/application/SystemIdleMonitor.cpp
+    src/application/IndexingWorkCoordinator.h
+    src/application/IndexingWorkCoordinator.cpp
     src/application/BackgroundMaintenanceCoordinator.h
     src/application/BackgroundMaintenanceCoordinator.cpp
     src/application/LibraryQueryService.h
@@ -500,6 +599,10 @@ else()
     src/infrastructure/ffmpeg/FFmpegAdapter.cpp
     src/infrastructure/metadata/ExifToolAdapter.h
     src/infrastructure/metadata/ExifToolAdapter.cpp
+    src/infrastructure/raw/RawPreviewProtocol.h
+    src/infrastructure/raw/RawPreviewProtocol.cpp
+    src/infrastructure/raw/RawWorkerClient.h
+    src/infrastructure/raw/RawWorkerClient.cpp
     src/infrastructure/network/VisionApiClient.h
     src/infrastructure/network/VisionApiClient.cpp
     src/infrastructure/network/VisionResponseParser.h
@@ -548,9 +651,66 @@ qt_add_executable(CineVault
     ${APP_WINDOWS_RESOURCES}
 )
 
+qt_add_executable(CineVaultRawWorker
+    src/raw-worker/main.cpp
+    src/infrastructure/raw/RawPreviewProtocol.h
+    src/infrastructure/raw/RawPreviewProtocol.cpp
+    src/infrastructure/raw/RawPreviewCacheKey.h
+    src/infrastructure/raw/RawPreviewCacheKey.cpp
+    src/infrastructure/raw/RawPreviewDecoder.h
+    src/infrastructure/raw/RawPreviewDecoder.cpp
+)
+target_include_directories(CineVaultRawWorker PRIVATE src)
+target_link_libraries(CineVaultRawWorker PRIVATE Qt6::Core Qt6::Gui)
+add_dependencies(CineVault CineVaultRawWorker)
+
+if(CINEVAULT_HAS_BUNDLED_LIBRAW)
+    target_compile_definitions(CineVaultRawWorker PRIVATE CINEVAULT_HAS_LIBRAW=1)
+    target_include_directories(CineVaultRawWorker PRIVATE
+        "${CINEVAULT_LIBRAW_RUNTIME_ROOT}/include")
+    target_link_libraries(CineVaultRawWorker PRIVATE
+        "${CINEVAULT_LIBRAW_RUNTIME_ROOT}/lib/libraw.lib")
+    add_custom_command(TARGET CineVaultRawWorker POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CINEVAULT_LIBRAW_RUNTIME_ROOT}/bin/libraw.dll"
+                "$<TARGET_FILE_DIR:CineVaultRawWorker>/libraw.dll"
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_FILE_DIR:CineVaultRawWorker>/licenses/libraw"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${CINEVAULT_LIBRAW_RUNTIME_ROOT}/licenses"
+                "$<TARGET_FILE_DIR:CineVaultRawWorker>/licenses/libraw"
+        VERBATIM
+    )
+else()
+    target_compile_definitions(CineVaultRawWorker PRIVATE CINEVAULT_HAS_LIBRAW=0)
+endif()
+
+if(CINEVAULT_HAS_BUNDLED_GPR)
+    target_compile_definitions(CineVaultRawWorker PRIVATE CINEVAULT_HAS_GPR_TOOLS=1)
+    add_custom_command(TARGET CineVaultRawWorker POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_FILE_DIR:CineVaultRawWorker>/gpr"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CINEVAULT_GPR_RUNTIME_ROOT}/bin/gpr_tools.exe"
+                "$<TARGET_FILE_DIR:CineVaultRawWorker>/gpr/gpr_tools.exe"
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_FILE_DIR:CineVaultRawWorker>/licenses/gpr-sdk"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${CINEVAULT_GPR_RUNTIME_ROOT}/licenses"
+                "$<TARGET_FILE_DIR:CineVaultRawWorker>/licenses/gpr-sdk"
+        VERBATIM
+    )
+else()
+    target_compile_definitions(CineVaultRawWorker PRIVATE CINEVAULT_HAS_GPR_TOOLS=0)
+endif()
+
+if(WIN32)
+    target_link_libraries(CineVaultRawWorker PRIVATE Ole32 Windowscodecs)
+endif()
+
 if(WIN32)
     set_target_properties(CineVault PROPERTIES WIN32_EXECUTABLE TRUE)
-    target_link_libraries(CineVault PRIVATE Dwmapi Gdi32 Ole32 Shell32)
+    target_link_libraries(CineVault PRIVATE Dwmapi Gdi32 Ole32 Psapi Shell32)
 endif()
 
 qt_add_resources(CineVault "CineVault_assets"
@@ -617,6 +777,7 @@ target_compile_definitions(CineVault PRIVATE
     CINEVAULT_HAS_LOCAL_SEARCH=$<IF:$<BOOL:${CINEVAULT_HAS_LOCAL_SEARCH}>,1,0>
     CINEVAULT_HAS_LOCAL_SEARCH_ASSISTANT=$<IF:$<BOOL:${CINEVAULT_HAS_LOCAL_SEARCH_ASSISTANT}>,1,0>
     CINEVAULT_HAS_BUNDLED_EXIFTOOL=$<IF:$<BOOL:${CINEVAULT_HAS_BUNDLED_EXIFTOOL}>,1,0>
+    CINEVAULT_HAS_BUNDLED_LIBRAW=$<IF:$<BOOL:${CINEVAULT_HAS_BUNDLED_LIBRAW}>,1,0>
     CINEVAULT_APP_VERSION="${CINEVAULT_APP_VERSION}"
     CINEVAULT_UPDATE_SIGNER_SHA256="${CINEVAULT_UPDATE_SIGNER_SHA256}"
 )
@@ -764,10 +925,23 @@ if(BUILD_TESTING)
         tests/unit/BackgroundMonitoringTest.cpp
         src/application/SourceChangeMonitor.cpp
         src/application/SystemIdleMonitor.cpp
+        src/core/scan/ScanPathPolicy.cpp
+        src/shared/Paths.cpp
     )
     target_include_directories(BackgroundMonitoringTest PRIVATE src)
+    target_compile_definitions(BackgroundMonitoringTest PRIVATE CINEVAULT_TESTING=1)
     target_link_libraries(BackgroundMonitoringTest PRIVATE Qt6::Core Qt6::Test)
-    add_test(NAME BackgroundMonitoringTest COMMAND BackgroundMonitoringTest)
+    add_test(NAME BackgroundMonitoringTest
+        COMMAND BackgroundMonitoringTest -v2 -o BackgroundMonitoringTest-results.txt,txt)
+
+    qt_add_executable(IndexingWorkCoordinatorTest
+        tests/unit/IndexingWorkCoordinatorTest.cpp
+        src/application/IndexingWorkCoordinator.cpp
+    )
+    target_include_directories(IndexingWorkCoordinatorTest PRIVATE src)
+    target_link_libraries(IndexingWorkCoordinatorTest PRIVATE
+        Qt6::Concurrent Qt6::Core Qt6::Test)
+    add_test(NAME IndexingWorkCoordinatorTest COMMAND IndexingWorkCoordinatorTest)
 
     if(CINEVAULT_HAS_BUNDLED_EXIFTOOL)
         qt_add_executable(ExifToolAdapterTest
@@ -782,16 +956,22 @@ if(BUILD_TESTING)
 
         qt_add_executable(MetadataExtractionServiceTest
             tests/unit/MetadataExtractionServiceTest.cpp
+            src/application/IndexingWorkCoordinator.cpp
             src/application/MetadataExtractionService.cpp
             src/core/jobs/JobEngine.cpp
             src/infrastructure/db/DatabaseManager.cpp
             src/infrastructure/db/DatabaseMigration.cpp
+            src/infrastructure/logging/Logger.cpp
             src/infrastructure/metadata/ExifToolAdapter.cpp
+            src/infrastructure/monitoring/PerformanceTelemetry.cpp
             src/shared/FolderPathMetadata.cpp
         )
         target_include_directories(MetadataExtractionServiceTest PRIVATE src)
         target_link_libraries(MetadataExtractionServiceTest PRIVATE
             Qt6::Concurrent Qt6::Core Qt6::Gui Qt6::Sql Qt6::Test)
+        if(WIN32)
+            target_link_libraries(MetadataExtractionServiceTest PRIVATE Psapi)
+        endif()
         add_dependencies(MetadataExtractionServiceTest CineVaultStageExifTool)
         add_test(NAME MetadataExtractionServiceTest COMMAND MetadataExtractionServiceTest)
     endif()
@@ -811,6 +991,45 @@ if(BUILD_TESTING)
     target_include_directories(LoggerTest PRIVATE src)
     target_link_libraries(LoggerTest PRIVATE Qt6::Concurrent Qt6::Core Qt6::Test)
     add_test(NAME LoggerTest COMMAND LoggerTest)
+
+    qt_add_executable(PerformanceTelemetryTest
+        tests/unit/PerformanceTelemetryTest.cpp
+        src/infrastructure/logging/Logger.cpp
+        src/infrastructure/monitoring/PerformanceTelemetry.cpp
+    )
+    target_include_directories(PerformanceTelemetryTest PRIVATE src)
+    target_link_libraries(PerformanceTelemetryTest PRIVATE Qt6::Core Qt6::Test)
+    if(WIN32)
+        target_link_libraries(PerformanceTelemetryTest PRIVATE Psapi)
+    endif()
+    add_test(NAME PerformanceTelemetryTest COMMAND PerformanceTelemetryTest)
+
+    qt_add_executable(RawFormatRegistryTest
+        tests/unit/RawFormatRegistryTest.cpp
+        src/core/scan/FileTypeService.cpp
+        src/core/thumbnail/RawFormatRegistry.cpp
+    )
+    target_include_directories(RawFormatRegistryTest PRIVATE src)
+    target_link_libraries(RawFormatRegistryTest PRIVATE Qt6::Core Qt6::Test)
+    add_test(NAME RawFormatRegistryTest COMMAND RawFormatRegistryTest)
+
+    add_test(NAME RawDependencyLockTest
+        COMMAND ${CMAKE_COMMAND}
+            -DVALIDATE_LOCK_ONLY=ON
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/PrepareRawPreviewDependencies.cmake")
+
+    qt_add_executable(RawWorkerClientTest
+        tests/unit/RawWorkerClientTest.cpp
+        src/infrastructure/raw/RawPreviewCacheKey.cpp
+        src/infrastructure/raw/RawPreviewProtocol.cpp
+        src/infrastructure/raw/RawWorkerClient.cpp
+    )
+    target_include_directories(RawWorkerClientTest PRIVATE src)
+    target_compile_definitions(RawWorkerClientTest PRIVATE
+        CINEVAULT_RAW_WORKER_TEST_PATH="$<TARGET_FILE:CineVaultRawWorker>")
+    target_link_libraries(RawWorkerClientTest PRIVATE Qt6::Core Qt6::Gui Qt6::Test)
+    add_dependencies(RawWorkerClientTest CineVaultRawWorker)
+    add_test(NAME RawWorkerClientTest COMMAND RawWorkerClientTest)
 
     qt_add_executable(AppSettingsSearchTest
         tests/unit/AppSettingsSearchTest.cpp
@@ -972,10 +1191,24 @@ if(BUILD_TESTING)
     qt_add_executable(LocalImageUrlHelperTest
         tests/unit/LocalImageUrlHelperTest.cpp
         src/ui/imaging/LocalImageUrlHelper.cpp
+        src/shared/FolderPathMetadata.cpp
+        src/shared/Paths.cpp
+        src/shared/ThumbnailCacheQuota.cpp
     )
     target_include_directories(LocalImageUrlHelperTest PRIVATE src)
     target_link_libraries(LocalImageUrlHelperTest PRIVATE Qt6::Core Qt6::Test)
     add_test(NAME LocalImageUrlHelperTest COMMAND LocalImageUrlHelperTest)
+
+    qt_add_executable(ThumbnailCacheQuotaTest
+        tests/unit/ThumbnailCacheQuotaTest.cpp
+        src/shared/FolderPathMetadata.cpp
+        src/shared/Paths.cpp
+        src/shared/ThumbnailCacheQuota.cpp
+    )
+    target_include_directories(ThumbnailCacheQuotaTest PRIVATE src)
+    target_link_libraries(ThumbnailCacheQuotaTest PRIVATE Qt6::Core Qt6::Test)
+    add_test(NAME ThumbnailCacheQuotaTest
+        COMMAND ThumbnailCacheQuotaTest -v2 -o ThumbnailCacheQuotaTest-results.txt,txt)
 
     qt_add_executable(JobListModelTest
         tests/unit/JobListModelTest.cpp
@@ -1041,9 +1274,11 @@ if(BUILD_TESTING)
 
         qt_add_executable(SearchDocumentSyncServiceTest
             tests/unit/SearchDocumentSyncServiceTest.cpp
+            src/application/IndexingWorkCoordinator.cpp
             src/application/SearchDocumentSyncService.cpp
             src/infrastructure/db/GlobalDatabaseManager.cpp
             src/infrastructure/db/DatabaseMigration.cpp
+            src/shared/FolderPathMetadata.cpp
             src/shared/Formatters.cpp
             src/shared/Paths.cpp
         )
@@ -1111,6 +1346,7 @@ if(BUILD_TESTING)
 
         qt_add_executable(MaterialCatalogSyncServiceTest
             tests/unit/MaterialCatalogSyncServiceTest.cpp
+            src/application/IndexingWorkCoordinator.cpp
             src/application/MaterialCatalogSyncService.cpp
             src/core/search/CaptureTimeResolver.cpp
             src/application/ProjectService.cpp
@@ -1131,37 +1367,98 @@ if(BUILD_TESTING)
 
         qt_add_executable(ImportServiceLegacyRescanTest
             tests/unit/ImportServiceLegacyRescanTest.cpp
+            src/application/IndexingWorkCoordinator.cpp
             src/application/ImportService.cpp
             src/application/JobService.cpp
             src/core/jobs/JobEngine.cpp
             src/core/scan/FileTypeService.cpp
+            src/core/scan/ScanPathPolicy.cpp
             src/core/scan/ScanEngine.cpp
+            src/core/thumbnail/RawFormatRegistry.cpp
             src/infrastructure/db/DatabaseManager.cpp
             src/infrastructure/db/DatabaseMigration.cpp
+            src/infrastructure/logging/Logger.cpp
+            src/infrastructure/monitoring/PerformanceTelemetry.cpp
             src/shared/FolderPathMetadata.cpp
+            src/shared/Paths.cpp
         )
         target_include_directories(ImportServiceLegacyRescanTest PRIVATE src)
         target_link_libraries(ImportServiceLegacyRescanTest PRIVATE Qt6::Core Qt6::Sql Qt6::Concurrent Qt6::Test)
-        add_test(NAME ImportServiceLegacyRescanTest COMMAND ImportServiceLegacyRescanTest -v2 -o -,txt)
+        if(WIN32)
+            target_link_libraries(ImportServiceLegacyRescanTest PRIVATE Psapi)
+        endif()
+        add_test(NAME ImportServiceLegacyRescanTest
+            COMMAND ImportServiceLegacyRescanTest -v2 -o ImportServiceLegacyRescanTest-results.txt,txt)
+
+        qt_add_executable(LargeCatalogStressTest
+            tests/stress/LargeCatalogStressTest.cpp
+            src/application/IndexingWorkCoordinator.cpp
+            src/core/jobs/JobEngine.cpp
+            src/core/scan/FileTypeService.cpp
+            src/core/scan/ScanPathPolicy.cpp
+            src/core/scan/ScanEngine.cpp
+            src/core/thumbnail/RawFormatRegistry.cpp
+            src/infrastructure/db/DatabaseManager.cpp
+            src/infrastructure/db/DatabaseMigration.cpp
+            src/infrastructure/logging/Logger.cpp
+            src/infrastructure/monitoring/PerformanceTelemetry.cpp
+            src/shared/FolderPathMetadata.cpp
+            src/shared/Paths.cpp
+        )
+        target_include_directories(LargeCatalogStressTest PRIVATE src)
+        target_link_libraries(LargeCatalogStressTest PRIVATE
+            Qt6::Concurrent Qt6::Core Qt6::Sql Qt6::Test)
+        if(WIN32)
+            target_link_libraries(LargeCatalogStressTest PRIVATE Psapi)
+        endif()
+        add_test(NAME LargeCatalogStressTest COMMAND LargeCatalogStressTest -v1)
+        set_tests_properties(LargeCatalogStressTest PROPERTIES LABELS "stress")
 
         qt_add_executable(MediaTaskServiceRecoveryTest
             tests/unit/MediaTaskServiceRecoveryTest.cpp
+            src/application/IndexingWorkCoordinator.cpp
             src/application/MediaTaskService.cpp
             src/core/jobs/JobEngine.cpp
             src/core/media/MediaProbeEngine.cpp
+            src/core/thumbnail/RawFormatRegistry.cpp
             src/core/thumbnail/ThumbnailEngine.cpp
             src/infrastructure/config/AppSettings.cpp
             src/infrastructure/db/DatabaseManager.cpp
             src/infrastructure/db/DatabaseMigration.cpp
             src/infrastructure/ffmpeg/FFmpegAdapter.cpp
+            src/infrastructure/logging/Logger.cpp
+            src/infrastructure/monitoring/PerformanceTelemetry.cpp
+            src/infrastructure/raw/RawPreviewProtocol.cpp
+            src/infrastructure/raw/RawWorkerClient.cpp
             src/shared/FolderPathMetadata.cpp
             src/shared/VisualAnalysisMetadata.cpp
             src/shared/Paths.cpp
+            src/shared/ThumbnailCacheQuota.cpp
         )
         target_include_directories(MediaTaskServiceRecoveryTest PRIVATE src)
         target_link_libraries(MediaTaskServiceRecoveryTest PRIVATE Qt6::Core Qt6::Sql Qt6::Concurrent Qt6::Test)
+        if(WIN32)
+            target_link_libraries(MediaTaskServiceRecoveryTest PRIVATE Psapi)
+        endif()
         add_test(NAME MediaTaskServiceRecoveryTest
             COMMAND MediaTaskServiceRecoveryTest -o MediaTaskServiceRecoveryTest-results.txt,txt)
+
+        qt_add_executable(LibraryWorkspacePaginationTest
+            tests/unit/LibraryWorkspacePaginationTest.cpp
+            src/application/LibraryQueryService.cpp
+            src/ui/models/AssetListModel.cpp
+            src/ui/viewmodels/LibraryWorkspaceViewModel.cpp
+            src/infrastructure/db/DatabaseManager.cpp
+            src/infrastructure/db/DatabaseMigration.cpp
+            src/infrastructure/logging/Logger.cpp
+            src/shared/FileRevealService.cpp
+            src/shared/FolderPathMetadata.cpp
+            src/shared/Formatters.cpp
+        )
+        target_include_directories(LibraryWorkspacePaginationTest PRIVATE src)
+        target_link_libraries(LibraryWorkspacePaginationTest PRIVATE
+            Qt6::Concurrent Qt6::Core Qt6::Gui Qt6::Sql Qt6::Test)
+        add_test(NAME LibraryWorkspacePaginationTest COMMAND LibraryWorkspacePaginationTest)
 
         qt_add_executable(FeedbackMessageListModelTest
             tests/unit/FeedbackMessageListModelTest.cpp
@@ -1257,8 +1554,12 @@ if(BUILD_TESTING)
             SingleInstanceGuardTest
             ApplicationIdleMonitorTest
             BackgroundMonitoringTest
+            IndexingWorkCoordinatorTest
             SearchConfigurationTest
             LoggerTest
+            PerformanceTelemetryTest
+            RawFormatRegistryTest
+            RawWorkerClientTest
             AppSettingsSearchTest
             QuickSearchControllerTest
             VisualAnalysisMetadataTest
@@ -1273,6 +1574,7 @@ if(BUILD_TESTING)
             VisionApiClientJsonTest
             UpdateServiceTest
             LocalImageUrlHelperTest
+            ThumbnailCacheQuotaTest
             JobListModelTest
             JobEngineTest
             FolderPathMetadataTest
@@ -1314,8 +1616,14 @@ if(BUILD_TESTING)
         if(TARGET ImportServiceLegacyRescanTest)
             list(APPEND CINEVAULT_PATH_AWARE_TESTS ImportServiceLegacyRescanTest)
         endif()
+        if(TARGET LargeCatalogStressTest)
+            list(APPEND CINEVAULT_PATH_AWARE_TESTS LargeCatalogStressTest)
+        endif()
         if(TARGET MediaTaskServiceRecoveryTest)
             list(APPEND CINEVAULT_PATH_AWARE_TESTS MediaTaskServiceRecoveryTest)
+        endif()
+        if(TARGET LibraryWorkspacePaginationTest)
+            list(APPEND CINEVAULT_PATH_AWARE_TESTS LibraryWorkspacePaginationTest)
         endif()
         if(TARGET FeedbackAttachmentCacheTest)
             list(APPEND CINEVAULT_PATH_AWARE_TESTS FeedbackAttachmentCacheTest)
@@ -1335,10 +1643,23 @@ if(BUILD_TESTING)
     endif()
 endif()
 
-install(TARGETS CineVault
+install(TARGETS CineVault CineVaultRawWorker
     BUNDLE DESTINATION .
     RUNTIME DESTINATION .
 )
+
+if(CINEVAULT_HAS_BUNDLED_LIBRAW)
+    install(FILES "${CINEVAULT_LIBRAW_RUNTIME_ROOT}/bin/libraw.dll" DESTINATION .)
+    install(DIRECTORY "${CINEVAULT_LIBRAW_RUNTIME_ROOT}/licenses/"
+            DESTINATION "licenses/libraw")
+endif()
+
+if(CINEVAULT_HAS_BUNDLED_GPR)
+    install(PROGRAMS "${CINEVAULT_GPR_RUNTIME_ROOT}/bin/gpr_tools.exe"
+            DESTINATION "gpr")
+    install(DIRECTORY "${CINEVAULT_GPR_RUNTIME_ROOT}/licenses/"
+            DESTINATION "licenses/gpr-sdk")
+endif()
 
 if(CINEVAULT_HAS_LOCAL_SEARCH)
     install(FILES "${CINEVAULT_ONNXRUNTIME_ROOT}/lib/onnxruntime.dll" DESTINATION .)

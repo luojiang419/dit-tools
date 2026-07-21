@@ -52,6 +52,15 @@ Rectangle {
         flickable.contentY = clampRange(flickable.contentY - delta, 0, maxY)
     }
 
+    function requestMoreIfNearEnd(flickable, margin) {
+        if (!viewModel || viewModel.loading || !viewModel.hasMore || !flickable) {
+            return
+        }
+        if (flickable.contentY + flickable.height >= flickable.contentHeight - margin) {
+            viewModel.loadMore()
+        }
+    }
+
     function openSelectedAssetFullscreen() {
         if (!viewModel) {
             return
@@ -269,6 +278,10 @@ Rectangle {
             onCurrentIndexChanged: if (currentIndex >= 0) {
                 positionViewAtIndex(currentIndex, GridView.Contain)
             }
+            // qmllint disable unqualified
+            onContentYChanged: libraryRoot.requestMoreIfNearEnd(this, libraryRoot.gridCellHeight * 3)
+            onContentHeightChanged: libraryRoot.requestMoreIfNearEnd(this, libraryRoot.gridCellHeight * 3)
+            // qmllint enable unqualified
 
             ScrollBar.vertical: ThemedScrollBar {
                 policy: ScrollBar.AsNeeded
@@ -415,6 +428,10 @@ Rectangle {
                 onCurrentIndexChanged: if (currentIndex >= 0) {
                     positionViewAtIndex(currentIndex, ListView.Contain)
                 }
+                // qmllint disable unqualified
+                onContentYChanged: libraryRoot.requestMoreIfNearEnd(this, 58 * 12)
+                onContentHeightChanged: libraryRoot.requestMoreIfNearEnd(this, 58 * 12)
+                // qmllint enable unqualified
 
                 ScrollBar.vertical: ThemedScrollBar {
                     parent: tableFlick.parent

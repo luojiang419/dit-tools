@@ -9,6 +9,7 @@
 
 class DatabaseManager;
 class JobEngine;
+class IndexingWorkCoordinator;
 class QSqlDatabase;
 
 class MetadataExtractionService final : public QObject {
@@ -21,6 +22,7 @@ public:
                                        QObject *parent = nullptr);
     ~MetadataExtractionService() override;
     void waitForIdle();
+    void setWorkCoordinator(IndexingWorkCoordinator *workCoordinator);
 
 public slots:
     void startForSourceRoot(qint64 sourceRootId);
@@ -31,11 +33,17 @@ signals:
 private:
     QVector<AssetFile> fetchPendingAssets(QSqlDatabase &db,
                                           qint64 sourceRootId,
+                                          qint64 lastAssetId,
+                                          qsizetype limit,
                                           QString *errorMessage) const;
+    qint64 countPendingAssets(QSqlDatabase &db,
+                              qint64 sourceRootId,
+                              QString *errorMessage) const;
     void runExtraction(qint64 sourceRootId,
                        const QString &projectDatabasePath,
                        const QString &activeKey,
-                       qint64 jobId);
+                       qint64 jobId,
+                       quint64 workGeneration);
     bool persistBatch(QSqlDatabase &db,
                       const QVector<EmbeddedMetadataResult> &results,
                       QString *errorMessage) const;
@@ -51,6 +59,7 @@ private:
     DatabaseManager *m_databaseManager = nullptr;
     JobEngine *m_jobEngine = nullptr;
     ExifToolAdapter *m_exifToolAdapter = nullptr;
+    IndexingWorkCoordinator *m_workCoordinator = nullptr;
     QFutureSynchronizer<void> m_futures;
     QSet<QString> m_activeKeys;
 };

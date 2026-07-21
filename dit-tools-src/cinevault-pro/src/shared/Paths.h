@@ -16,6 +16,7 @@ public:
     static QString frameCacheDirectory(const QString &videoKey);
     static bool clearFrameCache(QString *errorMessage);
     static QString projectRootFromDatabasePath(const QString &databasePath);
+    static QString projectThumbnailCacheRoot(const QString &databasePath);
     static QString projectThumbnailCachePath(const QString &databasePath, qint64 sourceRootId, qint64 assetId);
     static QString projectReportPreviewRoot(const QString &projectRoot);
     static QString projectFrameCacheDirectory(const QString &databasePath, const QString &videoKey);

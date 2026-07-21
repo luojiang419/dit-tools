@@ -37,7 +37,10 @@ public:
     QVariant data(const QModelIndex &index, int role) const override;
     QHash<int, QByteArray> roleNames() const override;
 
+    void clear();
     void setItems(const QVector<AssetFile> &items);
+    void appendItems(const QVector<AssetFile> &items);
+    void updateItemsById(const QVector<AssetFile> &items);
 
 private:
     QVector<AssetFile> m_items;

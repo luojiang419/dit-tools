@@ -32,6 +32,8 @@ public:
     bool deleteProjectToTrash(const QString &projectPath, QString *errorMessage);
 
 signals:
+    void projectAboutToChange(const QString &currentDatabasePath,
+                              const QString &nextDatabasePath);
     void projectChanged();
     void projectLibraryChanged();
 

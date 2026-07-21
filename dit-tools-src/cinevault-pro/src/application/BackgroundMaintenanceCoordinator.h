@@ -14,6 +14,7 @@ class ProjectService;
 class SourceChangeMonitor;
 class SystemIdleMonitor;
 class VideoAnalysisService;
+struct SourceChangeBatch;
 
 class BackgroundMaintenanceCoordinator final : public QObject {
     Q_OBJECT
@@ -46,7 +47,7 @@ signals:
 private:
     void handleProjectChanged();
     void reloadSourceRoots(bool markAllDirty);
-    void markSourceDirty(qint64 sourceRootId, const QString &sourcePath);
+    void markSourceDirty(const SourceChangeBatch &batch);
     void processNext();
     void dispatchNextAnalysis();
     void handleSourceScanFinished(qint64 sourceRootId);
@@ -62,7 +63,12 @@ private:
     SourceChangeMonitor *m_sourceChangeMonitor = nullptr;
     SystemIdleMonitor *m_systemIdleMonitor = nullptr;
     QHash<qint64, SourceRoot> m_sourceRoots;
-    QHash<qint64, quint64> m_dirtyGenerations;
+    struct DirtySourceState {
+        quint64 generation = 0;
+        QSet<QString> changedPaths;
+        bool forceFullScan = false;
+    };
+    QHash<qint64, DirtySourceState> m_dirtySources;
     QSet<qint64> m_attemptedThisIdle;
     qint64 m_scanningSourceId = 0;
     quint64 m_scanningGeneration = 0;
