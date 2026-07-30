@@ -115,6 +115,24 @@ QByteArray chatResponseForPayload(const QJsonObject &payload)
     }).toJson(QJsonDocument::Compact);
 }
 
+QByteArray emptyReasoningChatResponse()
+{
+    return QJsonDocument(QJsonObject{
+        {QStringLiteral("choices"), QJsonArray{QJsonObject{
+            {QStringLiteral("finish_reason"), QStringLiteral("length")},
+            {QStringLiteral("message"), QJsonObject{
+                {QStringLiteral("content"), QString()},
+                {QStringLiteral("reasoning_content"), QStringLiteral("reasoning only")}
+            }}
+        }}},
+        {QStringLiteral("usage"), QJsonObject{
+            {QStringLiteral("prompt_tokens"), 100},
+            {QStringLiteral("completion_tokens"), 640},
+            {QStringLiteral("total_tokens"), 740}
+        }}
+    }).toJson(QJsonDocument::Compact);
+}
+
 qsizetype contentLengthFromHeader(const QByteArray &header)
 {
     const auto lines = header.split('\n');
@@ -248,6 +266,8 @@ class VisionApiClientImageTest : public QObject {
 private slots:
     void analyzeImage_decodesWebpToJpegDataUrl();
     void analyzeFrame_requestsBoundEntitiesAndOcr();
+    void analyzeFrame_retriesOriginalRequestOnceAfterEmptyContent();
+    void analyzeFrame_stopsAfterSingleEmptyContentRetry();
     void analyzeFrameDimensions_postsSingleFrameImage();
     void analyzeDimensions_postsRequestedDimensions();
     void analyzeDimensions_retriesWithShorterContextOnContextLimit();
@@ -293,6 +313,13 @@ void VisionApiClientImageTest::analyzeFrame_requestsBoundEntitiesAndOcr()
     QCOMPARE(frame->ocrText, QStringLiteral("SALE"));
 
     const auto responseFormat = responseFormatFromRequestBody(capturedBody);
+    QJsonParseError requestParseError;
+    const auto request = QJsonDocument::fromJson(capturedBody, &requestParseError).object();
+    QCOMPARE(requestParseError.error, QJsonParseError::NoError);
+    QCOMPARE(request.value(QStringLiteral("temperature")).toInt(), 0);
+    QCOMPARE(request.value(QStringLiteral("max_tokens")).toInt(), 640);
+    QCOMPARE(request.value(QStringLiteral("chat_template_kwargs")).toObject()
+                 .value(QStringLiteral("enable_thinking")).toBool(), false);
     const auto schema = responseFormat.value(QStringLiteral("json_schema")).toObject()
                             .value(QStringLiteral("schema")).toObject();
     const auto required = schema.value(QStringLiteral("required")).toArray();
@@ -302,6 +329,96 @@ void VisionApiClientImageTest::analyzeFrame_requestsBoundEntitiesAndOcr()
     const auto prompt = promptTextFromRequestBody(capturedBody);
     QVERIFY(prompt.contains(QStringLiteral("同一个实体对象内")));
     QVERIFY(prompt.contains(QStringLiteral("ocr_text")));
+}
+
+void VisionApiClientImageTest::analyzeFrame_retriesOriginalRequestOnceAfterEmptyContent()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const auto imagePath = QDir(tempDir.path()).filePath(QStringLiteral("retry-frame.webp"));
+    QFile imageFile(imagePath);
+    QVERIFY(imageFile.open(QIODevice::WriteOnly));
+    QCOMPARE(imageFile.write(sampleWebp()), sampleWebp().size());
+    imageFile.close();
+
+    QTcpServer server;
+    QVERIFY2(server.listen(QHostAddress::LocalHost), qPrintable(server.errorString()));
+    QVector<QByteArray> capturedBodies;
+    installSequentialChatCompletionResponder(
+        &server,
+        &capturedBodies,
+        {
+            {200, emptyReasoningChatResponse()},
+            {200, structuredFrameChatResponse()}
+        });
+
+    VisionApiClient client;
+    QString error;
+    const auto frame = client.analyzeFrame(
+        imagePath,
+        QStringLiteral("retry.mov"),
+        QStringLiteral("http://127.0.0.1:%1/v1").arg(server.serverPort()),
+        QStringLiteral("test-key"),
+        QStringLiteral("test-model"),
+        5,
+        &error);
+
+    QVERIFY2(frame.has_value(), qPrintable(error));
+    QCOMPARE(capturedBodies.size(), 2);
+    QJsonParseError firstParseError;
+    QJsonParseError secondParseError;
+    const auto firstRequest = QJsonDocument::fromJson(
+        capturedBodies.first(), &firstParseError).object();
+    const auto secondRequest = QJsonDocument::fromJson(
+        capturedBodies.at(1), &secondParseError).object();
+    QCOMPARE(firstParseError.error, QJsonParseError::NoError);
+    QCOMPARE(secondParseError.error, QJsonParseError::NoError);
+    QCOMPARE(firstRequest.value(QStringLiteral("messages")),
+             secondRequest.value(QStringLiteral("messages")));
+    QCOMPARE(firstRequest.value(QStringLiteral("max_tokens")).toInt(), 640);
+    QCOMPARE(secondRequest.value(QStringLiteral("max_tokens")).toInt(), 1280);
+    QCOMPARE(secondRequest.value(QStringLiteral("chat_template_kwargs")).toObject()
+                 .value(QStringLiteral("enable_thinking")).toBool(), false);
+}
+
+void VisionApiClientImageTest::analyzeFrame_stopsAfterSingleEmptyContentRetry()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const auto imagePath = QDir(tempDir.path()).filePath(QStringLiteral("empty-frame.webp"));
+    QFile imageFile(imagePath);
+    QVERIFY(imageFile.open(QIODevice::WriteOnly));
+    QCOMPARE(imageFile.write(sampleWebp()), sampleWebp().size());
+    imageFile.close();
+
+    QTcpServer server;
+    QVERIFY2(server.listen(QHostAddress::LocalHost), qPrintable(server.errorString()));
+    QVector<QByteArray> capturedBodies;
+    installSequentialChatCompletionResponder(
+        &server,
+        &capturedBodies,
+        {
+            {200, emptyReasoningChatResponse()},
+            {200, emptyReasoningChatResponse()}
+        });
+
+    VisionApiClient client;
+    QString error;
+    const auto frame = client.analyzeFrame(
+        imagePath,
+        QStringLiteral("empty.mov"),
+        QStringLiteral("http://127.0.0.1:%1/v1").arg(server.serverPort()),
+        QStringLiteral("test-key"),
+        QStringLiteral("test-model"),
+        5,
+        &error);
+
+    QVERIFY(!frame.has_value());
+    QCOMPARE(capturedBodies.size(), 2);
+    QVERIFY(error.contains(QStringLiteral("token 上限")));
+    QVERIFY(error.contains(QStringLiteral("仅返回推理内容")));
+    QVERIFY(!error.contains(QStringLiteral("自动修复失败")));
+    QVERIFY(!error.contains(QStringLiteral("纯文本兜底失败")));
 }
 
 void VisionApiClientImageTest::analyzeImage_decodesWebpToJpegDataUrl()

@@ -52,7 +52,9 @@ public:
 #endif
     }
 
-    RawWorkerReply sendRequest(const QString &command, const QJsonObject &payload)
+    RawWorkerReply sendRequest(const QString &command,
+                               const QJsonObject &payload,
+                               int timeoutOverrideMs)
     {
         if (command.trimmed().isEmpty()) {
             return clientError(QStringLiteral("invalid_request"),
@@ -65,6 +67,9 @@ public:
             return clientError(QStringLiteral("worker_unavailable"), startupError, true);
         }
 
+        const auto requestTimeoutMs = timeoutOverrideMs > 0
+            ? qBound(100, timeoutOverrideMs, m_requestTimeoutMs)
+            : m_requestTimeoutMs;
         const auto requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
         const QJsonObject request = {
             {QStringLiteral("protocolVersion"), RawPreviewProtocol::ProtocolVersion},
@@ -82,14 +87,14 @@ public:
                                      QStringLiteral("无法向 RAW worker 写入请求：%1")
                                          .arg(m_process->errorString()));
         }
-        if (!m_process->waitForBytesWritten(qMin(3000, m_requestTimeoutMs))) {
+        if (!m_process->waitForBytesWritten(qMin(3000, requestTimeoutMs))) {
             return restartAfterError(QStringLiteral("write_timeout"),
                                      QStringLiteral("向 RAW worker 写入请求超时"));
         }
 
         QElapsedTimer elapsed;
         elapsed.start();
-        while (elapsed.elapsed() < m_requestTimeoutMs) {
+        while (elapsed.elapsed() < requestTimeoutMs) {
             QJsonObject response;
             const auto status = RawPreviewProtocol::tryTakeMessage(
                 &m_stdoutBuffer, &response, &protocolError);
@@ -100,7 +105,7 @@ public:
                 return parseResponse(requestId, response);
             }
 
-            const auto remaining = m_requestTimeoutMs - static_cast<int>(elapsed.elapsed());
+            const auto remaining = requestTimeoutMs - static_cast<int>(elapsed.elapsed());
             if (remaining <= 0) {
                 break;
             }
@@ -119,7 +124,7 @@ public:
 
         return restartAfterError(QStringLiteral("timeout"),
                                  QStringLiteral("RAW worker 请求超过 %1 毫秒，旧进程已终止")
-                                     .arg(m_requestTimeoutMs));
+                                     .arg(requestTimeoutMs));
     }
 
     void stop()
@@ -270,12 +275,14 @@ RawWorkerClient::~RawWorkerClient()
     m_ioThread.wait(3000);
 }
 
-RawWorkerReply RawWorkerClient::sendRequest(const QString &command, const QJsonObject &payload)
+RawWorkerReply RawWorkerClient::sendRequest(const QString &command,
+                                            const QJsonObject &payload,
+                                            int timeoutOverrideMs)
 {
     RawWorkerReply reply;
     QMetaObject::invokeMethod(m_session,
-                              [this, &reply, command, payload]() {
-        reply = m_session->sendRequest(command, payload);
+                              [this, &reply, command, payload, timeoutOverrideMs]() {
+        reply = m_session->sendRequest(command, payload, timeoutOverrideMs);
     },
                               Qt::BlockingQueuedConnection);
     return reply;
@@ -283,6 +290,7 @@ RawWorkerReply RawWorkerClient::sendRequest(const QString &command, const QJsonO
 
 RawWorkerReply RawWorkerClient::decode(QJsonObject payload)
 {
+    constexpr int DecodeWatchdogTimeoutMs = 90000;
     QStringList providers;
     const auto sourcePath = payload.value(QStringLiteral("sourcePath")).toString();
     if (QFileInfo(sourcePath).suffix().compare(QStringLiteral("gpr"), Qt::CaseInsensitive) == 0) {
@@ -297,9 +305,18 @@ RawWorkerReply RawWorkerClient::decode(QJsonObject payload)
     });
     QJsonArray recoveryAttempts;
     RawWorkerReply reply;
+    QElapsedTimer watchdog;
+    watchdog.start();
     for (int providerIndex = 0; providerIndex < providers.size(); ++providerIndex) {
+        const auto remainingMs = DecodeWatchdogTimeoutMs
+            - static_cast<int>(watchdog.elapsed());
+        if (remainingMs <= 0) {
+            return clientError(QStringLiteral("timeout"),
+                               QStringLiteral("RAW 自动恢复超过 90 秒，已中断并等待重试"),
+                               true);
+        }
         payload.insert(QStringLiteral("providerStartIndex"), providerIndex);
-        reply = sendRequest(QStringLiteral("decode"), payload);
+        reply = sendRequest(QStringLiteral("decode"), payload, remainingMs);
         if (reply.ok) {
             auto attempts = recoveryAttempts;
             for (const auto &attempt : reply.result.value(QStringLiteral("attempts")).toArray()) {

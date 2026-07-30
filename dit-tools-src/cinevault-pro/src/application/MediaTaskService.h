@@ -3,6 +3,7 @@
 #include "domain/Entities.h"
 
 #include <QFutureSynchronizer>
+#include <QHash>
 #include <QMutex>
 #include <QObject>
 #include <QSet>
@@ -12,6 +13,7 @@
 class DatabaseManager;
 class JobEngine;
 class IndexingWorkCoordinator;
+class JobProgressHeartbeat;
 class MediaProbeEngine;
 class QSqlDatabase;
 class ThumbnailEngine;
@@ -72,8 +74,16 @@ private:
                          qint64 total,
                          quint64 workGeneration);
     bool markThumbnailRunning(QSqlDatabase &db, qint64 assetId, QString *errorMessage) const;
-    bool persistMediaProbe(QSqlDatabase &db, const MediaProbeResult &result, QString *errorMessage) const;
-    bool persistThumbnail(QSqlDatabase &db, const ThumbnailResult &result, QString *errorMessage) const;
+    bool persistMediaProbe(QSqlDatabase &db,
+                           const MediaProbeResult &result,
+                           bool *retryScheduled,
+                           int *retryDelayMs,
+                           QString *errorMessage) const;
+    bool persistThumbnail(QSqlDatabase &db,
+                          const ThumbnailResult &result,
+                          bool *retryScheduled,
+                          int *retryDelayMs,
+                          QString *errorMessage) const;
     bool invalidateEvictedThumbnails(QSqlDatabase &db,
                                      const ThumbnailCacheQuotaResult &quotaResult,
                                      QString *errorMessage) const;
@@ -82,21 +92,33 @@ private:
                    qint64 progress,
                    const QString &detail,
                    const JobProgressContext &progressContext = JobProgressContext());
+    void startJobHeartbeat(const QString &projectDatabasePath,
+                           qint64 jobId,
+                           qint64 progress,
+                           const QString &detailPrefix,
+                           const JobProgressContext &progressContext,
+                           const QString &waitLabel);
+    void stopJobHeartbeat(qint64 jobId);
     void completeJob(const QString &projectDatabasePath, qint64 jobId, const QString &detail);
     void failJob(const QString &projectDatabasePath, qint64 jobId, const QString &errorMessage);
     void releaseActiveKey(const QString &activeKey);
+    void scheduleSourceRootRetry(const QString &projectDatabasePath,
+                                 qint64 sourceRootId,
+                                 int delayMs);
     void notifyCatalogChanged(const QString &projectDatabasePath);
     void flushCatalogChanged(const QString &projectDatabasePath);
     void publishPendingCatalogChanges();
 
     DatabaseManager *m_databaseManager = nullptr;
     JobEngine *m_jobEngine = nullptr;
+    JobProgressHeartbeat *m_jobHeartbeat = nullptr;
     MediaProbeEngine *m_mediaProbeEngine = nullptr;
     ThumbnailEngine *m_thumbnailEngine = nullptr;
     IndexingWorkCoordinator *m_workCoordinator = nullptr;
     QFutureSynchronizer<void> m_futures;
     QMutex m_activeKeysMutex;
     QSet<QString> m_activeKeys;
+    QHash<QString, QTimer *> m_retryTimers;
     QTimer m_catalogChangeTimer;
     QSet<QString> m_pendingCatalogPaths;
 };

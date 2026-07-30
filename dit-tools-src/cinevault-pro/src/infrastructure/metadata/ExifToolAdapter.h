@@ -54,6 +54,7 @@ public:
     [[nodiscard]] QString version() const;
 
     QVector<EmbeddedMetadataResult> extract(const QVector<AssetFile> &assets) const;
+    QVector<EmbeddedMetadataResult> extract(const QVector<AssetFile> &assets, int timeoutMs) const;
 
 private:
     QString m_executablePath;

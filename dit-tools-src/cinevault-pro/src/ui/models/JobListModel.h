@@ -27,7 +27,9 @@ public:
         SubjectTypeLabelRole,
         ProgressLabelRole,
         ProgressShortLabelRole,
-        StepLabelRole
+        StepLabelRole,
+        CanRemoveRole,
+        IndeterminateRole
     };
 
     explicit JobListModel(QObject *parent = nullptr);

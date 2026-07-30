@@ -8,15 +8,24 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSet>
 #include <QSqlDatabase>
 #include <QSqlError>
 #include <QSqlQuery>
+#include <QStringList>
 #include <QUuid>
 
 #include <functional>
 
 namespace {
 constexpr int kMaxLoadedJobs = 500;
+
+bool isFinishedJobState(JobState state)
+{
+    return state == JobState::Completed
+        || state == JobState::Failed
+        || state == JobState::Cancelled;
+}
 
 bool hasProgressContext(const JobProgressContext &context)
 {
@@ -498,12 +507,41 @@ void JobEngine::clearJobs()
     emit jobsChanged();
 }
 
-void JobEngine::clearCompletedJobs()
+bool JobEngine::removeFinishedJob(qint64 jobId)
+{
+    qsizetype jobIndex = -1;
+    for (qsizetype index = 0; index < m_jobs.size(); ++index) {
+        if (m_jobs.at(index).id == jobId) {
+            jobIndex = index;
+            break;
+        }
+    }
+    if (jobIndex < 0 || !isFinishedJobState(m_jobs.at(jobIndex).state)) {
+        return false;
+    }
+
+    if (m_databaseManager && m_databaseManager->hasOpenProject()) {
+        QSqlQuery query(m_databaseManager->database());
+        query.prepare(QStringLiteral("DELETE FROM job WHERE id = ?"));
+        query.addBindValue(jobId);
+        if (!query.exec()) {
+            reportPersistenceError(
+                QStringLiteral("删除已结束任务失败：%1").arg(query.lastError().text()));
+            return false;
+        }
+    }
+
+    m_jobs.removeAt(jobIndex);
+    emit jobsChanged();
+    return true;
+}
+
+void JobEngine::clearFinishedJobs()
 {
     QVector<Job> keptJobs;
     keptJobs.reserve(m_jobs.size());
     for (const auto &job : m_jobs) {
-        if (job.state != JobState::Completed) {
+        if (!isFinishedJobState(job.state)) {
             keptJobs.append(job);
         }
     }
@@ -514,16 +552,73 @@ void JobEngine::clearCompletedJobs()
 
     if (m_databaseManager && m_databaseManager->hasOpenProject()) {
         QSqlQuery query(m_databaseManager->database());
-        query.prepare(QStringLiteral("DELETE FROM job WHERE state = ?"));
+        query.prepare(QStringLiteral("DELETE FROM job WHERE state IN (?, ?, ?)"));
         query.addBindValue(static_cast<int>(JobState::Completed));
+        query.addBindValue(static_cast<int>(JobState::Failed));
+        query.addBindValue(static_cast<int>(JobState::Cancelled));
         if (!query.exec()) {
             reportPersistenceError(
-                QStringLiteral("清理已完成任务失败：%1").arg(query.lastError().text()));
+                QStringLiteral("清理已结束任务失败：%1").arg(query.lastError().text()));
             return;
         }
     }
     m_jobs = keptJobs;
     emit jobsChanged();
+}
+
+void JobEngine::clearFailedJobsForRetry(qint64 sourceRootId,
+                                        const QVector<JobType> &types)
+{
+    if (sourceRootId <= 0 || types.isEmpty()) {
+        return;
+    }
+
+    QSet<int> typeValues;
+    QStringList placeholders;
+    for (const auto type : types) {
+        const auto value = static_cast<int>(type);
+        if (typeValues.contains(value)) {
+            continue;
+        }
+        typeValues.insert(value);
+        placeholders.append(QStringLiteral("?"));
+    }
+    if (typeValues.isEmpty()) {
+        return;
+    }
+
+    if (m_databaseManager && m_databaseManager->hasOpenProject()) {
+        QSqlQuery query(m_databaseManager->database());
+        query.prepare(QStringLiteral(
+            "DELETE FROM job WHERE state = ? AND source_root_id = ? AND type IN (%1)")
+                          .arg(placeholders.join(QStringLiteral(","))));
+        query.addBindValue(static_cast<int>(JobState::Failed));
+        query.addBindValue(sourceRootId);
+        for (const auto value : std::as_const(typeValues)) {
+            query.addBindValue(value);
+        }
+        if (!query.exec()) {
+            reportPersistenceError(
+                QStringLiteral("自动清理已替代失败任务失败：%1")
+                    .arg(query.lastError().text()));
+            return;
+        }
+    }
+
+    QVector<Job> keptJobs;
+    keptJobs.reserve(m_jobs.size());
+    for (const auto &job : std::as_const(m_jobs)) {
+        if (job.state == JobState::Failed
+            && job.sourceRootId == sourceRootId
+            && typeValues.contains(static_cast<int>(job.type))) {
+            continue;
+        }
+        keptJobs.append(job);
+    }
+    if (keptJobs.size() != m_jobs.size()) {
+        m_jobs = std::move(keptJobs);
+        emit jobsChanged();
+    }
 }
 
 QVector<Job> JobEngine::jobs() const

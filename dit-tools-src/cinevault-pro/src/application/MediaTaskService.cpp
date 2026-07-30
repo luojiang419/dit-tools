@@ -1,6 +1,7 @@
 #include "application/MediaTaskService.h"
 
 #include "application/IndexingWorkCoordinator.h"
+#include "application/JobProgressHeartbeat.h"
 
 #include "core/jobs/JobEngine.h"
 #include "core/media/MediaProbeEngine.h"
@@ -28,12 +29,108 @@
 #include <QThread>
 
 #include <utility>
+#include <array>
 #include <exception>
 
 namespace {
 constexpr qint64 ProgressMinPublishIntervalMs = 250;
 constexpr qint64 ProgressMaxPublishIntervalMs = 500;
 constexpr int CatalogPublishIntervalMs = 500;
+constexpr qsizetype MaxItemsPerJob = 128;
+constexpr int ThumbnailRetryPolicyVersion = 1;
+constexpr int MaxThumbnailRetryCount = 3;
+constexpr int MetadataRetryPolicyVersion = 1;
+constexpr int MaxMetadataRetryCount = 3;
+constexpr int WorkLeaseTimeoutMs = 30000;
+constexpr int ImmediateContinuationDelayMs = 250;
+constexpr std::array<int, MaxThumbnailRetryCount> ThumbnailRetryDelaysMs = {
+    5000,
+    30000,
+    120000,
+};
+constexpr std::array<int, MaxMetadataRetryCount> MetadataRetryDelaysMs = {
+    5000,
+    30000,
+    120000,
+};
+
+int thumbnailRetryDelayMs(int retryCount)
+{
+    const auto index = qBound(1, retryCount, MaxThumbnailRetryCount) - 1;
+    return ThumbnailRetryDelaysMs.at(static_cast<size_t>(index));
+}
+
+int metadataRetryDelayMs(int retryCount)
+{
+    const auto index = qBound(1, retryCount, MaxMetadataRetryCount) - 1;
+    return MetadataRetryDelaysMs.at(static_cast<size_t>(index));
+}
+
+QString pendingMetadataPredicate(const QString &metadataAlias)
+{
+    return QStringLiteral(
+        "AND (%1.asset_id IS NULL OR (%1.probe_status = %2 "
+        "AND COALESCE(%1.failure_kind, '') = 'transient' "
+        "AND COALESCE(%1.retry_count, 0) <= %3 "
+        "AND COALESCE(%1.next_retry_at, '') <> '' "
+        "AND %1.next_retry_at <= ?)) ")
+        .arg(metadataAlias)
+        .arg(static_cast<int>(ProbeStatus::Failed))
+        .arg(MaxMetadataRetryCount);
+}
+
+bool retryableMetadataError(const QString &message)
+{
+    const auto normalized = message.toCaseFolded();
+    return normalized.contains(QStringLiteral("超时"))
+        || normalized.contains(QStringLiteral("temporarily unavailable"))
+        || normalized.contains(QStringLiteral("input/output"))
+        || normalized.contains(QStringLiteral("i/o error"))
+        || normalized.contains(QStringLiteral("sharing violation"))
+        || normalized.contains(QStringLiteral("being used by another process"));
+}
+
+bool retryableMediaProbeFailure(const MediaProbeResult &result)
+{
+    return result.status == ProbeStatus::Failed
+        && retryableMetadataError(result.errorMessage);
+}
+
+QString technicalMetadataProgressDetail(qint64 processed,
+                                        qint64 total,
+                                        qint64 failed,
+                                        qint64 deferred)
+{
+    auto detail = QStringLiteral("已读取技术参数 %1/%2 个文件，失败 %3 个")
+                      .arg(processed)
+                      .arg(total)
+                      .arg(failed);
+    if (deferred > 0) {
+        detail += QStringLiteral("，待重试 %1 个").arg(deferred);
+    }
+    return detail;
+}
+
+QString pendingThumbnailPredicate(const QString &thumbnailAlias)
+{
+    return QStringLiteral(
+        "AND (%1.asset_id IS NULL OR %1.status IN (%2, %3) "
+        "OR (%1.status = %4 AND COALESCE(%1.image_path, '') = '') "
+        "OR (%1.status = %5 AND ("
+        "(LOWER(COALESCE(af.extension, '')) IN ('cr2', 'cr3') "
+        "AND COALESCE(%1.retry_policy_version, 0) < %6) "
+        "OR (COALESCE(%1.failure_kind, '') = 'transient' "
+        "AND COALESCE(%1.retry_count, 0) <= %7 "
+        "AND COALESCE(%1.next_retry_at, '') <> '' "
+        "AND %1.next_retry_at <= ?)))) ")
+        .arg(thumbnailAlias)
+        .arg(static_cast<int>(ThumbnailStatus::Pending))
+        .arg(static_cast<int>(ThumbnailStatus::Running))
+        .arg(static_cast<int>(ThumbnailStatus::Success))
+        .arg(static_cast<int>(ThumbnailStatus::Failed))
+        .arg(ThumbnailRetryPolicyVersion)
+        .arg(MaxThumbnailRetryCount);
+}
 
 qint64 progressFor(qint64 processed, qint64 total)
 {
@@ -41,6 +138,23 @@ qint64 progressFor(qint64 processed, qint64 total)
         return 100;
     }
     return qBound<qint64>(qint64{1}, (static_cast<qint64>(processed) * 100) / static_cast<qint64>(total), qint64{100});
+}
+
+qint64 activeProgressFor(qint64 processed, qint64 total)
+{
+    if (total <= 0) {
+        return 100;
+    }
+    return processed <= 0 ? qint64{1} : progressFor(processed, total);
+}
+
+QString assetDisplayName(const AssetFile &asset)
+{
+    const auto name = asset.name.trimmed();
+    if (!name.isEmpty()) {
+        return name;
+    }
+    return QFileInfo(asset.absolutePath).fileName();
 }
 
 JobSubject sourceRootSubject(qint64 sourceRootId, const QString &sourceName, const QString &sourcePath)
@@ -104,6 +218,7 @@ MediaTaskService::MediaTaskService(DatabaseManager *databaseManager,
     : QObject(parent)
     , m_databaseManager(databaseManager)
     , m_jobEngine(jobEngine)
+    , m_jobHeartbeat(new JobProgressHeartbeat(jobEngine, this))
     , m_mediaProbeEngine(mediaProbeEngine)
     , m_thumbnailEngine(thumbnailEngine)
 {
@@ -135,38 +250,106 @@ void MediaTaskService::startForSourceRoot(qint64 sourceRootId)
         return;
     }
 
+    const auto now = QDateTime::currentDateTime();
+    const auto projectDatabasePath = m_databaseManager->databaseFilePath();
     QSqlQuery query(m_databaseManager->database());
     query.prepare(QStringLiteral(
         "SELECT sr.name, sr.path, "
         "(SELECT COUNT(*) FROM asset_file af LEFT JOIN media_metadata mm ON mm.asset_id = af.id "
-        " WHERE af.source_root_id = sr.id AND af.is_readable = 1 AND af.asset_type IN (?, ?, ?) AND mm.asset_id IS NULL), "
+        " WHERE af.source_root_id = sr.id AND af.is_readable = 1 AND af.asset_type IN (?, ?, ?) %1), "
         "(SELECT COUNT(*) FROM asset_file af LEFT JOIN thumbnail th ON th.asset_id = af.id "
-        " WHERE af.source_root_id = sr.id AND af.is_readable = 1 AND af.asset_type IN (?, ?) "
-        " AND (th.asset_id IS NULL OR th.status <> ? OR COALESCE(th.image_path, '') = '')) "
-        "FROM source_root sr WHERE sr.id = ?"));
+        " WHERE af.source_root_id = sr.id AND af.is_readable = 1 AND af.asset_type IN (?, ?) %2) "
+        "FROM source_root sr WHERE sr.id = ?")
+                      .arg(pendingMetadataPredicate(QStringLiteral("mm")),
+                           pendingThumbnailPredicate(QStringLiteral("th"))));
     query.addBindValue(static_cast<int>(AssetType::Video));
     query.addBindValue(static_cast<int>(AssetType::Audio));
     query.addBindValue(static_cast<int>(AssetType::Image));
+    query.addBindValue(now.toString(Qt::ISODate));
     query.addBindValue(static_cast<int>(AssetType::Video));
     query.addBindValue(static_cast<int>(AssetType::Image));
-    query.addBindValue(static_cast<int>(ThumbnailStatus::Success));
+    query.addBindValue(now.toString(Qt::ISODate));
     query.addBindValue(sourceRootId);
-    if (!query.exec() || !query.next()) {
+    if (!query.exec()) {
+        Logger::warn(QStringLiteral("读取媒体任务待办数量失败：source_root_id=%1 error=%2")
+                         .arg(sourceRootId)
+                         .arg(query.lastError().text()));
+        return;
+    }
+    if (!query.next()) {
+        Logger::warn(QStringLiteral("媒体任务素材源不存在：source_root_id=%1")
+                         .arg(sourceRootId));
         return;
     }
 
     const auto sourceName = query.value(0).toString();
     const auto sourcePath = query.value(1).toString();
-    const auto pendingMetadataCount = query.value(2).toLongLong();
-    const auto pendingThumbnailCount = query.value(3).toLongLong();
-    const bool needsMetadata = pendingMetadataCount > 0;
-    const bool needsThumbnails = pendingThumbnailCount > 0;
+    const auto metadataBacklogCount = query.value(2).toLongLong();
+    const auto thumbnailBacklogCount = query.value(3).toLongLong();
+    const auto pendingMetadataCount = qMin<qint64>(metadataBacklogCount, MaxItemsPerJob);
+    const auto pendingThumbnailCount = qMin<qint64>(thumbnailBacklogCount, MaxItemsPerJob);
+    const bool needsMetadata = pendingMetadataCount > 0 && m_mediaProbeEngine;
+    const bool needsThumbnails = pendingThumbnailCount > 0 && m_thumbnailEngine;
 
     if (!needsMetadata && !needsThumbnails) {
+        qint64 nextDelayMs = -1;
+        const auto rememberSoonestRetry = [&](const QDateTime &retryAt, int maxDelayMs) {
+            if (retryAt.isValid()) {
+                const auto delayMs = qBound<qint64>(
+                    static_cast<qint64>(ImmediateContinuationDelayMs),
+                    now.msecsTo(retryAt),
+                    static_cast<qint64>(maxDelayMs));
+                if (nextDelayMs < 0 || delayMs < nextDelayMs) {
+                    nextDelayMs = delayMs;
+                }
+            }
+        };
+        if (m_mediaProbeEngine) {
+            QSqlQuery nextMetadataRetry(m_databaseManager->database());
+            nextMetadataRetry.prepare(QStringLiteral(
+                "SELECT MIN(mm.next_retry_at) FROM media_metadata mm "
+                "JOIN asset_file af ON af.id = mm.asset_id "
+                "WHERE af.source_root_id = ? AND mm.probe_status = ? "
+                "AND COALESCE(mm.failure_kind, '') = 'transient' "
+                "AND COALESCE(mm.retry_count, 0) <= ? "
+                "AND COALESCE(mm.next_retry_at, '') > ?"));
+            nextMetadataRetry.addBindValue(sourceRootId);
+            nextMetadataRetry.addBindValue(static_cast<int>(ProbeStatus::Failed));
+            nextMetadataRetry.addBindValue(MaxMetadataRetryCount);
+            nextMetadataRetry.addBindValue(now.toString(Qt::ISODate));
+            if (nextMetadataRetry.exec() && nextMetadataRetry.next()) {
+                rememberSoonestRetry(
+                    QDateTime::fromString(nextMetadataRetry.value(0).toString(), Qt::ISODate),
+                    MetadataRetryDelaysMs.back());
+            }
+        }
+        if (m_thumbnailEngine) {
+            QSqlQuery nextThumbnailRetry(m_databaseManager->database());
+            nextThumbnailRetry.prepare(QStringLiteral(
+                "SELECT MIN(th.next_retry_at) FROM thumbnail th "
+                "JOIN asset_file af ON af.id = th.asset_id "
+                "WHERE af.source_root_id = ? AND th.status = ? "
+                "AND COALESCE(th.failure_kind, '') = 'transient' "
+                "AND COALESCE(th.retry_count, 0) <= ? "
+                "AND COALESCE(th.next_retry_at, '') > ?"));
+            nextThumbnailRetry.addBindValue(sourceRootId);
+            nextThumbnailRetry.addBindValue(static_cast<int>(ThumbnailStatus::Failed));
+            nextThumbnailRetry.addBindValue(MaxThumbnailRetryCount);
+            nextThumbnailRetry.addBindValue(now.toString(Qt::ISODate));
+            if (nextThumbnailRetry.exec() && nextThumbnailRetry.next()) {
+                rememberSoonestRetry(
+                    QDateTime::fromString(nextThumbnailRetry.value(0).toString(), Qt::ISODate),
+                    ThumbnailRetryDelaysMs.back());
+            }
+        }
+        if (nextDelayMs >= 0) {
+            scheduleSourceRootRetry(projectDatabasePath,
+                                    sourceRootId,
+                                    static_cast<int>(nextDelayMs));
+        }
         return;
     }
 
-    const auto projectDatabasePath = m_databaseManager->databaseFilePath();
     const auto activeKey = QStringLiteral("%1|%2")
                                .arg(FolderPathMetadata::normalizedPathKey(projectDatabasePath))
                                .arg(sourceRootId);
@@ -178,15 +361,24 @@ void MediaTaskService::startForSourceRoot(qint64 sourceRootId)
         m_activeKeys.insert(activeKey);
     }
 
+    Logger::info(QStringLiteral(
+        "media_task_dispatch source_root_id=%1 metadata_batch=%2 metadata_backlog=%3 "
+        "thumbnail_batch=%4 thumbnail_backlog=%5")
+                     .arg(sourceRootId)
+                     .arg(pendingMetadataCount)
+                     .arg(metadataBacklogCount)
+                     .arg(pendingThumbnailCount)
+                     .arg(thumbnailBacklogCount));
+
     qint64 metadataJobId = 0;
     qint64 thumbnailJobId = 0;
     if (needsMetadata) {
         metadataJobId = m_jobEngine->createJob(JobType::Metadata,
-                                               QStringLiteral("读取元数据 %1").arg(sourceName),
+                                               QStringLiteral("读取技术元数据 %1").arg(sourceName),
                                                QStringLiteral("准备读取视频/音频/图片技术参数"),
                                                sourceRootId,
                                                sourceRootSubject(sourceRootId, sourceName, sourcePath),
-                                               itemProgressContext(QStringLiteral("读取元数据"), 0, pendingMetadataCount, QStringLiteral("个文件")));
+                                               itemProgressContext(QStringLiteral("读取技术参数"), 0, pendingMetadataCount, QStringLiteral("个文件")));
     }
     if (needsThumbnails) {
         thumbnailJobId = m_jobEngine->createJob(JobType::Thumbnail,
@@ -196,6 +388,15 @@ void MediaTaskService::startForSourceRoot(qint64 sourceRootId)
                                                 sourceRootSubject(sourceRootId, sourceName, sourcePath),
                                                 itemProgressContext(QStringLiteral("生成缩略图"), 0, pendingThumbnailCount, QStringLiteral("张")));
     }
+
+    QVector<JobType> retryTypes;
+    if (metadataJobId > 0) {
+        retryTypes.append(JobType::Metadata);
+    }
+    if (thumbnailJobId > 0) {
+        retryTypes.append(JobType::Thumbnail);
+    }
+    m_jobEngine->clearFailedJobsForRetry(sourceRootId, retryTypes);
 
     const auto workGeneration = m_workCoordinator
         ? m_workCoordinator->currentGeneration()
@@ -261,7 +462,8 @@ void MediaTaskService::recoverStaleThumbnails()
                         IndexingWorkCoordinator::Resource::SqliteWriter,
                         IndexingWorkCoordinator::Priority::Background,
                         false,
-                        workGeneration});
+                        workGeneration,
+                        WorkLeaseTimeoutMs});
                 }
                 if (!m_workCoordinator || writerLease) {
                     ThumbnailCacheQuotaResult audit;
@@ -330,20 +532,32 @@ QVector<AssetFile> MediaTaskService::fetchAssets(QSqlDatabase &db,
         ? QStringLiteral("LEFT JOIN media_metadata pending ON pending.asset_id = af.id ")
         : QStringLiteral("LEFT JOIN thumbnail pending ON pending.asset_id = af.id ");
     const auto pendingPredicate = pendingWork == PendingWork::Metadata
-        ? QStringLiteral("AND pending.asset_id IS NULL ")
-        : QStringLiteral("AND (pending.asset_id IS NULL OR pending.status <> %1 OR COALESCE(pending.image_path, '') = '') ")
-              .arg(static_cast<int>(ThumbnailStatus::Success));
+        ? pendingMetadataPredicate(QStringLiteral("pending"))
+        : pendingThumbnailPredicate(QStringLiteral("pending"));
+    const auto ordering = pendingWork == PendingWork::Metadata
+        ? QStringLiteral(
+              "ORDER BY CASE WHEN pending.probe_status = %1 THEN 1 ELSE 0 END, af.id ")
+              .arg(static_cast<int>(ProbeStatus::Failed))
+        : QStringLiteral(
+              "ORDER BY CASE WHEN pending.status = %1 THEN 1 ELSE 0 END, af.id ")
+              .arg(static_cast<int>(ThumbnailStatus::Failed));
     QSqlQuery query(db);
     query.prepare(QStringLiteral(
         "SELECT af.id, af.source_root_id, af.name, af.extension, af.absolute_path, af.relative_path, af.parent_path, "
         "af.asset_type, af.size_bytes, af.modified_at, af.is_readable FROM asset_file af %1"
         "WHERE af.source_root_id = ? AND af.id > ? AND af.is_readable = 1 "
-        "AND af.asset_type IN (%2) %3ORDER BY af.id LIMIT ?")
-                      .arg(join, placeholders.join(QStringLiteral(",")), pendingPredicate));
+        "AND af.asset_type IN (%2) %3%4LIMIT ?")
+                      .arg(join,
+                           placeholders.join(QStringLiteral(",")),
+                           pendingPredicate,
+                           ordering));
     query.addBindValue(sourceRootId);
     query.addBindValue(lastAssetId);
     for (const auto assetType : assetTypes) {
         query.addBindValue(static_cast<int>(assetType));
+    }
+    if (pendingWork == PendingWork::Metadata || pendingWork == PendingWork::Thumbnail) {
+        query.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODate));
     }
     query.addBindValue(qMax<qsizetype>(1, limit));
 
@@ -406,25 +620,35 @@ void MediaTaskService::runMediaJobs(qint64 sourceRootId,
             failJob(projectDatabasePath, thumbnailJobId, errorMessage);
         }
         closeConnection();
+        scheduleSourceRootRetry(projectDatabasePath,
+                                sourceRootId,
+                                thumbnailRetryDelayMs(1));
         return;
     }
 
     // A usable preview is the first visible result after an import. Generate
     // thumbnails before the slower per-file metadata probe so cards populate
     // progressively instead of staying blank until the whole source is probed.
+    bool shouldContinueImmediately = true;
     if (thumbnailJobId > 0) {
-        runThumbnailJob(
+        shouldContinueImmediately = runThumbnailJob(
             db, projectDatabasePath, sourceRootId, thumbnailJobId, thumbnailTotal, workGeneration);
         flushCatalogChanged(projectDatabasePath);
     }
 
     if (metadataJobId > 0) {
-        runMetadataJob(
-            db, projectDatabasePath, metadataJobId, sourceRootId, metadataTotal, workGeneration);
+        shouldContinueImmediately = runMetadataJob(
+            db, projectDatabasePath, metadataJobId, sourceRootId, metadataTotal, workGeneration)
+            && shouldContinueImmediately;
         flushCatalogChanged(projectDatabasePath);
     }
 
     closeConnection();
+    if (shouldContinueImmediately) {
+        scheduleSourceRootRetry(projectDatabasePath,
+                                sourceRootId,
+                                ImmediateContinuationDelayMs);
+    }
 }
 
 bool MediaTaskService::runMetadataJob(QSqlDatabase &db,
@@ -439,7 +663,7 @@ bool MediaTaskService::runMetadataJob(QSqlDatabase &db,
         return false;
     }
     if (total <= 0) {
-        completeJob(projectDatabasePath, jobId, QStringLiteral("没有需要读取元数据的文件"));
+        completeJob(projectDatabasePath, jobId, QStringLiteral("没有需要读取技术元数据的文件"));
         return true;
     }
 
@@ -447,9 +671,10 @@ bool MediaTaskService::runMetadataJob(QSqlDatabase &db,
     auto &telemetry = PerformanceTelemetry::global();
     qint64 processed = 0;
     qint64 failed = 0;
+    qint64 deferred = 0;
     qint64 lastAssetId = 0;
     ProgressPublishGate progressGate;
-    while (true) {
+    while (processed < total) {
         QString fetchError;
         const auto assets = fetchAssets(
             db,
@@ -457,7 +682,7 @@ bool MediaTaskService::runMetadataJob(QSqlDatabase &db,
             {AssetType::Video, AssetType::Audio, AssetType::Image},
             PendingWork::Metadata,
             lastAssetId,
-            PageSize,
+            static_cast<qsizetype>(qMin<qint64>(PageSize, total - processed)),
             &fetchError);
         if (!fetchError.isEmpty()) {
             telemetry.setQueueDepth(QStringLiteral("media.ffprobe_assets"), 0);
@@ -467,26 +692,57 @@ bool MediaTaskService::runMetadataJob(QSqlDatabase &db,
         if (assets.isEmpty()) {
             break;
         }
-        IndexingWorkCoordinator::Lease heavyIoLease;
-        if (m_workCoordinator) {
-            heavyIoLease = m_workCoordinator->acquire({
-                IndexingWorkCoordinator::Resource::HeavyIo,
-                IndexingWorkCoordinator::Priority::Background,
-                true,
-                workGeneration});
-            if (!heavyIoLease) {
-                failJob(projectDatabasePath,
-                        jobId,
-                        QStringLiteral("元数据任务因项目切换、队列拥塞或应用退出而取消"));
-                return false;
-            }
-        }
         telemetry.setQueueDepth(QStringLiteral("media.ffprobe_assets"), assets.size());
         lastAssetId = assets.constLast().id;
         for (const auto &asset : assets) {
+            const auto activeItem = qMin<qint64>(processed + 1, total);
+            const auto activeProgress = activeProgressFor(processed, total);
+            const auto activeContext = itemProgressContext(
+                QStringLiteral("读取技术参数"), activeItem, total, QStringLiteral("个文件"));
+            const auto activeDetail = QStringLiteral("正在读取技术参数 %1/%2 个文件：%3")
+                                          .arg(activeItem)
+                                          .arg(total)
+                                          .arg(assetDisplayName(asset));
+            IndexingWorkCoordinator::Lease heavyIoLease;
+            if (m_workCoordinator) {
+                startJobHeartbeat(projectDatabasePath,
+                                  jobId,
+                                  activeProgress,
+                                  activeDetail,
+                                  activeContext,
+                                  QStringLiteral("等待执行资源"));
+                const auto heartbeatGuard = qScopeGuard([this, jobId]() {
+                    stopJobHeartbeat(jobId);
+                });
+                heavyIoLease = m_workCoordinator->acquire({
+                    IndexingWorkCoordinator::Resource::HeavyIo,
+                    IndexingWorkCoordinator::Priority::Background,
+                    false,
+                    workGeneration,
+                    WorkLeaseTimeoutMs});
+                if (!heavyIoLease) {
+                    telemetry.setQueueDepth(QStringLiteral("media.ffprobe_assets"), 0);
+                    failJob(projectDatabasePath,
+                            jobId,
+                            QStringLiteral("元数据任务等待执行资源超时，已安排自动重试"));
+                    scheduleSourceRootRetry(projectDatabasePath,
+                                            sourceRootId,
+                                            metadataRetryDelayMs(1));
+                    return false;
+                }
+            }
             MediaProbeResult result;
             result.assetId = asset.id;
             try {
+                startJobHeartbeat(projectDatabasePath,
+                                  jobId,
+                                  activeProgress,
+                                  activeDetail,
+                                  activeContext,
+                                  QStringLiteral("ffprobe"));
+                const auto heartbeatGuard = qScopeGuard([this, jobId]() {
+                    stopJobHeartbeat(jobId);
+                });
                 result = m_mediaProbeEngine->probe(asset);
             } catch (const std::exception &exception) {
                 result.status = ProbeStatus::Failed;
@@ -496,27 +752,55 @@ bool MediaTaskService::runMetadataJob(QSqlDatabase &db,
                 result.status = ProbeStatus::Failed;
                 result.errorMessage = QStringLiteral("外部媒体探测发生未知异常");
             }
+            heavyIoLease.reset();
             QString persistError;
             IndexingWorkCoordinator::Lease writerLease;
             if (m_workCoordinator) {
+                startJobHeartbeat(projectDatabasePath,
+                                  jobId,
+                                  activeProgress,
+                                  activeDetail,
+                                  activeContext,
+                                  QStringLiteral("等待写入资源"));
+                const auto heartbeatGuard = qScopeGuard([this, jobId]() {
+                    stopJobHeartbeat(jobId);
+                });
                 writerLease = m_workCoordinator->acquire({
                     IndexingWorkCoordinator::Resource::SqliteWriter,
                     IndexingWorkCoordinator::Priority::Background,
                     false,
-                    workGeneration});
+                    workGeneration,
+                    WorkLeaseTimeoutMs});
             }
             if (m_workCoordinator && !writerLease) {
                 failJob(projectDatabasePath,
                         jobId,
-                        QStringLiteral("元数据写入因项目切换、队列拥塞或应用退出而取消"));
+                        QStringLiteral("元数据写入等待超时，已安排自动重试"));
+                scheduleSourceRootRetry(projectDatabasePath,
+                                        sourceRootId,
+                                        metadataRetryDelayMs(1));
                 return false;
             }
-            if (!persistMediaProbe(db, result, &persistError)) {
+            bool retryScheduled = false;
+            int retryDelayMs = 0;
+            if (!persistMediaProbe(db,
+                                   result,
+                                   &retryScheduled,
+                                   &retryDelayMs,
+                                   &persistError)) {
                 Logger::warn(QStringLiteral(
-                    "单文件元数据写入失败，已跳过并继续：asset_id=%1 error=%2")
+                    "单文件元数据写入失败，已延后重试：asset_id=%1 error=%2")
                                  .arg(asset.id)
                                  .arg(persistError));
-                ++failed;
+                ++deferred;
+                scheduleSourceRootRetry(projectDatabasePath,
+                                        sourceRootId,
+                                        metadataRetryDelayMs(1));
+            } else if (retryScheduled) {
+                ++deferred;
+                scheduleSourceRootRetry(projectDatabasePath,
+                                        sourceRootId,
+                                        retryDelayMs);
             } else if (result.status != ProbeStatus::Success) {
                 ++failed;
             }
@@ -527,10 +811,9 @@ bool MediaTaskService::runMetadataJob(QSqlDatabase &db,
                 updateJob(projectDatabasePath,
                           jobId,
                           progress,
-                          QStringLiteral("已读取 %1/%2 个文件，失败 %3 个")
-                              .arg(processed).arg(total).arg(failed),
+                          technicalMetadataProgressDetail(processed, total, failed, deferred),
                           itemProgressContext(
-                              QStringLiteral("读取元数据"), processed, total, QStringLiteral("个文件")));
+                              QStringLiteral("读取技术参数"), processed, total, QStringLiteral("个文件")));
             }
         }
         telemetry.setQueueDepth(QStringLiteral("media.ffprobe_assets"), 0);
@@ -541,20 +824,35 @@ bool MediaTaskService::runMetadataJob(QSqlDatabase &db,
         updateJob(projectDatabasePath,
                   jobId,
                   finalProgress,
-                  QStringLiteral("已读取 %1/%2 个文件，失败 %3 个")
-                      .arg(processed).arg(total).arg(failed),
+                  technicalMetadataProgressDetail(processed, total, failed, deferred),
                   itemProgressContext(
-                      QStringLiteral("读取元数据"), processed, total, QStringLiteral("个文件")));
+                      QStringLiteral("读取技术参数"), processed, total, QStringLiteral("个文件")));
     }
 
-    if (processed > 0 && failed == processed) {
-        failJob(projectDatabasePath, jobId, QStringLiteral("元数据任务失败：%1 个文件均未成功").arg(failed));
+    if (processed > 0 && failed == processed && deferred == 0) {
+        failJob(projectDatabasePath, jobId, QStringLiteral("技术元数据任务失败：%1 个文件均未成功").arg(failed));
         return false;
     }
 
-    completeJob(projectDatabasePath, jobId, failed > 0
-        ? QStringLiteral("元数据读取完成，成功 %1 个，失败 %2 个").arg(processed - failed).arg(failed)
-        : QStringLiteral("元数据读取完成，共 %1 个文件").arg(processed));
+    const auto successful = qMax<qint64>(0, processed - failed - deferred);
+    if (failed > 0 && deferred > 0) {
+        completeJob(projectDatabasePath,
+                    jobId,
+                    QStringLiteral("技术元数据读取完成，成功 %1 个，失败 %2 个，待重试 %3 个")
+                        .arg(successful)
+                        .arg(failed)
+                        .arg(deferred));
+    } else if (deferred > 0) {
+        completeJob(projectDatabasePath,
+                    jobId,
+                    QStringLiteral("技术元数据读取完成，成功 %1 个，待重试 %2 个")
+                        .arg(successful)
+                        .arg(deferred));
+    } else {
+        completeJob(projectDatabasePath, jobId, failed > 0
+            ? QStringLiteral("技术元数据读取完成，成功 %1 个，失败 %2 个").arg(successful).arg(failed)
+            : QStringLiteral("技术元数据读取完成，共 %1 个文件").arg(processed));
+    }
     return true;
 }
 
@@ -578,10 +876,11 @@ bool MediaTaskService::runThumbnailJob(QSqlDatabase &db,
     auto &telemetry = PerformanceTelemetry::global();
     qint64 processed = 0;
     qint64 failed = 0;
+    qint64 deferred = 0;
     qint64 lastAssetId = 0;
     ProgressPublishGate progressGate;
     QElapsedTimer catalogPublishClock;
-    while (true) {
+    while (processed < total) {
         QString fetchError;
         const auto assets = fetchAssets(
             db,
@@ -589,7 +888,7 @@ bool MediaTaskService::runThumbnailJob(QSqlDatabase &db,
             {AssetType::Video, AssetType::Image},
             PendingWork::Thumbnail,
             lastAssetId,
-            PageSize,
+            static_cast<qsizetype>(qMin<qint64>(PageSize, total - processed)),
             &fetchError);
         if (!fetchError.isEmpty()) {
             telemetry.setQueueDepth(QStringLiteral("media.thumbnail_assets"), 0);
@@ -598,20 +897,6 @@ bool MediaTaskService::runThumbnailJob(QSqlDatabase &db,
         }
         if (assets.isEmpty()) {
             break;
-        }
-        IndexingWorkCoordinator::Lease heavyIoLease;
-        if (m_workCoordinator) {
-            heavyIoLease = m_workCoordinator->acquire({
-                IndexingWorkCoordinator::Resource::HeavyIo,
-                IndexingWorkCoordinator::Priority::Foreground,
-                false,
-                workGeneration});
-            if (!heavyIoLease) {
-                failJob(projectDatabasePath,
-                        jobId,
-                        QStringLiteral("缩略图任务因项目切换、队列拥塞或应用退出而取消"));
-                return false;
-            }
         }
         telemetry.setQueueDepth(QStringLiteral("media.thumbnail_assets"), assets.size());
         lastAssetId = assets.constLast().id;
@@ -629,11 +914,12 @@ bool MediaTaskService::runThumbnailJob(QSqlDatabase &db,
                     IndexingWorkCoordinator::Resource::SqliteWriter,
                     IndexingWorkCoordinator::Priority::Foreground,
                     false,
-                    workGeneration});
+                    workGeneration,
+                    WorkLeaseTimeoutMs});
             }
             if (m_workCoordinator && !writerLease) {
                 if (quotaError) {
-                    *quotaError = QStringLiteral("项目切换或应用退出，引用修复留待下次恢复");
+                    *quotaError = QStringLiteral("缩略图引用修复等待写入资源超时，留待下次恢复");
                 }
                 return false;
             }
@@ -650,6 +936,8 @@ bool MediaTaskService::runThumbnailJob(QSqlDatabase &db,
         }
         qint64 trackedCacheBytes = quota.bytesAfter;
         for (const auto &asset : assets) {
+            QElapsedTimer assetWatchdog;
+            assetWatchdog.start();
             QString stateError;
             {
                 IndexingWorkCoordinator::Lease writerLease;
@@ -658,21 +946,28 @@ bool MediaTaskService::runThumbnailJob(QSqlDatabase &db,
                         IndexingWorkCoordinator::Resource::SqliteWriter,
                         IndexingWorkCoordinator::Priority::Foreground,
                         false,
-                        workGeneration});
+                        workGeneration,
+                        WorkLeaseTimeoutMs});
                 }
                 if (m_workCoordinator && !writerLease) {
                     failJob(projectDatabasePath,
                             jobId,
-                            QStringLiteral("缩略图状态写入因项目切换或应用退出而取消"));
+                            QStringLiteral("缩略图状态写入等待超时，已安排自动重试"));
+                    scheduleSourceRootRetry(projectDatabasePath,
+                                            sourceRootId,
+                                            thumbnailRetryDelayMs(1));
                     return false;
                 }
                 if (!markThumbnailRunning(db, asset.id, &stateError)) {
                     Logger::warn(QStringLiteral(
-                        "单文件缩略图状态写入失败，已跳过并继续：asset_id=%1 error=%2")
+                        "单文件缩略图状态写入失败，已延后重试：asset_id=%1 error=%2")
                                      .arg(asset.id)
                                      .arg(stateError));
-                    ++failed;
+                    ++deferred;
                     ++processed;
+                    scheduleSourceRootRetry(projectDatabasePath,
+                                            sourceRootId,
+                                            thumbnailRetryDelayMs(1));
                     continue;
                 }
             }
@@ -691,18 +986,40 @@ bool MediaTaskService::runThumbnailJob(QSqlDatabase &db,
                 result.errorMessage = QStringLiteral(
                     "缩略图缓存已达到硬上限，当前文件已跳过；不会删除数据库或用户文件");
             } else {
+                IndexingWorkCoordinator::Lease heavyIoLease;
+                if (m_workCoordinator) {
+                    heavyIoLease = m_workCoordinator->acquire({
+                        IndexingWorkCoordinator::Resource::HeavyIo,
+                        IndexingWorkCoordinator::Priority::Foreground,
+                        false,
+                        workGeneration,
+                        WorkLeaseTimeoutMs});
+                }
+                if (m_workCoordinator && !heavyIoLease) {
+                    telemetry.setQueueDepth(QStringLiteral("media.thumbnail_assets"), 0);
+                    failJob(projectDatabasePath,
+                            jobId,
+                            QStringLiteral("缩略图任务等待执行资源超时，已安排自动重试"));
+                    scheduleSourceRootRetry(projectDatabasePath,
+                                            sourceRootId,
+                                            thumbnailRetryDelayMs(1));
+                    return false;
+                }
                 try {
                     result = m_thumbnailEngine->createPlaceholder(request);
                 } catch (const std::exception &exception) {
                     result.assetId = asset.id;
                     result.success = false;
+                    result.retryable = true;
                     result.errorMessage = QStringLiteral("外部缩略图工具异常：%1")
                                               .arg(QString::fromUtf8(exception.what()));
                 } catch (...) {
                     result.assetId = asset.id;
                     result.success = false;
+                    result.retryable = true;
                     result.errorMessage = QStringLiteral("外部缩略图工具发生未知异常");
                 }
+                heavyIoLease.reset();
             }
             if (result.success) {
                 const auto generatedBytes = qMax<qint64>(0, QFileInfo(result.outputPath).size());
@@ -723,15 +1040,25 @@ bool MediaTaskService::runThumbnailJob(QSqlDatabase &db,
                     IndexingWorkCoordinator::Resource::SqliteWriter,
                     IndexingWorkCoordinator::Priority::Foreground,
                     false,
-                    workGeneration});
+                    workGeneration,
+                    WorkLeaseTimeoutMs});
             }
             if (m_workCoordinator && !writerLease) {
                 failJob(projectDatabasePath,
                         jobId,
-                        QStringLiteral("缩略图写入因项目切换或应用退出而取消"));
+                        QStringLiteral("缩略图结果写入等待超时，已安排自动重试"));
+                scheduleSourceRootRetry(projectDatabasePath,
+                                        sourceRootId,
+                                        thumbnailRetryDelayMs(1));
                 return false;
             }
-            if (!persistThumbnail(db, result, &persistError)) {
+            bool retryScheduled = false;
+            int retryDelayMs = 0;
+            if (!persistThumbnail(db,
+                                  result,
+                                  &retryScheduled,
+                                  &retryDelayMs,
+                                  &persistError)) {
                 if (result.success && ThumbnailCacheQuota::isManagedThumbnailPath(result.outputPath)) {
                     QFile::remove(result.outputPath);
                 }
@@ -739,9 +1066,26 @@ bool MediaTaskService::runThumbnailJob(QSqlDatabase &db,
                     "单文件缩略图写入失败，已跳过并继续：asset_id=%1 error=%2")
                                  .arg(asset.id)
                                  .arg(persistError));
-                ++failed;
+                ++deferred;
+                scheduleSourceRootRetry(projectDatabasePath,
+                                        sourceRootId,
+                                        thumbnailRetryDelayMs(1));
+            } else if (retryScheduled) {
+                ++deferred;
+                scheduleSourceRootRetry(projectDatabasePath,
+                                        sourceRootId,
+                                        retryDelayMs);
             } else if (!result.success) {
                 ++failed;
+            }
+
+            if (assetWatchdog.elapsed() >= 90000) {
+                Logger::warn(QStringLiteral(
+                    "thumbnail_watchdog asset_id=%1 elapsed_ms=%2 outcome=%3")
+                                 .arg(asset.id)
+                                 .arg(assetWatchdog.elapsed())
+                                 .arg(retryScheduled ? QStringLiteral("retry_scheduled")
+                                                     : QStringLiteral("completed")));
             }
 
             ++processed;
@@ -750,8 +1094,8 @@ bool MediaTaskService::runThumbnailJob(QSqlDatabase &db,
                 updateJob(projectDatabasePath,
                           jobId,
                           progress,
-                          QStringLiteral("已生成 %1/%2 张缩略图，失败 %3 张")
-                              .arg(processed).arg(total).arg(failed),
+                          QStringLiteral("已处理 %1/%2 张缩略图，失败 %3 张，待重试 %4 张")
+                              .arg(processed).arg(total).arg(failed).arg(deferred),
                           itemProgressContext(
                               QStringLiteral("生成缩略图"), processed, total, QStringLiteral("张")));
             }
@@ -782,20 +1126,27 @@ bool MediaTaskService::runThumbnailJob(QSqlDatabase &db,
         updateJob(projectDatabasePath,
                   jobId,
                   finalProgress,
-                  QStringLiteral("已生成 %1/%2 张缩略图，失败 %3 张")
-                      .arg(processed).arg(total).arg(failed),
+                  QStringLiteral("已处理 %1/%2 张缩略图，失败 %3 张，待重试 %4 张")
+                      .arg(processed).arg(total).arg(failed).arg(deferred),
                   itemProgressContext(
                       QStringLiteral("生成缩略图"), processed, total, QStringLiteral("张")));
     }
 
-    if (processed > 0 && failed == processed) {
+    if (processed > 0 && failed == processed && deferred == 0) {
         failJob(projectDatabasePath, jobId, QStringLiteral("缩略图任务失败：%1 个文件均未成功").arg(failed));
         return false;
     }
 
-    completeJob(projectDatabasePath, jobId, failed > 0
-        ? QStringLiteral("缩略图生成完成，成功 %1 张，失败 %2 张").arg(processed - failed).arg(failed)
-        : QStringLiteral("缩略图生成完成，共 %1 张").arg(processed));
+    const auto succeeded = qMax<qint64>(0, processed - failed - deferred);
+    completeJob(projectDatabasePath,
+                jobId,
+                deferred > 0
+                    ? QStringLiteral("本批处理完成，成功 %1 张，失败 %2 张，已安排重试 %3 张")
+                          .arg(succeeded).arg(failed).arg(deferred)
+                    : (failed > 0
+                           ? QStringLiteral("缩略图生成完成，成功 %1 张，失败 %2 张")
+                                 .arg(succeeded).arg(failed)
+                           : QStringLiteral("缩略图生成完成，共 %1 张").arg(processed)));
     return true;
 }
 
@@ -808,24 +1159,94 @@ bool MediaTaskService::markThumbnailRunning(QSqlDatabase &db, qint64 assetId, QS
         return false;
     }
 
-    QSqlQuery query(db);
-    query.prepare(QStringLiteral(
-        "INSERT OR REPLACE INTO thumbnail (asset_id, status, image_path, updated_at, error_message) "
-        "VALUES (?, ?, '', ?, '')"));
-    query.addBindValue(assetId);
-    query.addBindValue(static_cast<int>(ThumbnailStatus::Running));
-    query.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODate));
-    if (!query.exec()) {
+    const auto now = QDateTime::currentDateTime().toString(Qt::ISODate);
+    QSqlQuery insert(db);
+    insert.prepare(QStringLiteral(
+        "INSERT OR IGNORE INTO thumbnail "
+        "(asset_id, status, image_path, updated_at, error_message, retry_count, "
+        "next_retry_at, retry_policy_version, failure_kind) "
+        "VALUES (?, ?, '', ?, '', 0, '', ?, '')"));
+    insert.addBindValue(assetId);
+    insert.addBindValue(static_cast<int>(ThumbnailStatus::Pending));
+    insert.addBindValue(now);
+    insert.addBindValue(ThumbnailRetryPolicyVersion);
+    if (!insert.exec()) {
         if (errorMessage) {
-            *errorMessage = query.lastError().text();
+            *errorMessage = insert.lastError().text();
+        }
+        return false;
+    }
+
+    QSqlQuery update(db);
+    update.prepare(QStringLiteral(
+        "UPDATE thumbnail SET status = ?, image_path = '', updated_at = ?, "
+        "error_message = '', next_retry_at = '', retry_policy_version = ?, failure_kind = '' "
+        "WHERE asset_id = ?"));
+    update.addBindValue(static_cast<int>(ThumbnailStatus::Running));
+    update.addBindValue(now);
+    update.addBindValue(ThumbnailRetryPolicyVersion);
+    update.addBindValue(assetId);
+    if (!update.exec()) {
+        if (errorMessage) {
+            *errorMessage = update.lastError().text();
         }
         return false;
     }
     return true;
 }
 
-bool MediaTaskService::persistMediaProbe(QSqlDatabase &db, const MediaProbeResult &result, QString *errorMessage) const
+bool MediaTaskService::persistMediaProbe(QSqlDatabase &db,
+                                         const MediaProbeResult &result,
+                                         bool *retryScheduled,
+                                         int *retryDelayMs,
+                                         QString *errorMessage) const
 {
+    if (retryScheduled) {
+        *retryScheduled = false;
+    }
+    if (retryDelayMs) {
+        *retryDelayMs = 0;
+    }
+
+    int currentRetryCount = 0;
+    QSqlQuery current(db);
+    current.prepare(QStringLiteral(
+        "SELECT COALESCE(retry_count, 0) FROM media_metadata WHERE asset_id = ?"));
+    current.addBindValue(result.assetId);
+    if (!current.exec()) {
+        if (errorMessage) {
+            *errorMessage = current.lastError().text();
+        }
+        return false;
+    }
+    if (current.next()) {
+        currentRetryCount = qMax(0, current.value(0).toInt());
+    }
+
+    const auto now = QDateTime::currentDateTime();
+    const auto nowText = now.toString(Qt::ISODate);
+    auto storedRetryCount = result.status == ProbeStatus::Success ? 0 : currentRetryCount;
+    QString nextRetryAt = QStringLiteral("");
+    QString failureKind = QStringLiteral("");
+    if (retryableMediaProbeFailure(result)) {
+        if (currentRetryCount < MaxMetadataRetryCount) {
+            storedRetryCount = currentRetryCount + 1;
+            const auto delayMs = metadataRetryDelayMs(storedRetryCount);
+            nextRetryAt = now.addMSecs(delayMs).toString(Qt::ISODate);
+            failureKind = QStringLiteral("transient");
+            if (retryScheduled) {
+                *retryScheduled = true;
+            }
+            if (retryDelayMs) {
+                *retryDelayMs = delayMs;
+            }
+        } else {
+            failureKind = QStringLiteral("retry_exhausted");
+        }
+    } else if (result.status != ProbeStatus::Success) {
+        failureKind = QStringLiteral("permanent");
+    }
+
     if (!db.transaction()) {
         if (errorMessage) {
             *errorMessage = db.lastError().text();
@@ -835,9 +1256,18 @@ bool MediaTaskService::persistMediaProbe(QSqlDatabase &db, const MediaProbeResul
 
     QSqlQuery metadata(db);
     metadata.prepare(QStringLiteral(
-        "INSERT OR REPLACE INTO media_metadata "
-        "(asset_id, probe_status, media_type, container, duration_ms, bit_rate, raw_json, error_message, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+        "INSERT INTO media_metadata "
+        "(asset_id, probe_status, media_type, container, duration_ms, bit_rate, raw_json, error_message, "
+        "retry_count, next_retry_at, retry_policy_version, failure_kind, last_attempt_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(asset_id) DO UPDATE SET "
+        "probe_status = excluded.probe_status, media_type = excluded.media_type, "
+        "container = excluded.container, duration_ms = excluded.duration_ms, "
+        "bit_rate = excluded.bit_rate, raw_json = excluded.raw_json, "
+        "error_message = excluded.error_message, retry_count = excluded.retry_count, "
+        "next_retry_at = excluded.next_retry_at, retry_policy_version = excluded.retry_policy_version, "
+        "failure_kind = excluded.failure_kind, last_attempt_at = excluded.last_attempt_at, "
+        "updated_at = excluded.updated_at"));
     metadata.addBindValue(result.assetId);
     metadata.addBindValue(static_cast<int>(result.status));
     metadata.addBindValue(static_cast<int>(result.mediaType));
@@ -846,7 +1276,12 @@ bool MediaTaskService::persistMediaProbe(QSqlDatabase &db, const MediaProbeResul
     metadata.addBindValue(result.format.bitRate);
     metadata.addBindValue(result.rawJson);
     metadata.addBindValue(result.errorMessage);
-    metadata.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODate));
+    metadata.addBindValue(storedRetryCount);
+    metadata.addBindValue(nextRetryAt);
+    metadata.addBindValue(MetadataRetryPolicyVersion);
+    metadata.addBindValue(failureKind);
+    metadata.addBindValue(nowText);
+    metadata.addBindValue(nowText);
     if (!metadata.exec()) {
         db.rollback();
         if (errorMessage) {
@@ -902,17 +1337,79 @@ bool MediaTaskService::persistMediaProbe(QSqlDatabase &db, const MediaProbeResul
     return true;
 }
 
-bool MediaTaskService::persistThumbnail(QSqlDatabase &db, const ThumbnailResult &result, QString *errorMessage) const
+bool MediaTaskService::persistThumbnail(QSqlDatabase &db,
+                                        const ThumbnailResult &result,
+                                        bool *retryScheduled,
+                                        int *retryDelayMs,
+                                        QString *errorMessage) const
 {
+    if (retryScheduled) {
+        *retryScheduled = false;
+    }
+    if (retryDelayMs) {
+        *retryDelayMs = 0;
+    }
+
+    int currentRetryCount = 0;
+    QSqlQuery current(db);
+    current.prepare(QStringLiteral(
+        "SELECT COALESCE(retry_count, 0) FROM thumbnail WHERE asset_id = ?"));
+    current.addBindValue(result.assetId);
+    if (!current.exec()) {
+        if (errorMessage) {
+            *errorMessage = current.lastError().text();
+        }
+        return false;
+    }
+    if (current.next()) {
+        currentRetryCount = qMax(0, current.value(0).toInt());
+    }
+
+    const auto now = QDateTime::currentDateTime();
+    auto status = result.success ? ThumbnailStatus::Success : ThumbnailStatus::Failed;
+    auto storedRetryCount = result.success ? 0 : currentRetryCount;
+    QString nextRetryAt = QStringLiteral("");
+    QString failureKind = QStringLiteral("");
+    if (!result.success && result.retryable) {
+        if (currentRetryCount < MaxThumbnailRetryCount) {
+            storedRetryCount = currentRetryCount + 1;
+            const auto delayMs = thumbnailRetryDelayMs(storedRetryCount);
+            nextRetryAt = now.addMSecs(delayMs).toString(Qt::ISODate);
+            failureKind = QStringLiteral("transient");
+            if (retryScheduled) {
+                *retryScheduled = true;
+            }
+            if (retryDelayMs) {
+                *retryDelayMs = delayMs;
+            }
+        } else {
+            failureKind = QStringLiteral("retry_exhausted");
+        }
+    } else if (!result.success) {
+        failureKind = QStringLiteral("permanent");
+    }
+
     QSqlQuery query(db);
     query.prepare(QStringLiteral(
-        "INSERT OR REPLACE INTO thumbnail (asset_id, status, image_path, updated_at, error_message) "
-        "VALUES (?, ?, ?, ?, ?)"));
+        "INSERT INTO thumbnail "
+        "(asset_id, status, image_path, updated_at, error_message, retry_count, "
+        "next_retry_at, retry_policy_version, failure_kind) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(asset_id) DO UPDATE SET "
+        "status = excluded.status, image_path = excluded.image_path, "
+        "updated_at = excluded.updated_at, error_message = excluded.error_message, "
+        "retry_count = excluded.retry_count, next_retry_at = excluded.next_retry_at, "
+        "retry_policy_version = excluded.retry_policy_version, "
+        "failure_kind = excluded.failure_kind"));
     query.addBindValue(result.assetId);
-    query.addBindValue(static_cast<int>(result.success ? ThumbnailStatus::Success : ThumbnailStatus::Failed));
+    query.addBindValue(static_cast<int>(status));
     query.addBindValue(result.success ? result.outputPath : QString());
-    query.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODate));
+    query.addBindValue(now.toString(Qt::ISODate));
     query.addBindValue(result.errorMessage);
+    query.addBindValue(storedRetryCount);
+    query.addBindValue(nextRetryAt);
+    query.addBindValue(ThumbnailRetryPolicyVersion);
+    query.addBindValue(failureKind);
     if (!query.exec()) {
         if (errorMessage) {
             *errorMessage = query.lastError().text();
@@ -1044,11 +1541,52 @@ void MediaTaskService::updateJob(const QString &projectDatabasePath,
     }, Qt::QueuedConnection);
 }
 
+void MediaTaskService::startJobHeartbeat(const QString &projectDatabasePath,
+                                         qint64 jobId,
+                                         qint64 progress,
+                                         const QString &detailPrefix,
+                                         const JobProgressContext &progressContext,
+                                         const QString &waitLabel)
+{
+    if (!m_jobHeartbeat || jobId <= 0) {
+        return;
+    }
+    QMetaObject::invokeMethod(m_jobHeartbeat,
+                              [heartbeat = m_jobHeartbeat,
+                               projectDatabasePath,
+                               jobId,
+                               progress,
+                               detailPrefix,
+                               progressContext,
+                               waitLabel]() {
+        heartbeat->start(projectDatabasePath,
+                         jobId,
+                         progress,
+                         detailPrefix,
+                         progressContext,
+                         waitLabel);
+    },
+                              Qt::QueuedConnection);
+}
+
+void MediaTaskService::stopJobHeartbeat(qint64 jobId)
+{
+    if (!m_jobHeartbeat || jobId <= 0) {
+        return;
+    }
+    QMetaObject::invokeMethod(m_jobHeartbeat,
+                              [heartbeat = m_jobHeartbeat, jobId]() {
+        heartbeat->stop(jobId);
+    },
+                              Qt::QueuedConnection);
+}
+
 void MediaTaskService::completeJob(const QString &projectDatabasePath, qint64 jobId, const QString &detail)
 {
     if (!m_jobEngine || jobId <= 0) {
         return;
     }
+    stopJobHeartbeat(jobId);
     QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, projectDatabasePath, jobId, detail]() {
         engine->completeJobForProject(projectDatabasePath, jobId, detail);
     }, Qt::QueuedConnection);
@@ -1059,6 +1597,7 @@ void MediaTaskService::failJob(const QString &projectDatabasePath, qint64 jobId,
     if (!m_jobEngine || jobId <= 0) {
         return;
     }
+    stopJobHeartbeat(jobId);
     QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, projectDatabasePath, jobId, errorMessage]() {
         engine->failJobForProject(projectDatabasePath, jobId, errorMessage);
     }, Qt::QueuedConnection);
@@ -1068,6 +1607,47 @@ void MediaTaskService::releaseActiveKey(const QString &activeKey)
 {
     QMutexLocker locker(&m_activeKeysMutex);
     m_activeKeys.remove(activeKey);
+}
+
+void MediaTaskService::scheduleSourceRootRetry(const QString &projectDatabasePath,
+                                               qint64 sourceRootId,
+                                               int delayMs)
+{
+    if (projectDatabasePath.trimmed().isEmpty() || sourceRootId <= 0) {
+        return;
+    }
+    QMetaObject::invokeMethod(this,
+                              [this, projectDatabasePath, sourceRootId, delayMs]() {
+        const auto retryKey = QStringLiteral("%1|%2")
+                                  .arg(FolderPathMetadata::normalizedPathKey(
+                                      projectDatabasePath))
+                                  .arg(sourceRootId);
+        auto *timer = m_retryTimers.value(retryKey, nullptr);
+        const auto normalizedDelayMs = qMax(0, delayMs);
+        if (timer && timer->isActive()
+            && timer->remainingTime() <= normalizedDelayMs) {
+            return;
+        }
+        if (!timer) {
+            timer = new QTimer(this);
+            timer->setSingleShot(true);
+            m_retryTimers.insert(retryKey, timer);
+            connect(timer, &QTimer::timeout, this,
+                    [this, projectDatabasePath, sourceRootId, retryKey, timer]() {
+                m_retryTimers.remove(retryKey);
+                timer->deleteLater();
+                if (!m_databaseManager || !m_databaseManager->hasOpenProject()
+                    || FolderPathMetadata::normalizedPathKey(
+                           m_databaseManager->databaseFilePath())
+                        != FolderPathMetadata::normalizedPathKey(projectDatabasePath)) {
+                    return;
+                }
+                startForSourceRoot(sourceRootId);
+            });
+        }
+        timer->start(normalizedDelayMs);
+    },
+                              Qt::QueuedConnection);
 }
 
 void MediaTaskService::notifyCatalogChanged(const QString &projectDatabasePath)

@@ -12,18 +12,19 @@ class MinimalJobTimelineViewModel : public QObject {
     Q_OBJECT
     Q_PROPERTY(JobListModel* model READ model CONSTANT)
     Q_PROPERTY(QVariantList timelineItems READ timelineItems NOTIFY timelineChanged)
-    Q_PROPERTY(bool canClearCompletedJobs READ canClearCompletedJobs NOTIFY timelineChanged)
+    Q_PROPERTY(bool canClearFinishedJobs READ canClearFinishedJobs NOTIFY timelineChanged)
 
 public:
     explicit MinimalJobTimelineViewModel(QObject *parent = nullptr);
 
     JobListModel *model() const;
     QVariantList timelineItems() const;
-    bool canClearCompletedJobs() const;
+    bool canClearFinishedJobs() const;
 
 public slots:
     void reload();
-    Q_INVOKABLE void clearCompletedJobs();
+    Q_INVOKABLE void removeFinishedJob(qint64 jobId);
+    Q_INVOKABLE void clearFinishedJobs();
 
 signals:
     void timelineChanged();

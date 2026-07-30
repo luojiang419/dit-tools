@@ -19,6 +19,13 @@ bool isFinishedJobState(JobState state)
     return state == JobState::Completed || state == JobState::Failed || state == JobState::Cancelled;
 }
 
+bool isIndeterminateJob(const Job &job)
+{
+    return job.type == JobType::Scan
+        && job.state == JobState::Running
+        && job.progressContext.totalItems <= 0;
+}
+
 int countJobs(const QVector<Job> &jobs, JobState state)
 {
     int count = 0;
@@ -47,10 +54,108 @@ int aggregateJobProgress(const QVector<Job> &jobs)
         return 0;
     }
     qint64 total = 0;
+    qint64 weightTotal = 0;
     for (const auto &job : jobs) {
-        total += qBound<qint64>(qint64{0}, job.progress, qint64{100});
+        const auto weight = job.progressContext.totalItems > 0
+            ? job.progressContext.totalItems
+            : qint64{1};
+        total += qBound<qint64>(qint64{0}, job.progress, qint64{100}) * weight;
+        weightTotal += weight;
     }
-    return static_cast<int>(total / jobs.size());
+    return weightTotal > 0 ? static_cast<int>(total / weightTotal) : 0;
+}
+
+bool hasItemProgressJobs(const QVector<Job> &jobs)
+{
+    for (const auto &job : jobs) {
+        if (job.progressContext.totalItems > 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+qint64 jobItemTotal(const Job &job)
+{
+    return job.progressContext.totalItems > 0 ? job.progressContext.totalItems : qint64{1};
+}
+
+qint64 jobItemFinished(const Job &job)
+{
+    const auto total = jobItemTotal(job);
+    if (job.state == JobState::Completed) {
+        return total;
+    }
+    if (job.state == JobState::Pending) {
+        return 0;
+    }
+    return qBound<qint64>(qint64{0}, job.progressContext.currentItem, total);
+}
+
+qint64 aggregateItemTotal(const QVector<Job> &jobs)
+{
+    qint64 total = 0;
+    for (const auto &job : jobs) {
+        total += jobItemTotal(job);
+    }
+    return total;
+}
+
+qint64 aggregateItemFinished(const QVector<Job> &jobs)
+{
+    qint64 finished = 0;
+    for (const auto &job : jobs) {
+        finished += jobItemFinished(job);
+    }
+    return finished;
+}
+
+qint64 aggregateItemSuccessful(const QVector<Job> &jobs)
+{
+    qint64 successful = 0;
+    for (const auto &job : jobs) {
+        if (job.state == JobState::Completed) {
+            successful += jobItemTotal(job);
+        }
+    }
+    return successful;
+}
+
+qint64 aggregateItemFailed(const QVector<Job> &jobs)
+{
+    qint64 failed = 0;
+    for (const auto &job : jobs) {
+        if (job.state == JobState::Failed || job.state == JobState::Cancelled) {
+            const auto finished = jobItemFinished(job);
+            failed += finished > 0 ? finished : jobItemTotal(job);
+        }
+    }
+    return failed;
+}
+
+qint64 aggregateItemQueued(const QVector<Job> &jobs)
+{
+    return qMax<qint64>(qint64{0}, aggregateItemTotal(jobs) - aggregateItemFinished(jobs));
+}
+
+QString aggregateItemUnitLabel(const QVector<Job> &jobs)
+{
+    QString unit;
+    for (const auto &job : jobs) {
+        if (job.progressContext.totalItems <= 0) {
+            continue;
+        }
+        const auto jobUnit = job.progressContext.unitLabel.trimmed();
+        if (jobUnit.isEmpty()) {
+            return QStringLiteral("项");
+        }
+        if (unit.isEmpty()) {
+            unit = jobUnit;
+        } else if (unit != jobUnit) {
+            return QStringLiteral("项");
+        }
+    }
+    return unit.isEmpty() ? QStringLiteral("项") : unit;
 }
 
 const Job *activeSummaryJob(const QVector<Job> &jobs)
@@ -84,6 +189,26 @@ QString jobSummaryText(const QVector<Job> &jobs)
     const auto pending = countJobs(jobs, JobState::Pending);
     const auto failed = countJobs(jobs, JobState::Failed);
     const auto completed = countJobs(jobs, JobState::Completed);
+
+    if (hasItemProgressJobs(jobs)) {
+        const auto unit = aggregateItemUnitLabel(jobs);
+        const auto finished = aggregateItemFinished(jobs);
+        const auto total = aggregateItemTotal(jobs);
+        if (running > 0) {
+            return QStringLiteral("素材解析已处理 %1/%2 %3，%4 个任务正在运行，%5 个任务等待处理。")
+                .arg(finished).arg(total).arg(unit).arg(running).arg(pending);
+        }
+        if (pending > 0) {
+            return QStringLiteral("素材解析已处理 %1/%2 %3，%4 个任务等待处理。")
+                .arg(finished).arg(total).arg(unit).arg(pending);
+        }
+        if (failed > 0) {
+            return QStringLiteral("素材解析已处理 %1/%2 %3，其中 %4 个任务失败。")
+                .arg(finished).arg(total).arg(unit).arg(failed);
+        }
+        return QStringLiteral("素材解析已处理 %1/%2 %3。")
+            .arg(finished).arg(total).arg(unit);
+    }
 
     if (running > 0) {
         return QStringLiteral("当前有 %1 个任务正在处理，%2 个任务等待处理。").arg(running).arg(pending);
@@ -176,8 +301,11 @@ int JobTimelineViewModel::footerProgress() const
             || (job.state != JobState::Running && job.state != JobState::Pending)) {
             continue;
         }
-        progressSum += qBound<qint64>(qint64{0}, job.progress, qint64{100});
-        ++taskCount;
+        const auto weight = job.progressContext.totalItems > 0
+            ? job.progressContext.totalItems
+            : qint64{1};
+        progressSum += qBound<qint64>(qint64{0}, job.progress, qint64{100}) * weight;
+        taskCount += weight;
     }
     if (taskCount > 0) {
         return static_cast<int>(progressSum / taskCount);
@@ -186,6 +314,17 @@ int JobTimelineViewModel::footerProgress() const
         return static_cast<int>(m_videoAnalysisService->batchProgressPercent());
     }
     return m_jobs.isEmpty() ? 0 : aggregateJobProgress(m_jobs);
+}
+
+bool JobTimelineViewModel::footerIndeterminate() const
+{
+    const auto hasAnalysisBatch = hasAnalysisBatchSummary(m_videoAnalysisService);
+    for (const auto &job : m_jobs) {
+        if (includeInFooter(job, hasAnalysisBatch) && isIndeterminateJob(job)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 QString JobTimelineViewModel::footerProgressText() const
@@ -198,6 +337,9 @@ QString JobTimelineViewModel::footerProgressText() const
         ? m_videoAnalysisService->batchTotalCount()
         : 0;
     const auto total = active + batchTasks;
+    if (total > 0 && footerIndeterminate()) {
+        return QStringLiteral("%1 项任务 · 持续扫描中").arg(total);
+    }
     return total > 0
         ? QStringLiteral("%1 项任务 · %2%").arg(total).arg(footerProgress())
         : QStringLiteral("最近任务 · %1%").arg(footerProgress());
@@ -279,13 +421,20 @@ QString JobTimelineViewModel::batchTitle() const
 {
     return hasAnalysisBatchSummary(m_videoAnalysisService)
         ? QStringLiteral("视频解析总量进度")
-        : QStringLiteral("任务总量进度");
+        : (hasItemProgressJobs(m_jobs)
+               ? QStringLiteral("素材解析总量进度")
+               : QStringLiteral("任务总量进度"));
 }
 
 QString JobTimelineViewModel::batchProgressText() const
 {
     if (!hasBatchSummary()) {
         return QStringLiteral("暂无任务");
+    }
+    if (batchIndeterminate()) {
+        return QStringLiteral("%1/%2 · 持续扫描中")
+            .arg(batchFinishedCount())
+            .arg(batchTotalCount());
     }
     return QStringLiteral("%1/%2 · %3%")
         .arg(batchFinishedCount())
@@ -298,6 +447,19 @@ int JobTimelineViewModel::batchProgress() const
     return hasAnalysisBatchSummary(m_videoAnalysisService)
         ? static_cast<int>(m_videoAnalysisService->batchProgressPercent())
         : aggregateJobProgress(m_jobs);
+}
+
+bool JobTimelineViewModel::batchIndeterminate() const
+{
+    if (hasAnalysisBatchSummary(m_videoAnalysisService)) {
+        return false;
+    }
+    for (const auto &job : m_jobs) {
+        if (isIndeterminateJob(job)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 QString JobTimelineViewModel::batchStatusText() const
@@ -353,40 +515,50 @@ int JobTimelineViewModel::batchFinishedCount() const
 {
     return hasAnalysisBatchSummary(m_videoAnalysisService)
         ? m_videoAnalysisService->batchFinishedCount()
-        : finishedJobCount(m_jobs);
+        : (hasItemProgressJobs(m_jobs)
+               ? static_cast<int>(aggregateItemFinished(m_jobs))
+               : finishedJobCount(m_jobs));
 }
 
 int JobTimelineViewModel::batchSuccessfulCount() const
 {
     return hasAnalysisBatchSummary(m_videoAnalysisService)
         ? m_videoAnalysisService->batchSuccessfulCount()
-        : countJobs(m_jobs, JobState::Completed);
+        : (hasItemProgressJobs(m_jobs)
+               ? static_cast<int>(aggregateItemSuccessful(m_jobs))
+               : countJobs(m_jobs, JobState::Completed));
 }
 
 int JobTimelineViewModel::batchFailedCount() const
 {
     return hasAnalysisBatchSummary(m_videoAnalysisService)
         ? m_videoAnalysisService->batchFailedCount()
-        : countJobs(m_jobs, JobState::Failed);
+        : (hasItemProgressJobs(m_jobs)
+               ? static_cast<int>(aggregateItemFailed(m_jobs))
+               : countJobs(m_jobs, JobState::Failed));
 }
 
 int JobTimelineViewModel::batchTotalCount() const
 {
     return hasAnalysisBatchSummary(m_videoAnalysisService)
         ? m_videoAnalysisService->batchTotalCount()
-        : m_jobs.size();
+        : (hasItemProgressJobs(m_jobs)
+               ? static_cast<int>(aggregateItemTotal(m_jobs))
+               : m_jobs.size());
 }
 
 int JobTimelineViewModel::batchQueuedCount() const
 {
     return hasAnalysisBatchSummary(m_videoAnalysisService)
         ? m_videoAnalysisService->batchQueuedCount()
-        : countJobs(m_jobs, JobState::Pending);
+        : (hasItemProgressJobs(m_jobs)
+               ? static_cast<int>(aggregateItemQueued(m_jobs))
+               : countJobs(m_jobs, JobState::Pending));
 }
 
-bool JobTimelineViewModel::canClearCompletedJobs() const
+bool JobTimelineViewModel::canClearFinishedJobs() const
 {
-    return countJobs(m_jobs, JobState::Completed) > 0;
+    return finishedJobCount(m_jobs) > 0;
 }
 
 bool JobTimelineViewModel::hasSelection() const
@@ -433,6 +605,12 @@ int JobTimelineViewModel::selectedJobProgress() const
 {
     const auto *job = selectedJob();
     return job ? static_cast<int>(job->progress) : 0;
+}
+
+bool JobTimelineViewModel::selectedJobIndeterminate() const
+{
+    const auto *job = selectedJob();
+    return job && isIndeterminateJob(*job);
 }
 
 QString JobTimelineViewModel::selectedSubjectKind() const
@@ -567,12 +745,20 @@ void JobTimelineViewModel::selectJob(qint64 jobId)
     emit stateChanged();
 }
 
-void JobTimelineViewModel::clearCompletedJobs()
+void JobTimelineViewModel::removeFinishedJob(qint64 jobId)
 {
     if (!m_jobService || !m_jobService->engine()) {
         return;
     }
-    m_jobService->engine()->clearCompletedJobs();
+    m_jobService->engine()->removeFinishedJob(jobId);
+}
+
+void JobTimelineViewModel::clearFinishedJobs()
+{
+    if (!m_jobService || !m_jobService->engine()) {
+        return;
+    }
+    m_jobService->engine()->clearFinishedJobs();
 }
 
 const Job *JobTimelineViewModel::selectedJob() const

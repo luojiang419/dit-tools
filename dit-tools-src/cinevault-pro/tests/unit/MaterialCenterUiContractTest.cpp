@@ -1160,6 +1160,33 @@ private slots:
         QVERIFY(jobTimelineBar.contains(QStringLiteral("viewModel.footerRunningCount")));
     }
 
+    void finishedTasksAreRemovableAndScanProgressShowsActivity()
+    {
+        const auto jobEngine = sourceFile(QStringLiteral("src/core/jobs/JobEngine.cpp"));
+        const auto timeline = sourceFile(
+            QStringLiteral("src/ui/viewmodels/JobTimelineViewModel.cpp"));
+        const auto jobsWorkspace = sourceFile(
+            QStringLiteral("src/ui/qml/workspaces/JobsWorkspace.qml"));
+        const auto timelineBar = sourceFile(
+            QStringLiteral("src/ui/qml/components/JobTimelineBar.qml"));
+        const auto progressBar = sourceFile(
+            QStringLiteral("src/ui/qml/components/ThemedProgressBar.qml"));
+        QVERIFY2(!jobEngine.isEmpty() && !timeline.isEmpty() && !jobsWorkspace.isEmpty()
+                     && !timelineBar.isEmpty() && !progressBar.isEmpty(),
+                 "无法读取任务删除或扫描活动反馈契约源码");
+
+        QVERIFY(jobEngine.contains(QStringLiteral("bool JobEngine::removeFinishedJob")));
+        QVERIFY(jobEngine.contains(QStringLiteral("void JobEngine::clearFinishedJobs")));
+        QVERIFY(jobEngine.contains(QStringLiteral("JobState::Failed")));
+        QVERIFY(timeline.contains(QStringLiteral("isIndeterminateJob")));
+        QVERIFY(jobsWorkspace.contains(QStringLiteral("text: \"清理已结束\"")));
+        QVERIFY(jobsWorkspace.contains(QStringLiteral("visible: jobCard.model.canRemove")));
+        QVERIFY(jobsWorkspace.contains(QStringLiteral("indeterminate: jobCard.model.indeterminate")));
+        QVERIFY(timelineBar.contains(QStringLiteral("viewModel.footerIndeterminate")));
+        QVERIFY(progressBar.contains(QStringLiteral("property: \"indeterminatePhase\"")));
+        QVERIFY(progressBar.contains(QStringLiteral("loops: Animation.Infinite")));
+    }
+
     void middleButtonAnchorScrollIsReusableAndGloballyCovered()
     {
         const auto handler = sourceFile(

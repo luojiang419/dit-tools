@@ -1,4 +1,5 @@
 #include "application/MetadataExtractionService.h"
+#include "application/IndexingWorkCoordinator.h"
 #include "core/jobs/JobEngine.h"
 #include "infrastructure/db/DatabaseManager.h"
 #include "infrastructure/monitoring/PerformanceTelemetry.h"
@@ -12,6 +13,9 @@
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QTemporaryDir>
+#include <QTimer>
+
+#include <algorithm>
 
 class MetadataExtractionServiceTest final : public QObject {
     Q_OBJECT
@@ -82,10 +86,13 @@ private slots:
         const auto assetId = asset.lastInsertId().toLongLong();
 
         JobEngine jobEngine(&databaseManager);
+        IndexingWorkCoordinator coordinator;
         MetadataExtractionService service(&databaseManager, &jobEngine, &adapter);
+        service.setWorkCoordinator(&coordinator);
+        QTimer::singleShot(5000, &coordinator, &IndexingWorkCoordinator::shutdown);
         QSignalSpy changedSpy(&service, &MetadataExtractionService::metadataCatalogChanged);
         service.startForSourceRoot(sourceRootId);
-        QVERIFY2(changedSpy.wait(30000), "后台真实元数据任务未在超时前完成");
+        QVERIFY2(changedSpy.wait(30000), "系统非空闲时真实元数据任务未在超时前完成");
 
         QSqlQuery metadata(db);
         metadata.prepare(QStringLiteral(
@@ -106,6 +113,83 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!jobEngine.jobs().isEmpty()
                                      && jobEngine.jobs().first().state == JobState::Completed,
                                  5000);
+        databaseManager.closeProjectDatabase();
+    }
+
+    void extractionResourceWaitPublishesHeartbeat()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        const auto sourcePath = tempDir.filePath(QStringLiteral("source"));
+        QVERIFY(QDir().mkpath(sourcePath));
+
+        DatabaseManager databaseManager;
+        QString errorMessage;
+        const auto databasePath = tempDir.filePath(QStringLiteral("project.cvdb"));
+        QVERIFY2(databaseManager.openProjectDatabase(databasePath, &errorMessage), qPrintable(errorMessage));
+        auto db = databaseManager.database();
+
+        QSqlQuery source(db);
+        source.prepare(QStringLiteral(
+            "INSERT INTO source_root (name, path, status, total_files, total_folders, total_size_bytes, "
+            "video_count, audio_count, image_count, other_count, warning_count, scan_version, created_at, updated_at) "
+            "VALUES ('Camera', ?, 'ok', 1, 0, 0, 0, 0, 1, 0, 0, 1, ?, ?)"));
+        source.addBindValue(sourcePath);
+        source.addBindValue(QStringLiteral("2026-07-22T12:00:00"));
+        source.addBindValue(QStringLiteral("2026-07-22T12:00:00"));
+        QVERIFY2(source.exec(), qPrintable(source.lastError().text()));
+        const auto sourceRootId = source.lastInsertId().toLongLong();
+
+        ExifToolAdapter adapter;
+        QVERIFY2(adapter.isAvailable(), qPrintable(adapter.unavailableReason()));
+        const auto imagePath = QDir(sourcePath).filePath(QStringLiteral("queued.jpg"));
+        QImage image(8, 6, QImage::Format_RGB32);
+        image.fill(QColor(QStringLiteral("#4f8cff")));
+        QVERIFY(image.save(imagePath, "JPEG"));
+
+        const QFileInfo imageInfo(imagePath);
+        QSqlQuery asset(db);
+        asset.prepare(QStringLiteral(
+            "INSERT INTO asset_file (source_root_id, name, extension, absolute_path, relative_path, parent_path, "
+            "path_key, asset_type, size_bytes, modified_at, is_readable, created_at) "
+            "VALUES (?, ?, 'jpg', ?, ?, ?, ?, ?, ?, ?, 1, ?)"));
+        asset.addBindValue(sourceRootId);
+        asset.addBindValue(imageInfo.fileName());
+        asset.addBindValue(imageInfo.absoluteFilePath());
+        asset.addBindValue(imageInfo.fileName());
+        asset.addBindValue(imageInfo.absolutePath());
+        asset.addBindValue(imageInfo.absoluteFilePath().toCaseFolded());
+        asset.addBindValue(static_cast<int>(AssetType::Image));
+        asset.addBindValue(imageInfo.size());
+        asset.addBindValue(imageInfo.lastModified().toString(Qt::ISODateWithMs));
+        asset.addBindValue(QStringLiteral("2026-07-22T12:00:00"));
+        QVERIFY2(asset.exec(), qPrintable(asset.lastError().text()));
+
+        JobEngine jobEngine(&databaseManager);
+        IndexingWorkCoordinator coordinator;
+        auto heldLease = coordinator.acquire({
+            IndexingWorkCoordinator::Resource::HeavyIo,
+            IndexingWorkCoordinator::Priority::Foreground,
+            false,
+            coordinator.currentGeneration()});
+        QVERIFY(heldLease);
+
+        MetadataExtractionService service(&databaseManager, &jobEngine, &adapter);
+        service.setWorkCoordinator(&coordinator);
+        QSignalSpy changedSpy(&service, &MetadataExtractionService::metadataCatalogChanged);
+        service.startForSourceRoot(sourceRootId);
+
+        QTRY_VERIFY_WITH_TIMEOUT(([&jobEngine]() {
+            const auto jobs = jobEngine.jobs();
+            return std::any_of(jobs.cbegin(), jobs.cend(), [](const Job &job) {
+                return job.type == JobType::Metadata
+                    && job.state == JobState::Running
+                    && job.detail.contains(QStringLiteral("等待执行资源"));
+            });
+        })(), 5000);
+
+        heldLease.reset();
+        QVERIFY2(changedSpy.wait(30000), "真实元数据资源释放后未在超时前完成");
         databaseManager.closeProjectDatabase();
     }
 

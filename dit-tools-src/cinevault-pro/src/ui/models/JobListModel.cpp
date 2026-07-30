@@ -16,6 +16,20 @@ int jobStateDisplayRank(JobState state)
     }
     return 5;
 }
+
+bool isFinishedJobState(JobState state)
+{
+    return state == JobState::Completed
+        || state == JobState::Failed
+        || state == JobState::Cancelled;
+}
+
+bool isIndeterminateJob(const Job &job)
+{
+    return job.type == JobType::Scan
+        && job.state == JobState::Running
+        && job.progressContext.totalItems <= 0;
+}
 }
 
 JobListModel::JobListModel(QObject *parent)
@@ -54,6 +68,8 @@ QVariant JobListModel::data(const QModelIndex &index, int role) const
     case ProgressLabelRole: return Formatters::jobProgressLabel(item.progressContext);
     case ProgressShortLabelRole: return Formatters::jobProgressShortLabel(item.progressContext);
     case StepLabelRole: return item.progressContext.stepLabel;
+    case CanRemoveRole: return isFinishedJobState(item.state);
+    case IndeterminateRole: return isIndeterminateJob(item);
     default: return {};
     }
 }
@@ -78,7 +94,9 @@ QHash<int, QByteArray> JobListModel::roleNames() const
         {SubjectTypeLabelRole, "subjectTypeLabel"},
         {ProgressLabelRole, "progressLabel"},
         {ProgressShortLabelRole, "progressShortLabel"},
-        {StepLabelRole, "stepLabel"}
+        {StepLabelRole, "stepLabel"},
+        {CanRemoveRole, "canRemove"},
+        {IndeterminateRole, "indeterminate"}
     };
 }
 

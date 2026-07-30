@@ -64,6 +64,7 @@ ThumbnailResult ThumbnailEngine::createPlaceholder(const ThumbnailRequest &reque
             {QStringLiteral("maxEdge"), qMin(480, qMax(request.maxWidth, request.maxHeight))},
         });
         result.success = reply.ok;
+        result.retryable = reply.retryable;
         result.outputPath = reply.result.value(QStringLiteral("outputPath")).toString();
         result.errorMessage = reply.errorMessage;
         return result;

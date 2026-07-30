@@ -86,23 +86,28 @@ if ([string]::IsNullOrWhiteSpace($LatestVersion)) {
     }
 }
 
-$versionTag = Get-NextCineVaultReleaseVersion `
+$nextVersionTag = Get-NextCineVaultReleaseVersion `
     -LatestVersion $LatestVersion `
     -MinimumVersion $MinimumVersion
-$appVersion = $versionTag.TrimStart('v')
+$nextAppVersion = $nextVersionTag.TrimStart('v')
 
 $normalizedLatestVersion = Get-NormalizedCineVaultVersionTag -Version $LatestVersion
 $comparisonWithLatest = Compare-CineVaultVersions -Left $sourceVersionTag -Right $normalizedLatestVersion
 if ($comparisonWithLatest -eq 0) {
     Write-WorkflowOutput -Name 'should_publish' -Value 'false'
     Write-WorkflowOutput -Name 'version_bump_required' -Value 'true'
-    Write-WorkflowOutput -Name 'version_tag' -Value $versionTag
-    Write-WorkflowOutput -Name 'app_version' -Value $appVersion
-    Write-Host "Repository VERSION matches latest release; a version-only commit is required: $versionTag"
+    Write-WorkflowOutput -Name 'version_tag' -Value $nextVersionTag
+    Write-WorkflowOutput -Name 'app_version' -Value $nextAppVersion
+    Write-Host "Repository VERSION matches latest release; a version-only commit is required: $nextVersionTag"
     return
 }
-if ($sourceVersionTag -cne $versionTag) {
-    throw "Repository VERSION $sourceVersionTag must equal latest release $normalizedLatestVersion or the next release $versionTag."
+if ($comparisonWithLatest -lt 0) {
+    throw "Repository VERSION $sourceVersionTag is lower than latest release $normalizedLatestVersion."
+}
+
+$comparisonWithNext = Compare-CineVaultVersions -Left $sourceVersionTag -Right $nextVersionTag
+if ($comparisonWithNext -gt 0) {
+    Write-Host "Repository VERSION $sourceVersionTag is higher than the next patch $nextVersionTag; publishing the explicit source version."
 }
 
 Write-WorkflowOutput -Name 'should_publish' -Value 'true'

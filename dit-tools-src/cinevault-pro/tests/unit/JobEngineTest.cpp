@@ -23,14 +23,16 @@ class JobEngineTest : public QObject {
     Q_OBJECT
 
 private slots:
-    void clearCompletedJobsKeepsActiveAndFailedJobs();
+    void clearFinishedJobsKeepsOnlyActiveJobs();
+    void removeFinishedJobPersistsAndRejectsActiveJob();
+    void retrySchedulingClearsOnlyReplacedFailedJobs();
     void reloadJobsRestoresHistoryAndAdvancesIds();
     void projectScopedUpdatesDoNotMutateSameIdInCurrentProject();
     void reloadJobsCapsLoadedHistory();
     void persistenceFailureDoesNotPublishInMemoryJob();
 };
 
-void JobEngineTest::clearCompletedJobsKeepsActiveAndFailedJobs()
+void JobEngineTest::clearFinishedJobsKeepsOnlyActiveJobs()
 {
     JobEngine engine(nullptr);
     QSignalSpy spy(&engine, &JobEngine::jobsChanged);
@@ -42,15 +44,71 @@ void JobEngineTest::clearCompletedJobsKeepsActiveAndFailedJobs()
 
     engine.completeJob(completedId, QStringLiteral("完成"));
     engine.failJob(failedId, QStringLiteral("失败"));
-    engine.clearCompletedJobs();
+    engine.clearFinishedJobs();
 
     const auto jobs = engine.jobs();
-    QCOMPARE(jobs.size(), 3);
+    QCOMPARE(jobs.size(), 2);
     QVERIFY(!containsJob(jobs, completedId));
     QVERIFY(containsJob(jobs, runningId));
     QVERIFY(containsJob(jobs, pendingId));
-    QVERIFY(containsJob(jobs, failedId));
+    QVERIFY(!containsJob(jobs, failedId));
     QVERIFY(spy.count() >= 7);
+}
+
+void JobEngineTest::removeFinishedJobPersistsAndRejectsActiveJob()
+{
+    QTemporaryDir temp;
+    QVERIFY(temp.isValid());
+
+    DatabaseManager databaseManager;
+    QString errorMessage;
+    QVERIFY2(databaseManager.openProjectDatabase(
+                 QDir(temp.path()).filePath(QStringLiteral("remove-finished.cvdb")),
+                 &errorMessage),
+             qPrintable(errorMessage));
+
+    JobEngine engine(&databaseManager);
+    const auto finishedId = engine.createJob(
+        JobType::Scan, QStringLiteral("已完成"), QStringLiteral("处理中"));
+    const auto runningId = engine.createJob(
+        JobType::Thumbnail, QStringLiteral("进行中"), QStringLiteral("处理中"));
+    engine.completeJob(finishedId, QStringLiteral("完成"));
+
+    QVERIFY(engine.removeFinishedJob(finishedId));
+    QVERIFY(!engine.removeFinishedJob(runningId));
+    QVERIFY(!containsJob(engine.jobs(), finishedId));
+    QVERIFY(containsJob(engine.jobs(), runningId));
+
+    QSqlQuery query(databaseManager.database());
+    query.prepare(QStringLiteral("SELECT COUNT(*) FROM job WHERE id = ?"));
+    query.addBindValue(finishedId);
+    QVERIFY(query.exec());
+    QVERIFY(query.next());
+    QCOMPARE(query.value(0).toInt(), 0);
+}
+
+void JobEngineTest::retrySchedulingClearsOnlyReplacedFailedJobs()
+{
+    JobEngine engine(nullptr);
+    const auto replaced = engine.createJob(
+        JobType::Thumbnail, QStringLiteral("旧缩略图"), QStringLiteral("处理中"), 7);
+    const auto unrelatedType = engine.createJob(
+        JobType::Metadata, QStringLiteral("旧元数据"), QStringLiteral("处理中"), 7);
+    const auto unrelatedSource = engine.createJob(
+        JobType::Thumbnail, QStringLiteral("其他素材源"), QStringLiteral("处理中"), 8);
+    const auto active = engine.createJob(
+        JobType::Thumbnail, QStringLiteral("新缩略图"), QStringLiteral("处理中"), 7);
+    engine.failJob(replaced, QStringLiteral("可恢复失败"));
+    engine.failJob(unrelatedType, QStringLiteral("其他类型失败"));
+    engine.failJob(unrelatedSource, QStringLiteral("其他素材源失败"));
+
+    engine.clearFailedJobsForRetry(7, {JobType::Thumbnail});
+
+    const auto jobs = engine.jobs();
+    QVERIFY(!containsJob(jobs, replaced));
+    QVERIFY(containsJob(jobs, unrelatedType));
+    QVERIFY(containsJob(jobs, unrelatedSource));
+    QVERIFY(containsJob(jobs, active));
 }
 
 void JobEngineTest::reloadJobsRestoresHistoryAndAdvancesIds()

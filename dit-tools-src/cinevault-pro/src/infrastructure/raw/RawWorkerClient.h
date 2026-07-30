@@ -26,7 +26,9 @@ public:
     RawWorkerClient(const RawWorkerClient &) = delete;
     RawWorkerClient &operator=(const RawWorkerClient &) = delete;
 
-    RawWorkerReply sendRequest(const QString &command, const QJsonObject &payload = {});
+    RawWorkerReply sendRequest(const QString &command,
+                               const QJsonObject &payload = {},
+                               int timeoutOverrideMs = 0);
     RawWorkerReply decode(QJsonObject payload);
     void stop();
     [[nodiscard]] bool isRunning() const;

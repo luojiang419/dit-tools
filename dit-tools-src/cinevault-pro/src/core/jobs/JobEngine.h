@@ -42,7 +42,9 @@ public:
     void failJobForProject(const QString &projectDatabasePath, qint64 jobId, const QString &errorMessage);
     void reloadJobs();
     void clearJobs();
-    void clearCompletedJobs();
+    bool removeFinishedJob(qint64 jobId);
+    void clearFinishedJobs();
+    void clearFailedJobsForRetry(qint64 sourceRootId, const QVector<JobType> &types);
 
     QVector<Job> jobs() const;
 

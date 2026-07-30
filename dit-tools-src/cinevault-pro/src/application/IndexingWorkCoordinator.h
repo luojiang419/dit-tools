@@ -22,6 +22,7 @@ public:
         Priority priority = Priority::Background;
         bool requiresIdle = false;
         quint64 generation = 0;
+        int timeoutMs = -1;
     };
 
     class Lease final {

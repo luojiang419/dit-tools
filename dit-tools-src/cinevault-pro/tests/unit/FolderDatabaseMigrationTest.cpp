@@ -365,6 +365,146 @@ private slots:
                  2);
     }
 
+    void projectMetadataRetryColumns_repairFromV9AndCurrentSchema()
+    {
+        const QVector<int> legacyVersions{9, DatabaseManager::CurrentSchemaVersion};
+        for (const auto legacyVersion : legacyVersions) {
+            QTemporaryDir temp;
+            QVERIFY(temp.isValid());
+            const auto databasePath = QDir(temp.path()).filePath(
+                QStringLiteral("metadata-retry-v%1.cvdb").arg(legacyVersion));
+            const auto sourcePath = QDir(temp.path()).filePath(QStringLiteral("Card"));
+            QVERIFY(QDir().mkpath(QDir(sourcePath).filePath(QStringLiteral("2026-07-14/CameraA"))));
+
+            QString errorMessage;
+            QVERIFY2(createLegacyProjectDatabase(databasePath, sourcePath, false, &errorMessage),
+                     qPrintable(errorMessage));
+
+            const auto connectionName = QStringLiteral("legacy_metadata_retry_%1")
+                                            .arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
+            {
+                auto db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName);
+                db.setDatabaseName(databasePath);
+                QVERIFY2(db.open(), qPrintable(db.lastError().text()));
+                const QStringList legacyMetadataSchema{
+                    QStringLiteral("CREATE TABLE media_metadata ("
+                                   "asset_id INTEGER PRIMARY KEY, "
+                                   "probe_status INTEGER NOT NULL DEFAULT 0, "
+                                   "media_type INTEGER NOT NULL DEFAULT 0, "
+                                   "container TEXT, "
+                                   "duration_ms INTEGER NOT NULL DEFAULT 0, "
+                                   "bit_rate INTEGER NOT NULL DEFAULT 0, "
+                                   "raw_json TEXT, "
+                                   "error_message TEXT, "
+                                   "updated_at TEXT NOT NULL)"),
+                    QStringLiteral("INSERT INTO media_metadata "
+                                   "(asset_id, probe_status, media_type, container, duration_ms, bit_rate, "
+                                   "raw_json, error_message, updated_at) "
+                                   "VALUES (1, 1, 1, 'mov', 42000, 8000, '{\"format\":\"mov\"}', '', "
+                                   "'2026-07-30T10:00:00')"),
+                    QStringLiteral("CREATE TABLE embedded_metadata ("
+                                   "asset_id INTEGER PRIMARY KEY, "
+                                   "status INTEGER NOT NULL DEFAULT 0, "
+                                   "capture_time TEXT NOT NULL DEFAULT '', "
+                                   "camera_make TEXT NOT NULL DEFAULT '', "
+                                   "camera_model TEXT NOT NULL DEFAULT '', "
+                                   "lens_model TEXT NOT NULL DEFAULT '', "
+                                   "search_text TEXT NOT NULL DEFAULT '', "
+                                   "raw_json TEXT NOT NULL DEFAULT '', "
+                                   "error_message TEXT NOT NULL DEFAULT '', "
+                                   "updated_at TEXT NOT NULL DEFAULT '')"),
+                    QStringLiteral("INSERT INTO embedded_metadata "
+                                   "(asset_id, status, capture_time, camera_make, camera_model, lens_model, "
+                                   "search_text, raw_json, error_message, updated_at) "
+                                   "VALUES (1, 1, '2026-07-30T09:59:00', 'CameraCo', 'ModelA', 'LensA', "
+                                   "'camera metadata', '{\"make\":\"CameraCo\"}', '', '2026-07-30T10:01:00')"),
+                    QStringLiteral("UPDATE schema_version SET version = %1").arg(legacyVersion)
+                };
+                QVERIFY2(executeStatements(db, legacyMetadataSchema, &errorMessage),
+                         qPrintable(errorMessage));
+                db.close();
+            }
+            QSqlDatabase::removeDatabase(connectionName);
+
+            DatabaseManager manager;
+            QVERIFY2(manager.openProjectDatabase(databasePath, &errorMessage),
+                     qPrintable(QStringLiteral("legacy version %1: %2")
+                                    .arg(legacyVersion)
+                                    .arg(errorMessage)));
+            QCOMPARE(manager.schemaVersion(), DatabaseManager::CurrentSchemaVersion);
+
+            QSqlQuery columns(manager.database());
+            QVERIFY2(columns.exec(QStringLiteral("PRAGMA table_info(media_metadata)")),
+                     qPrintable(columns.lastError().text()));
+            QStringList columnNames;
+            while (columns.next()) {
+                columnNames.append(columns.value(1).toString());
+            }
+            const QStringList requiredColumns{
+                QStringLiteral("retry_count"),
+                QStringLiteral("next_retry_at"),
+                QStringLiteral("retry_policy_version"),
+                QStringLiteral("failure_kind"),
+                QStringLiteral("last_attempt_at")
+            };
+            for (const auto &column : requiredColumns) {
+                QVERIFY2(columnNames.contains(column), qPrintable(column));
+            }
+
+            QSqlQuery metadata(manager.database());
+            QVERIFY2(metadata.exec(QStringLiteral(
+                         "SELECT probe_status, retry_count, next_retry_at, retry_policy_version, "
+                         "failure_kind, last_attempt_at, updated_at, raw_json "
+                         "FROM media_metadata WHERE asset_id = 1")),
+                     qPrintable(metadata.lastError().text()));
+            QVERIFY(metadata.next());
+            QCOMPARE(metadata.value(0).toInt(), 1);
+            QCOMPARE(metadata.value(1).toInt(), 0);
+            QCOMPARE(metadata.value(2).toString(), QString());
+            QCOMPARE(metadata.value(3).toInt(), 0);
+            QCOMPARE(metadata.value(4).toString(), QString());
+            QCOMPARE(metadata.value(5).toString(), QString());
+            QCOMPARE(metadata.value(6).toString(), QStringLiteral("2026-07-30T10:00:00"));
+            QCOMPARE(metadata.value(7).toString(), QStringLiteral("{\"format\":\"mov\"}"));
+
+            QSqlQuery embeddedColumns(manager.database());
+            QVERIFY2(embeddedColumns.exec(QStringLiteral("PRAGMA table_info(embedded_metadata)")),
+                     qPrintable(embeddedColumns.lastError().text()));
+            QStringList embeddedColumnNames;
+            while (embeddedColumns.next()) {
+                embeddedColumnNames.append(embeddedColumns.value(1).toString());
+            }
+            for (const auto &column : requiredColumns) {
+                QVERIFY2(embeddedColumnNames.contains(column), qPrintable(column));
+            }
+
+            QSqlQuery embedded(manager.database());
+            QVERIFY2(embedded.exec(QStringLiteral(
+                         "SELECT status, retry_count, next_retry_at, retry_policy_version, "
+                         "failure_kind, last_attempt_at, raw_json "
+                         "FROM embedded_metadata WHERE asset_id = 1")),
+                     qPrintable(embedded.lastError().text()));
+            QVERIFY(embedded.next());
+            QCOMPARE(embedded.value(0).toInt(), 1);
+            QCOMPARE(embedded.value(1).toInt(), 0);
+            QCOMPARE(embedded.value(2).toString(), QString());
+            QCOMPARE(embedded.value(3).toInt(), 0);
+            QCOMPARE(embedded.value(4).toString(), QString());
+            QCOMPARE(embedded.value(5).toString(), QString());
+            QCOMPARE(embedded.value(6).toString(), QStringLiteral("{\"make\":\"CameraCo\"}"));
+
+            QSqlQuery index(manager.database());
+            QVERIFY2(index.exec(QStringLiteral(
+                         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' "
+                         "AND name IN ('idx_media_metadata_retry', 'idx_embedded_metadata_retry', "
+                         "'idx_thumbnail_retry_schedule')")),
+                     qPrintable(index.lastError().text()));
+            QVERIFY(index.next());
+            QCOMPARE(index.value(0).toInt(), 3);
+            manager.closeProjectDatabase();
+        }
+    }
+
     void projectV8_changeLogCoalescesEntityUpdatesAndRepairsTriggers()
     {
         QTemporaryDir temp;

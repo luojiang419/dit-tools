@@ -10,6 +10,7 @@
 using VisionResponseParser::parseAssistantJson;
 using VisionResponseParser::normalizeFrameAnalysis;
 using VisionResponseParser::normalizeVideoSummary;
+using VisionResponseParser::extractAssistantEnvelope;
 using VisionResponseParser::extractAssistantContent;
 using VisionResponseParser::fallbackFrameAnalysisFromContent;
 using VisionResponseParser::fallbackVideoSummaryFromContent;
@@ -96,6 +97,59 @@ private slots:
 
         QVERIFY(!payload.has_value());
         QVERIFY(!error.isEmpty());
+    }
+
+    void parseAssistantJson_classifiesReasoningOnlyTokenLimit()
+    {
+        const QJsonObject root{
+            {QStringLiteral("choices"), QJsonArray{QJsonObject{
+                {QStringLiteral("finish_reason"), QStringLiteral("length")},
+                {QStringLiteral("message"), QJsonObject{
+                    {QStringLiteral("content"), QString()},
+                    {QStringLiteral("reasoning_content"), QStringLiteral("内部推理内容")}
+                }}
+            }}},
+            {QStringLiteral("usage"), QJsonObject{
+                {QStringLiteral("prompt_tokens"), 1200},
+                {QStringLiteral("completion_tokens"), 640},
+                {QStringLiteral("total_tokens"), 1840}
+            }}
+        };
+        const auto response = QJsonDocument(root).toJson(QJsonDocument::Compact);
+
+        QString envelopeError;
+        const auto envelope = extractAssistantEnvelope(response, &envelopeError);
+        QVERIFY2(envelope.has_value(), qPrintable(envelopeError));
+        QVERIFY(envelope->content.isEmpty());
+        QCOMPARE(envelope->reasoningLength, qsizetype{6});
+        QCOMPARE(envelope->finishReason, QStringLiteral("length"));
+        QCOMPARE(envelope->promptTokens, qint64{1200});
+        QCOMPARE(envelope->completionTokens, qint64{640});
+
+        QString parseError;
+        const auto payload = parseAssistantJson(response, &parseError);
+        QVERIFY(!payload.has_value());
+        QVERIFY(parseError.contains(QStringLiteral("token 上限")));
+        QVERIFY(parseError.contains(QStringLiteral("仅返回推理内容")));
+    }
+
+    void parseAssistantJson_classifiesEmptyFinalContent()
+    {
+        const QJsonObject root{
+            {QStringLiteral("choices"), QJsonArray{QJsonObject{
+                {QStringLiteral("finish_reason"), QStringLiteral("stop")},
+                {QStringLiteral("message"), QJsonObject{
+                    {QStringLiteral("content"), QString()}
+                }}
+            }}}
+        };
+
+        QString error;
+        const auto payload = parseAssistantJson(
+            QJsonDocument(root).toJson(QJsonDocument::Compact), &error);
+
+        QVERIFY(!payload.has_value());
+        QCOMPARE(error, QStringLiteral("视觉服务返回 HTTP 200，但最终正文为空"));
     }
 
     void parseAssistantJson_acceptsTextContentArray()

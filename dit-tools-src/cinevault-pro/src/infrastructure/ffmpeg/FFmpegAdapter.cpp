@@ -16,6 +16,7 @@
 namespace {
 struct ProcessResult {
     bool ok = false;
+    bool retryable = false;
     int exitCode = -1;
     QByteArray output;
     QByteArray errorOutput;
@@ -72,6 +73,7 @@ ProcessResult runProcess(const QString &program, const QStringList &arguments, i
     process.start();
 
     if (!process.waitForStarted(5000)) {
+        result.retryable = true;
         result.errorMessage = QStringLiteral("无法启动命令：%1").arg(process.errorString());
         return result;
     }
@@ -79,6 +81,7 @@ ProcessResult runProcess(const QString &program, const QStringList &arguments, i
     if (!process.waitForFinished(timeoutMs)) {
         process.kill();
         process.waitForFinished(3000);
+        result.retryable = true;
         result.errorMessage = QStringLiteral("命令执行超时");
         result.output = process.readAllStandardOutput();
         result.errorOutput = process.readAllStandardError();
@@ -94,6 +97,12 @@ ProcessResult runProcess(const QString &program, const QStringList &arguments, i
         result.errorMessage = stderrText.isEmpty()
             ? QStringLiteral("命令退出码：%1").arg(result.exitCode)
             : stderrText;
+        const auto normalizedError = result.errorMessage.toCaseFolded();
+        result.retryable = normalizedError.contains(QStringLiteral("temporarily unavailable"))
+            || normalizedError.contains(QStringLiteral("input/output error"))
+            || normalizedError.contains(QStringLiteral("i/o error"))
+            || normalizedError.contains(QStringLiteral("no such file"))
+            || normalizedError.contains(QStringLiteral("sharing violation"));
     }
     return result;
 }
@@ -410,6 +419,7 @@ ThumbnailResult FFmpegAdapter::generateThumbnail(const ThumbnailRequest &request
     };
     const auto process = runProcess(m_ffmpegPath, arguments, 60000);
     if (!process.ok) {
+        result.retryable = process.retryable;
         result.errorMessage = QStringLiteral("ffmpeg 生成缩略图失败：%1").arg(process.errorMessage);
         return result;
     }

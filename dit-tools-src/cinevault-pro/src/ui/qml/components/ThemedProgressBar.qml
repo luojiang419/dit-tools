@@ -4,6 +4,20 @@ import CineVault
 
 ProgressBar {
     id: control
+    property real indeterminatePhase: 0
+
+    NumberAnimation {
+        target: control
+        property: "indeterminatePhase"
+        from: 0
+        to: 1
+        duration: 900
+        loops: Animation.Infinite
+        running: control.indeterminate && control.visible
+        easing.type: Easing.InOutSine
+    }
+
+    onIndeterminateChanged: if (!control.indeterminate) control.indeterminatePhase = 0
 
     background: Rectangle {
         implicitHeight: 8
@@ -15,12 +29,16 @@ ProgressBar {
 
     contentItem: Item {
         implicitHeight: 8
+        clip: true
 
         Rectangle {
-            width: control.indeterminate ? parent.width : control.visualPosition * parent.width
+            width: control.indeterminate ? Math.max(24, parent.width * 0.32) : control.visualPosition * parent.width
+            x: control.indeterminate
+                ? -width + control.indeterminatePhase * (parent.width + width)
+                : 0
             height: parent.height
             radius: height / 2
-            color: control.indeterminate ? Qt.rgba(Theme.blue.r, Theme.blue.g, Theme.blue.b, 0.42) : Theme.blue
+            color: Theme.blue
         }
     }
 }

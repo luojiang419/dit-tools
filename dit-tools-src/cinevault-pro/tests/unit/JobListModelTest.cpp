@@ -67,6 +67,7 @@ class JobListModelTest : public QObject {
 private slots:
     void exposesFrameProgressRoles();
     void exposesNonFrameProgressRoles();
+    void exposesRemovalAndIndeterminateRoles();
     void sortsRunningJobsFirst();
 };
 
@@ -98,6 +99,26 @@ void JobListModelTest::exposesNonFrameProgressRoles()
              QStringLiteral("第1/1步 · 生成缩略图 · 8/20张"));
     QCOMPARE(model.data(index, JobListModel::ProgressShortLabelRole).toString(),
              QStringLiteral("第1/1步 · 8/20张"));
+}
+
+void JobListModelTest::exposesRemovalAndIndeterminateRoles()
+{
+    auto scan = makeOrderedJob(12, JobState::Running);
+    scan.type = JobType::Scan;
+    scan.progressContext.currentStep = 1;
+    scan.progressContext.totalSteps = 1;
+    scan.progressContext.currentItem = 200;
+
+    auto failed = makeOrderedJob(13, JobState::Failed);
+    failed.type = JobType::Scan;
+
+    JobListModel model;
+    model.setItems({failed, scan});
+
+    QCOMPARE(model.data(model.index(0, 0), JobListModel::IndeterminateRole).toBool(), true);
+    QCOMPARE(model.data(model.index(0, 0), JobListModel::CanRemoveRole).toBool(), false);
+    QCOMPARE(model.data(model.index(1, 0), JobListModel::IndeterminateRole).toBool(), false);
+    QCOMPARE(model.data(model.index(1, 0), JobListModel::CanRemoveRole).toBool(), true);
 }
 
 void JobListModelTest::sortsRunningJobsFirst()

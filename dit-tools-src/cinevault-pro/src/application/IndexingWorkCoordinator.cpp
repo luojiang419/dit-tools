@@ -1,5 +1,6 @@
 #include "application/IndexingWorkCoordinator.h"
 
+#include <QElapsedTimer>
 #include <QMutexLocker>
 
 #include <utility>
@@ -93,6 +94,10 @@ IndexingWorkCoordinator::Lease IndexingWorkCoordinator::acquire(const Request &r
         m_changed.wakeAll();
     }
     m_waiters.append(&waiter);
+    QElapsedTimer timeoutClock;
+    if (request.timeoutMs > 0) {
+        timeoutClock.start();
+    }
 
     while (true) {
         if (m_shutdown || waiter.cancelled || request.generation != m_generation) {
@@ -107,7 +112,18 @@ IndexingWorkCoordinator::Lease IndexingWorkCoordinator::acquire(const Request &r
             setResourceInUseLocked(request.resource, true);
             return Lease(this, request.resource);
         }
-        m_changed.wait(&m_mutex);
+        if (request.timeoutMs > 0) {
+            const auto remainingMs = request.timeoutMs
+                - static_cast<int>(timeoutClock.elapsed());
+            if (remainingMs <= 0) {
+                m_waiters.removeOne(&waiter);
+                m_changed.wakeAll();
+                return {};
+            }
+            m_changed.wait(&m_mutex, static_cast<unsigned long>(remainingMs));
+        } else {
+            m_changed.wait(&m_mutex);
+        }
     }
 }
 

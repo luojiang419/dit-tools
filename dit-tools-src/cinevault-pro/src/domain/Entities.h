@@ -120,6 +120,7 @@ struct ThumbnailRequest {
 struct ThumbnailResult {
     qint64 assetId = 0;
     bool success = false;
+    bool retryable = false;
     QString outputPath;
     QString errorMessage;
 };

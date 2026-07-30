@@ -1,6 +1,7 @@
 #include "application/MetadataExtractionService.h"
 
 #include "application/IndexingWorkCoordinator.h"
+#include "application/JobProgressHeartbeat.h"
 
 #include "core/jobs/JobEngine.h"
 #include "infrastructure/db/DatabaseManager.h"
@@ -11,7 +12,9 @@
 #include <QtConcurrent>
 
 #include <QDateTime>
+#include <QFileInfo>
 #include <QMetaObject>
+#include <QScopeGuard>
 #include <QSqlDatabase>
 #include <QSqlError>
 #include <QSqlQuery>
@@ -20,6 +23,10 @@
 
 
 namespace {
+constexpr qsizetype ExifToolBatchSize = 16;
+constexpr int ExifToolBatchTimeoutMs = 60000;
+constexpr int ExifToolSingleFileTimeoutMs = 20000;
+
 qint64 progressFor(qint64 processed, qint64 total)
 {
     return total <= 0
@@ -27,6 +34,56 @@ qint64 progressFor(qint64 processed, qint64 total)
         : qBound<qint64>(qint64{1},
                          (static_cast<qint64>(processed) * 100) / total,
                          qint64{100});
+}
+
+qint64 activeProgressFor(qint64 processed, qint64 total)
+{
+    if (total <= 0) {
+        return 100;
+    }
+    return processed <= 0 ? qint64{1} : progressFor(processed, total);
+}
+
+QString assetDisplayName(const AssetFile &asset)
+{
+    const auto name = asset.name.trimmed();
+    if (!name.isEmpty()) {
+        return name;
+    }
+    return QFileInfo(asset.absolutePath).fileName();
+}
+
+bool isRetryableBatchFailureMessage(const QString &message)
+{
+    const auto normalized = message.toCaseFolded();
+    return normalized.contains(QStringLiteral("超时"))
+        || normalized.contains(QStringLiteral("json 解析失败"))
+        || normalized.contains(QStringLiteral("未返回该文件"))
+        || normalized.contains(QStringLiteral("退出码"));
+}
+
+bool shouldRetryBatchIndividually(const QVector<EmbeddedMetadataResult> &results,
+                                  qsizetype batchSize)
+{
+    if (batchSize <= 1 || results.size() != batchSize) {
+        return false;
+    }
+    QString firstMessage;
+    for (const auto &result : results) {
+        if (result.status != ProbeStatus::Failed) {
+            return false;
+        }
+        const auto message = result.errorMessage.trimmed();
+        if (!isRetryableBatchFailureMessage(message)) {
+            return false;
+        }
+        if (firstMessage.isEmpty()) {
+            firstMessage = message;
+        } else if (firstMessage != message) {
+            return false;
+        }
+    }
+    return !firstMessage.isEmpty();
 }
 
 JobProgressContext extractionProgress(qint64 current, qint64 total)
@@ -61,6 +118,7 @@ MetadataExtractionService::MetadataExtractionService(DatabaseManager *databaseMa
     : QObject(parent)
     , m_databaseManager(databaseManager)
     , m_jobEngine(jobEngine)
+    , m_jobHeartbeat(new JobProgressHeartbeat(jobEngine, this))
     , m_exifToolAdapter(exifToolAdapter)
 {
 }
@@ -240,8 +298,13 @@ void MetadataExtractionService::runExtraction(qint64 sourceRootId,
         return;
     }
 
+    updateJob(projectDatabasePath,
+              jobId,
+              0,
+              QStringLiteral("开始读取 0/%1 个文件").arg(total),
+              extractionProgress(0, total));
+
     constexpr qsizetype PageSize = 128;
-    constexpr qsizetype ExifToolBatchSize = 32;
     qint64 processed = 0;
     qint64 failed = 0;
     qint64 lastAssetId = 0;
@@ -270,14 +333,38 @@ void MetadataExtractionService::runExtraction(qint64 sourceRootId,
             for (qsizetype index = 0; index < count; ++index) {
                 batch.append(assets.at(offset + index));
             }
+            const auto batchFirstItem = qMin<qint64>(processed + 1, total);
+            const auto batchLastItem = qMin<qint64>(processed + batch.size(), total);
+            const auto activeProgress = activeProgressFor(processed, total);
+            const auto activeContext = extractionProgress(batchFirstItem, total);
+            const auto batchDetail = batch.size() == 1
+                ? QStringLiteral("正在读取 %1/%2 个文件：%3")
+                      .arg(batchFirstItem)
+                      .arg(total)
+                      .arg(assetDisplayName(batch.constFirst()))
+                : QStringLiteral("正在读取 %1-%2/%3 个文件：%4 等 %5 个")
+                      .arg(batchFirstItem)
+                      .arg(batchLastItem)
+                      .arg(total)
+                      .arg(assetDisplayName(batch.constFirst()))
+                      .arg(batch.size());
             QVector<EmbeddedMetadataResult> results;
             {
                 IndexingWorkCoordinator::Lease heavyIoLease;
                 if (m_workCoordinator) {
+                    startJobHeartbeat(projectDatabasePath,
+                                      jobId,
+                                      activeProgress,
+                                      batchDetail,
+                                      activeContext,
+                                      QStringLiteral("等待执行资源"));
+                    const auto heartbeatGuard = qScopeGuard([this, jobId]() {
+                        stopJobHeartbeat(jobId);
+                    });
                     heavyIoLease = m_workCoordinator->acquire({
                         IndexingWorkCoordinator::Resource::HeavyIo,
                         IndexingWorkCoordinator::Priority::Background,
-                        true,
+                        false,
                         workGeneration});
                 }
                 if (m_workCoordinator && !heavyIoLease) {
@@ -289,10 +376,63 @@ void MetadataExtractionService::runExtraction(qint64 sourceRootId,
                     releaseActiveKey(activeKey);
                     return;
                 }
-                results = m_exifToolAdapter->extract(batch);
+                {
+                    startJobHeartbeat(projectDatabasePath,
+                                      jobId,
+                                      activeProgress,
+                                      batchDetail,
+                                      activeContext,
+                                      QStringLiteral("ExifTool 批量读取"));
+                    const auto heartbeatGuard = qScopeGuard([this, jobId]() {
+                        stopJobHeartbeat(jobId);
+                    });
+                    results = m_exifToolAdapter->extract(batch, ExifToolBatchTimeoutMs);
+                }
+                if (shouldRetryBatchIndividually(results, batch.size())) {
+                    results.clear();
+                    results.reserve(batch.size());
+                    updateJob(projectDatabasePath,
+                              jobId,
+                              activeProgress,
+                              QStringLiteral("批量读取异常，正在拆分为单文件读取：%1-%2/%3")
+                                  .arg(batchFirstItem)
+                                  .arg(batchLastItem)
+                                  .arg(total),
+                              activeContext);
+                    for (qsizetype index = 0; index < batch.size(); ++index) {
+                        const auto singleItem = batchFirstItem + index;
+                        const auto singleContext = extractionProgress(singleItem, total);
+                        const auto singleDetail = QStringLiteral("正在单文件读取 %1/%2 个文件：%3")
+                                                      .arg(singleItem)
+                                                      .arg(total)
+                                                      .arg(assetDisplayName(batch.at(index)));
+                        startJobHeartbeat(projectDatabasePath,
+                                          jobId,
+                                          activeProgress,
+                                          singleDetail,
+                                          singleContext,
+                                          QStringLiteral("ExifTool 单文件读取"));
+                        const auto heartbeatGuard = qScopeGuard([this, jobId]() {
+                            stopJobHeartbeat(jobId);
+                        });
+                        const QVector<AssetFile> singleBatch{batch.at(index)};
+                        const auto singleResults = m_exifToolAdapter->extract(
+                            singleBatch, ExifToolSingleFileTimeoutMs);
+                        results += singleResults;
+                    }
+                }
             }
             IndexingWorkCoordinator::Lease writerLease;
             if (m_workCoordinator) {
+                startJobHeartbeat(projectDatabasePath,
+                                  jobId,
+                                  activeProgress,
+                                  batchDetail,
+                                  activeContext,
+                                  QStringLiteral("等待写入资源"));
+                const auto heartbeatGuard = qScopeGuard([this, jobId]() {
+                    stopJobHeartbeat(jobId);
+                });
                 writerLease = m_workCoordinator->acquire({
                     IndexingWorkCoordinator::Resource::SqliteWriter,
                     IndexingWorkCoordinator::Priority::Background,
@@ -438,8 +578,49 @@ void MetadataExtractionService::updateJob(const QString &projectDatabasePath,
     }, Qt::QueuedConnection);
 }
 
+void MetadataExtractionService::startJobHeartbeat(const QString &projectDatabasePath,
+                                                  qint64 jobId,
+                                                  qint64 progress,
+                                                  const QString &detailPrefix,
+                                                  const JobProgressContext &context,
+                                                  const QString &waitLabel)
+{
+    if (!m_jobHeartbeat || jobId <= 0) {
+        return;
+    }
+    QMetaObject::invokeMethod(m_jobHeartbeat,
+                              [heartbeat = m_jobHeartbeat,
+                               projectDatabasePath,
+                               jobId,
+                               progress,
+                               detailPrefix,
+                               context,
+                               waitLabel]() {
+        heartbeat->start(projectDatabasePath,
+                         jobId,
+                         progress,
+                         detailPrefix,
+                         context,
+                         waitLabel);
+    },
+                              Qt::QueuedConnection);
+}
+
+void MetadataExtractionService::stopJobHeartbeat(qint64 jobId)
+{
+    if (!m_jobHeartbeat || jobId <= 0) {
+        return;
+    }
+    QMetaObject::invokeMethod(m_jobHeartbeat,
+                              [heartbeat = m_jobHeartbeat, jobId]() {
+        heartbeat->stop(jobId);
+    },
+                              Qt::QueuedConnection);
+}
+
 void MetadataExtractionService::completeJob(const QString &projectDatabasePath, qint64 jobId, const QString &detail)
 {
+    stopJobHeartbeat(jobId);
     QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, projectDatabasePath, jobId, detail]() {
         engine->completeJobForProject(projectDatabasePath, jobId, detail);
     }, Qt::QueuedConnection);
@@ -447,6 +628,7 @@ void MetadataExtractionService::completeJob(const QString &projectDatabasePath, 
 
 void MetadataExtractionService::failJob(const QString &projectDatabasePath, qint64 jobId, const QString &message)
 {
+    stopJobHeartbeat(jobId);
     QMetaObject::invokeMethod(m_jobEngine, [engine = m_jobEngine, projectDatabasePath, jobId, message]() {
         engine->failJobForProject(projectDatabasePath, jobId, message);
     }, Qt::QueuedConnection);

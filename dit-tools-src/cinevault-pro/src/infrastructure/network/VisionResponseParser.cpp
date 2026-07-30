@@ -313,10 +313,27 @@ QString fallbackText(QString text)
     }
     return text;
 }
+
+QString emptyContentError(const VisionResponseParser::AssistantResponseEnvelope &envelope)
+{
+    const auto reachedTokenLimit = envelope.finishReason.compare(
+        QStringLiteral("length"), Qt::CaseInsensitive) == 0;
+    if (reachedTokenLimit && envelope.reasoningLength > 0) {
+        return QStringLiteral("视觉模型达到输出 token 上限，尚未生成最终 JSON（服务仅返回推理内容）");
+    }
+    if (reachedTokenLimit) {
+        return QStringLiteral("视觉模型达到输出 token 上限，尚未生成最终 JSON");
+    }
+    if (envelope.reasoningLength > 0) {
+        return QStringLiteral("视觉服务返回 HTTP 200，但最终正文为空（服务仅返回推理内容）");
+    }
+    return QStringLiteral("视觉服务返回 HTTP 200，但最终正文为空");
+}
 }
 
-std::optional<QString> VisionResponseParser::extractAssistantContent(const QByteArray &responseBody,
-                                                                     QString *errorMessage)
+std::optional<VisionResponseParser::AssistantResponseEnvelope>
+VisionResponseParser::extractAssistantEnvelope(const QByteArray &responseBody,
+                                               QString *errorMessage)
 {
     QJsonParseError responseParseError;
     const auto responseDocument = QJsonDocument::fromJson(responseBody, &responseParseError);
@@ -336,19 +353,56 @@ std::optional<QString> VisionResponseParser::extractAssistantContent(const QByte
         return std::nullopt;
     }
 
-    const auto message = choices.first().toObject().value(QStringLiteral("message")).toObject();
-    return extractMessageContent(message.value(QStringLiteral("content")));
+    const auto choice = choices.first().toObject();
+    const auto message = choice.value(QStringLiteral("message")).toObject();
+    const auto usage = root.value(QStringLiteral("usage")).toObject();
+
+    AssistantResponseEnvelope envelope;
+    envelope.content = extractMessageContent(message.value(QStringLiteral("content")));
+    auto reasoning = extractMessageContent(message.value(QStringLiteral("reasoning_content")));
+    if (reasoning.isEmpty()) {
+        reasoning = extractMessageContent(message.value(QStringLiteral("reasoning")));
+    }
+    envelope.reasoningLength = reasoning.size();
+    envelope.finishReason = choice.value(QStringLiteral("finish_reason")).toString().trimmed();
+    const auto tokenCount = [&usage](const QString &key) {
+        const auto value = usage.value(key);
+        return value.isDouble() ? static_cast<qint64>(value.toDouble()) : qint64{-1};
+    };
+    envelope.promptTokens = tokenCount(QStringLiteral("prompt_tokens"));
+    envelope.completionTokens = tokenCount(QStringLiteral("completion_tokens"));
+    envelope.totalTokens = tokenCount(QStringLiteral("total_tokens"));
+    if (errorMessage) {
+        errorMessage->clear();
+    }
+    return envelope;
+}
+
+std::optional<QString> VisionResponseParser::extractAssistantContent(const QByteArray &responseBody,
+                                                                     QString *errorMessage)
+{
+    const auto envelope = extractAssistantEnvelope(responseBody, errorMessage);
+    if (!envelope.has_value()) {
+        return std::nullopt;
+    }
+    return envelope->content;
 }
 
 std::optional<QJsonObject> VisionResponseParser::parseAssistantJson(const QByteArray &responseBody,
                                                                     QString *errorMessage)
 {
-    const auto contentText = extractAssistantContent(responseBody, errorMessage);
-    if (!contentText.has_value()) {
+    const auto envelope = extractAssistantEnvelope(responseBody, errorMessage);
+    if (!envelope.has_value()) {
+        return std::nullopt;
+    }
+    if (envelope->content.trimmed().isEmpty()) {
+        if (errorMessage) {
+            *errorMessage = emptyContentError(*envelope);
+        }
         return std::nullopt;
     }
 
-    const auto jsonText = extractJsonBlock(*contentText);
+    const auto jsonText = extractJsonBlock(envelope->content);
 
     QJsonParseError contentParseError;
     const auto contentDocument = QJsonDocument::fromJson(jsonText.toUtf8(), &contentParseError);
@@ -357,6 +411,9 @@ std::optional<QJsonObject> VisionResponseParser::parseAssistantJson(const QByteA
             *errorMessage = QStringLiteral("视觉接口返回内容不是有效 JSON");
         }
         return std::nullopt;
+    }
+    if (errorMessage) {
+        errorMessage->clear();
     }
     return contentDocument.object();
 }

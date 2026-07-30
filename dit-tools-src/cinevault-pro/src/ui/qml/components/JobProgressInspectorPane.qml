@@ -4,6 +4,7 @@ import QtQuick.Layouts
 import CineVault
 
 Rectangle {
+    id: root
     property var viewModel
     readonly property bool hasSelectedTask: viewModel && viewModel.hasSelection
     readonly property bool hasCurrentItem: viewModel && viewModel.hasActiveBatchItem
@@ -214,10 +215,13 @@ Rectangle {
                             from: 0
                             to: 100
                             value: viewModel ? viewModel.selectedJobProgress : 0
+                            indeterminate: root.viewModel && root.viewModel.selectedJobIndeterminate
                         }
 
                         Text {
-                            text: (viewModel ? viewModel.selectedJobProgress : 0) + "%"
+                            text: root.viewModel && root.viewModel.selectedJobIndeterminate
+                                ? "扫描中"
+                                : (root.viewModel ? root.viewModel.selectedJobProgress : 0) + "%"
                             color: "white"
                             font.pixelSize: 12
                             font.weight: Font.DemiBold
@@ -279,7 +283,9 @@ Rectangle {
                             }
 
                             Text {
-                                text: hasSelectedTask ? viewModel.selectedJobProgress + "%" : "0%"
+                                text: root.hasSelectedTask && root.viewModel.selectedJobIndeterminate
+                                    ? "扫描中"
+                                    : (root.hasSelectedTask ? root.viewModel.selectedJobProgress + "%" : "0%")
                                 color: Theme.text
                                 font.pixelSize: 13
                                 font.weight: Font.DemiBold
@@ -291,6 +297,7 @@ Rectangle {
                             from: 0
                             to: 100
                             value: hasSelectedTask ? viewModel.selectedJobProgress : 0
+                            indeterminate: root.hasSelectedTask && root.viewModel.selectedJobIndeterminate
                         }
 
                         Text {
@@ -431,7 +438,9 @@ Rectangle {
                             }
 
                             Text {
-                                text: batchProgress + "%"
+                                text: root.viewModel && root.viewModel.batchIndeterminate
+                                    ? "扫描中"
+                                    : root.batchProgress + "%"
                                 color: Theme.text
                                 font.pixelSize: 13
                                 font.weight: Font.DemiBold
@@ -443,6 +452,7 @@ Rectangle {
                             from: 0
                             to: 100
                             value: batchProgress
+                            indeterminate: root.viewModel && root.viewModel.batchIndeterminate
                         }
 
                         Text {

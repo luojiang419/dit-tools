@@ -15,6 +15,7 @@ class JobTimelineViewModel : public QObject {
     Q_PROPERTY(QVariantList timelineItems READ timelineItems NOTIFY timelineChanged)
     Q_PROPERTY(bool footerHasTasks READ footerHasTasks NOTIFY stateChanged)
     Q_PROPERTY(int footerProgress READ footerProgress NOTIFY stateChanged)
+    Q_PROPERTY(bool footerIndeterminate READ footerIndeterminate NOTIFY stateChanged)
     Q_PROPERTY(QString footerProgressText READ footerProgressText NOTIFY stateChanged)
     Q_PROPERTY(QString footerSummary READ footerSummary NOTIFY stateChanged)
     Q_PROPERTY(int footerRunningCount READ footerRunningCount NOTIFY stateChanged)
@@ -24,6 +25,7 @@ class JobTimelineViewModel : public QObject {
     Q_PROPERTY(QString batchTitle READ batchTitle NOTIFY stateChanged)
     Q_PROPERTY(QString batchProgressText READ batchProgressText NOTIFY stateChanged)
     Q_PROPERTY(int batchProgress READ batchProgress NOTIFY stateChanged)
+    Q_PROPERTY(bool batchIndeterminate READ batchIndeterminate NOTIFY stateChanged)
     Q_PROPERTY(QString batchStatusText READ batchStatusText NOTIFY stateChanged)
     Q_PROPERTY(QString batchCurrentLabel READ batchCurrentLabel NOTIFY stateChanged)
     Q_PROPERTY(QString batchCurrentDetail READ batchCurrentDetail NOTIFY stateChanged)
@@ -34,7 +36,7 @@ class JobTimelineViewModel : public QObject {
     Q_PROPERTY(int batchFailedCount READ batchFailedCount NOTIFY stateChanged)
     Q_PROPERTY(int batchTotalCount READ batchTotalCount NOTIFY stateChanged)
     Q_PROPERTY(int batchQueuedCount READ batchQueuedCount NOTIFY stateChanged)
-    Q_PROPERTY(bool canClearCompletedJobs READ canClearCompletedJobs NOTIFY stateChanged)
+    Q_PROPERTY(bool canClearFinishedJobs READ canClearFinishedJobs NOTIFY stateChanged)
     Q_PROPERTY(bool hasSelection READ hasSelection NOTIFY stateChanged)
     Q_PROPERTY(qint64 selectedJobId READ selectedJobId NOTIFY stateChanged)
     Q_PROPERTY(QString selectedJobTitle READ selectedJobTitle NOTIFY stateChanged)
@@ -43,6 +45,7 @@ class JobTimelineViewModel : public QObject {
     Q_PROPERTY(QString selectedJobStateLabel READ selectedJobStateLabel NOTIFY stateChanged)
     Q_PROPERTY(QString selectedJobError READ selectedJobError NOTIFY stateChanged)
     Q_PROPERTY(int selectedJobProgress READ selectedJobProgress NOTIFY stateChanged)
+    Q_PROPERTY(bool selectedJobIndeterminate READ selectedJobIndeterminate NOTIFY stateChanged)
     Q_PROPERTY(QString selectedSubjectKind READ selectedSubjectKind NOTIFY stateChanged)
     Q_PROPERTY(QString selectedSubjectName READ selectedSubjectName NOTIFY stateChanged)
     Q_PROPERTY(QString selectedSubjectPath READ selectedSubjectPath NOTIFY stateChanged)
@@ -61,6 +64,7 @@ public:
     QVariantList timelineItems() const;
     bool footerHasTasks() const;
     int footerProgress() const;
+    bool footerIndeterminate() const;
     QString footerProgressText() const;
     QString footerSummary() const;
     int footerRunningCount() const;
@@ -70,6 +74,7 @@ public:
     QString batchTitle() const;
     QString batchProgressText() const;
     int batchProgress() const;
+    bool batchIndeterminate() const;
     QString batchStatusText() const;
     QString batchCurrentLabel() const;
     QString batchCurrentDetail() const;
@@ -80,7 +85,7 @@ public:
     int batchFailedCount() const;
     int batchTotalCount() const;
     int batchQueuedCount() const;
-    bool canClearCompletedJobs() const;
+    bool canClearFinishedJobs() const;
     bool hasSelection() const;
     qint64 selectedJobId() const;
     QString selectedJobTitle() const;
@@ -89,6 +94,7 @@ public:
     QString selectedJobStateLabel() const;
     QString selectedJobError() const;
     int selectedJobProgress() const;
+    bool selectedJobIndeterminate() const;
     QString selectedSubjectKind() const;
     QString selectedSubjectName() const;
     QString selectedSubjectPath() const;
@@ -103,7 +109,8 @@ public:
 public slots:
     void reload();
     Q_INVOKABLE void selectJob(qint64 jobId);
-    Q_INVOKABLE void clearCompletedJobs();
+    Q_INVOKABLE void removeFinishedJob(qint64 jobId);
+    Q_INVOKABLE void clearFinishedJobs();
 
 signals:
     void timelineChanged();

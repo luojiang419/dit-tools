@@ -23,10 +23,12 @@ QVariantList MinimalJobTimelineViewModel::timelineItems() const
     return m_timelineItems;
 }
 
-bool MinimalJobTimelineViewModel::canClearCompletedJobs() const
+bool MinimalJobTimelineViewModel::canClearFinishedJobs() const
 {
     for (const auto &job : m_jobs) {
-        if (job.state == JobState::Completed) {
+        if (job.state == JobState::Completed
+            || job.state == JobState::Failed
+            || job.state == JobState::Cancelled) {
             return true;
         }
     }
@@ -50,12 +52,32 @@ void MinimalJobTimelineViewModel::reload()
     emit timelineChanged();
 }
 
-void MinimalJobTimelineViewModel::clearCompletedJobs()
+void MinimalJobTimelineViewModel::removeFinishedJob(qint64 jobId)
+{
+    for (qsizetype index = 0; index < m_jobs.size(); ++index) {
+        const auto &job = m_jobs.at(index);
+        if (job.id != jobId) {
+            continue;
+        }
+        if (job.state != JobState::Completed
+            && job.state != JobState::Failed
+            && job.state != JobState::Cancelled) {
+            return;
+        }
+        m_jobs.removeAt(index);
+        reload();
+        return;
+    }
+}
+
+void MinimalJobTimelineViewModel::clearFinishedJobs()
 {
     QVector<Job> keptJobs;
     keptJobs.reserve(m_jobs.size());
     for (const auto &job : m_jobs) {
-        if (job.state != JobState::Completed) {
+        if (job.state != JobState::Completed
+            && job.state != JobState::Failed
+            && job.state != JobState::Cancelled) {
             keptJobs.append(job);
         }
     }

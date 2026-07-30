@@ -4,6 +4,7 @@ import QtQuick.Layouts
 import CineVault
 
 Rectangle {
+    id: root
     property var viewModel
     property var libraryViewModel
 
@@ -51,6 +52,7 @@ Rectangle {
                 from: 0
                 to: 100
                 value: viewModel ? viewModel.footerProgress : 0
+                indeterminate: root.viewModel && root.viewModel.footerIndeterminate
 
                 Behavior on value {
                     NumberAnimation {

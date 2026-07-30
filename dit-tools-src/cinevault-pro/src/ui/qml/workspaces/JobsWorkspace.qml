@@ -4,6 +4,7 @@ import QtQuick.Layouts
 import CineVault
 
 Rectangle {
+    id: root
     property var viewModel
 
     color: Theme.bg
@@ -29,9 +30,9 @@ Rectangle {
             ActionButton {
                 Layout.preferredWidth: 126
                 Layout.preferredHeight: 36
-                text: "清理已完成"
-                enabled: viewModel && viewModel.canClearCompletedJobs
-                onClicked: if (viewModel) viewModel.clearCompletedJobs()
+                text: "清理已结束"
+                enabled: root.viewModel && root.viewModel.canClearFinishedJobs
+                onClicked: if (root.viewModel) root.viewModel.clearFinishedJobs()
             }
         }
 
@@ -90,7 +91,9 @@ Rectangle {
 
                                 Text {
                                     anchors.centerIn: parent
-                                    text: (viewModel ? viewModel.batchProgress : 0) + "%"
+                                    text: root.viewModel && root.viewModel.batchIndeterminate
+                                        ? "扫描中"
+                                        : (root.viewModel ? root.viewModel.batchProgress : 0) + "%"
                                     color: Theme.text
                                     font.pixelSize: 20
                                     font.weight: Font.Black
@@ -103,6 +106,7 @@ Rectangle {
                             from: 0
                             to: 100
                             value: viewModel ? viewModel.batchProgress : 0
+                            indeterminate: root.viewModel && root.viewModel.batchIndeterminate
                         }
 
                         Text {
@@ -261,6 +265,8 @@ Rectangle {
                         }
 
                         delegate: Rectangle {
+                            id: jobCard
+                            required property var model
                             width: ListView.view.width
                             height: 124
                             radius: 16
@@ -295,6 +301,14 @@ Rectangle {
                                         text: model.stateLabel
                                         color: Theme.muted
                                         font.pixelSize: 12
+                                    }
+
+                                    ActionButton {
+                                        Layout.preferredWidth: 54
+                                        Layout.preferredHeight: 26
+                                        text: "删除"
+                                        visible: jobCard.model.canRemove
+                                        onClicked: if (root.viewModel) root.viewModel.removeFinishedJob(jobCard.model.jobId)
                                     }
                                 }
 
@@ -333,10 +347,11 @@ Rectangle {
                                         from: 0
                                         to: 100
                                         value: model.progress
+                                        indeterminate: jobCard.model.indeterminate
                                     }
 
                                     Text {
-                                        text: model.progress + "%"
+                                        text: jobCard.model.indeterminate ? "扫描中" : jobCard.model.progress + "%"
                                         color: Theme.text
                                         font.pixelSize: 12
                                         font.weight: Font.DemiBold

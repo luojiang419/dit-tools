@@ -319,6 +319,12 @@ QString ExifToolAdapter::version() const
 
 QVector<EmbeddedMetadataResult> ExifToolAdapter::extract(const QVector<AssetFile> &assets) const
 {
+    return extract(assets, 120000);
+}
+
+QVector<EmbeddedMetadataResult> ExifToolAdapter::extract(const QVector<AssetFile> &assets,
+                                                         int timeoutMs) const
+{
     QVector<EmbeddedMetadataResult> results;
     results.reserve(assets.size());
     if (assets.isEmpty()) {
@@ -352,7 +358,7 @@ QVector<EmbeddedMetadataResult> ExifToolAdapter::extract(const QVector<AssetFile
         assetsByPath.insert(FolderPathMetadata::normalizedPathKey(asset.absolutePath), asset);
     }
 
-    const auto process = runProcess(m_executablePath, arguments, 120000);
+    const auto process = runProcess(m_executablePath, arguments, qMax(1000, timeoutMs));
     QJsonParseError parseError;
     const auto document = QJsonDocument::fromJson(process.standardOutput, &parseError);
     if (parseError.error != QJsonParseError::NoError || !document.isArray()) {

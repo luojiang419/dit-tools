@@ -10,6 +10,7 @@
 class DatabaseManager;
 class JobEngine;
 class IndexingWorkCoordinator;
+class JobProgressHeartbeat;
 class QSqlDatabase;
 
 class MetadataExtractionService final : public QObject {
@@ -52,12 +53,20 @@ private:
                    qint64 progress,
                    const QString &detail,
                    const JobProgressContext &context);
+    void startJobHeartbeat(const QString &projectDatabasePath,
+                           qint64 jobId,
+                           qint64 progress,
+                           const QString &detailPrefix,
+                           const JobProgressContext &context,
+                           const QString &waitLabel);
+    void stopJobHeartbeat(qint64 jobId);
     void completeJob(const QString &projectDatabasePath, qint64 jobId, const QString &detail);
     void failJob(const QString &projectDatabasePath, qint64 jobId, const QString &message);
     void releaseActiveKey(const QString &activeKey);
 
     DatabaseManager *m_databaseManager = nullptr;
     JobEngine *m_jobEngine = nullptr;
+    JobProgressHeartbeat *m_jobHeartbeat = nullptr;
     ExifToolAdapter *m_exifToolAdapter = nullptr;
     IndexingWorkCoordinator *m_workCoordinator = nullptr;
     QFutureSynchronizer<void> m_futures;

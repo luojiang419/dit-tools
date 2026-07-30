@@ -343,6 +343,22 @@ bool DatabaseManager::initializeSchema(QSqlDatabase &db, bool databaseExistedBef
         return rollback();
     }
 
+    if (version < 9) {
+        if (!migrateToVersion9(db, errorMessage)) {
+            return rollback();
+        }
+        version = 9;
+    }
+
+    if (version < 10) {
+        if (!migrateToVersion10(db, errorMessage)) {
+            return rollback();
+        }
+        version = 10;
+    } else if (!ensureMetadataRetrySchemaCompatibility(db, errorMessage)) {
+        return rollback();
+    }
+
     if (!db.commit()) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("提交项目数据库迁移失败：%1").arg(db.lastError().text());
@@ -533,6 +549,11 @@ bool DatabaseManager::migrateToVersion2(QSqlDatabase &db, QString *errorMessage)
                        "bit_rate INTEGER NOT NULL DEFAULT 0,"
                        "raw_json TEXT,"
                        "error_message TEXT,"
+                       "retry_count INTEGER NOT NULL DEFAULT 0,"
+                       "next_retry_at TEXT NOT NULL DEFAULT '',"
+                       "retry_policy_version INTEGER NOT NULL DEFAULT 0,"
+                       "failure_kind TEXT NOT NULL DEFAULT '',"
+                       "last_attempt_at TEXT NOT NULL DEFAULT '',"
                        "updated_at TEXT NOT NULL,"
                        "FOREIGN KEY(asset_id) REFERENCES asset_file(id) ON DELETE CASCADE"
                        ");"),
@@ -555,10 +576,16 @@ bool DatabaseManager::migrateToVersion2(QSqlDatabase &db, QString *errorMessage)
                        "image_path TEXT,"
                        "updated_at TEXT NOT NULL,"
                        "error_message TEXT,"
+                       "retry_count INTEGER NOT NULL DEFAULT 0,"
+                       "next_retry_at TEXT NOT NULL DEFAULT '',"
+                       "retry_policy_version INTEGER NOT NULL DEFAULT 0,"
+                       "failure_kind TEXT NOT NULL DEFAULT '',"
                        "FOREIGN KEY(asset_id) REFERENCES asset_file(id) ON DELETE CASCADE"
                        ");"),
         QStringLiteral("CREATE INDEX IF NOT EXISTS idx_media_stream_asset_id ON media_stream(asset_id);"),
-        QStringLiteral("CREATE INDEX IF NOT EXISTS idx_media_metadata_probe_status ON media_metadata(probe_status);")
+        QStringLiteral("CREATE INDEX IF NOT EXISTS idx_media_metadata_probe_status ON media_metadata(probe_status);"),
+        QStringLiteral("CREATE INDEX IF NOT EXISTS idx_media_metadata_retry "
+                       "ON media_metadata(probe_status, next_retry_at, retry_policy_version, asset_id);")
     };
 
     if (!executeBatch(db, statements, errorMessage)) {
@@ -583,6 +610,11 @@ bool DatabaseManager::ensureMediaSchemaCompatibility(QSqlDatabase &db, QString *
                        "bit_rate INTEGER NOT NULL DEFAULT 0,"
                        "raw_json TEXT,"
                        "error_message TEXT,"
+                       "retry_count INTEGER NOT NULL DEFAULT 0,"
+                       "next_retry_at TEXT NOT NULL DEFAULT '',"
+                       "retry_policy_version INTEGER NOT NULL DEFAULT 0,"
+                       "failure_kind TEXT NOT NULL DEFAULT '',"
+                       "last_attempt_at TEXT NOT NULL DEFAULT '',"
                        "updated_at TEXT NOT NULL,"
                        "FOREIGN KEY(asset_id) REFERENCES asset_file(id) ON DELETE CASCADE"
                        ");"),
@@ -605,6 +637,10 @@ bool DatabaseManager::ensureMediaSchemaCompatibility(QSqlDatabase &db, QString *
                        "image_path TEXT,"
                        "updated_at TEXT NOT NULL,"
                        "error_message TEXT,"
+                       "retry_count INTEGER NOT NULL DEFAULT 0,"
+                       "next_retry_at TEXT NOT NULL DEFAULT '',"
+                       "retry_policy_version INTEGER NOT NULL DEFAULT 0,"
+                       "failure_kind TEXT NOT NULL DEFAULT '',"
                        "FOREIGN KEY(asset_id) REFERENCES asset_file(id) ON DELETE CASCADE"
                        ");"),
         QStringLiteral("CREATE INDEX IF NOT EXISTS idx_media_stream_asset_id ON media_stream(asset_id);"),
@@ -615,45 +651,63 @@ bool DatabaseManager::ensureMediaSchemaCompatibility(QSqlDatabase &db, QString *
         return false;
     }
 
-    return ensureColumns(db,
-                         QStringLiteral("media_metadata"),
-                         {
-                             {QStringLiteral("asset_id"), QStringLiteral("asset_id INTEGER NOT NULL DEFAULT 0")},
-                             {QStringLiteral("probe_status"), QStringLiteral("probe_status INTEGER NOT NULL DEFAULT 0")},
-                             {QStringLiteral("media_type"), QStringLiteral("media_type INTEGER NOT NULL DEFAULT 0")},
-                             {QStringLiteral("container"), QStringLiteral("container TEXT")},
-                             {QStringLiteral("duration_ms"), QStringLiteral("duration_ms INTEGER NOT NULL DEFAULT 0")},
-                             {QStringLiteral("bit_rate"), QStringLiteral("bit_rate INTEGER NOT NULL DEFAULT 0")},
-                             {QStringLiteral("raw_json"), QStringLiteral("raw_json TEXT")},
-                             {QStringLiteral("error_message"), QStringLiteral("error_message TEXT")},
-                             {QStringLiteral("updated_at"), QStringLiteral("updated_at TEXT NOT NULL DEFAULT ''")}
-                         },
-                         errorMessage)
-        && ensureColumns(db,
-                         QStringLiteral("media_stream"),
-                         {
-                             {QStringLiteral("id"), QStringLiteral("id INTEGER NOT NULL DEFAULT 0")},
-                             {QStringLiteral("asset_id"), QStringLiteral("asset_id INTEGER NOT NULL DEFAULT 0")},
-                             {QStringLiteral("stream_index"), QStringLiteral("stream_index INTEGER NOT NULL DEFAULT 0")},
-                             {QStringLiteral("stream_kind"), QStringLiteral("stream_kind TEXT NOT NULL DEFAULT ''")},
-                             {QStringLiteral("codec"), QStringLiteral("codec TEXT")},
-                             {QStringLiteral("bit_rate"), QStringLiteral("bit_rate INTEGER NOT NULL DEFAULT 0")},
-                             {QStringLiteral("width"), QStringLiteral("width INTEGER NOT NULL DEFAULT 0")},
-                             {QStringLiteral("height"), QStringLiteral("height INTEGER NOT NULL DEFAULT 0")},
-                             {QStringLiteral("channels"), QStringLiteral("channels INTEGER NOT NULL DEFAULT 0")},
-                             {QStringLiteral("sample_rate"), QStringLiteral("sample_rate INTEGER NOT NULL DEFAULT 0")}
-                         },
-                         errorMessage)
-        && ensureColumns(db,
-                         QStringLiteral("thumbnail"),
-                         {
-                             {QStringLiteral("asset_id"), QStringLiteral("asset_id INTEGER NOT NULL DEFAULT 0")},
-                             {QStringLiteral("status"), QStringLiteral("status INTEGER NOT NULL DEFAULT 0")},
-                             {QStringLiteral("image_path"), QStringLiteral("image_path TEXT")},
-                             {QStringLiteral("updated_at"), QStringLiteral("updated_at TEXT NOT NULL DEFAULT ''")},
-                             {QStringLiteral("error_message"), QStringLiteral("error_message TEXT")}
-                         },
-                         errorMessage);
+    if (!ensureColumns(db,
+                       QStringLiteral("media_metadata"),
+                       {
+                           {QStringLiteral("asset_id"), QStringLiteral("asset_id INTEGER NOT NULL DEFAULT 0")},
+                           {QStringLiteral("probe_status"), QStringLiteral("probe_status INTEGER NOT NULL DEFAULT 0")},
+                           {QStringLiteral("media_type"), QStringLiteral("media_type INTEGER NOT NULL DEFAULT 0")},
+                           {QStringLiteral("container"), QStringLiteral("container TEXT")},
+                           {QStringLiteral("duration_ms"), QStringLiteral("duration_ms INTEGER NOT NULL DEFAULT 0")},
+                           {QStringLiteral("bit_rate"), QStringLiteral("bit_rate INTEGER NOT NULL DEFAULT 0")},
+                           {QStringLiteral("raw_json"), QStringLiteral("raw_json TEXT")},
+                           {QStringLiteral("error_message"), QStringLiteral("error_message TEXT")},
+                           {QStringLiteral("retry_count"), QStringLiteral("retry_count INTEGER NOT NULL DEFAULT 0")},
+                           {QStringLiteral("next_retry_at"), QStringLiteral("next_retry_at TEXT NOT NULL DEFAULT ''")},
+                           {QStringLiteral("retry_policy_version"), QStringLiteral("retry_policy_version INTEGER NOT NULL DEFAULT 0")},
+                           {QStringLiteral("failure_kind"), QStringLiteral("failure_kind TEXT NOT NULL DEFAULT ''")},
+                           {QStringLiteral("last_attempt_at"), QStringLiteral("last_attempt_at TEXT NOT NULL DEFAULT ''")},
+                           {QStringLiteral("updated_at"), QStringLiteral("updated_at TEXT NOT NULL DEFAULT ''")}
+                       },
+                       errorMessage)
+        || !ensureColumns(db,
+                          QStringLiteral("media_stream"),
+                          {
+                              {QStringLiteral("id"), QStringLiteral("id INTEGER NOT NULL DEFAULT 0")},
+                              {QStringLiteral("asset_id"), QStringLiteral("asset_id INTEGER NOT NULL DEFAULT 0")},
+                              {QStringLiteral("stream_index"), QStringLiteral("stream_index INTEGER NOT NULL DEFAULT 0")},
+                              {QStringLiteral("stream_kind"), QStringLiteral("stream_kind TEXT NOT NULL DEFAULT ''")},
+                              {QStringLiteral("codec"), QStringLiteral("codec TEXT")},
+                              {QStringLiteral("bit_rate"), QStringLiteral("bit_rate INTEGER NOT NULL DEFAULT 0")},
+                              {QStringLiteral("width"), QStringLiteral("width INTEGER NOT NULL DEFAULT 0")},
+                              {QStringLiteral("height"), QStringLiteral("height INTEGER NOT NULL DEFAULT 0")},
+                              {QStringLiteral("channels"), QStringLiteral("channels INTEGER NOT NULL DEFAULT 0")},
+                              {QStringLiteral("sample_rate"), QStringLiteral("sample_rate INTEGER NOT NULL DEFAULT 0")}
+                          },
+                          errorMessage)
+        || !ensureColumns(db,
+                          QStringLiteral("thumbnail"),
+                          {
+                              {QStringLiteral("asset_id"), QStringLiteral("asset_id INTEGER NOT NULL DEFAULT 0")},
+                              {QStringLiteral("status"), QStringLiteral("status INTEGER NOT NULL DEFAULT 0")},
+                              {QStringLiteral("image_path"), QStringLiteral("image_path TEXT")},
+                              {QStringLiteral("updated_at"), QStringLiteral("updated_at TEXT NOT NULL DEFAULT ''")},
+                              {QStringLiteral("error_message"), QStringLiteral("error_message TEXT")},
+                              {QStringLiteral("retry_count"), QStringLiteral("retry_count INTEGER NOT NULL DEFAULT 0")},
+                              {QStringLiteral("next_retry_at"), QStringLiteral("next_retry_at TEXT NOT NULL DEFAULT ''")},
+                              {QStringLiteral("retry_policy_version"), QStringLiteral("retry_policy_version INTEGER NOT NULL DEFAULT 0")},
+                              {QStringLiteral("failure_kind"), QStringLiteral("failure_kind TEXT NOT NULL DEFAULT ''")}
+                          },
+                          errorMessage)) {
+        return false;
+    }
+
+    return executeBatch(db,
+                        {QStringLiteral("CREATE INDEX IF NOT EXISTS idx_media_metadata_retry "
+                                        "ON media_metadata(probe_status, next_retry_at, retry_policy_version, asset_id);"),
+                         QStringLiteral("CREATE INDEX IF NOT EXISTS idx_thumbnail_retry_schedule "
+                                        "ON thumbnail(status, next_retry_at, retry_policy_version, asset_id);")},
+                        errorMessage);
 }
 
 bool DatabaseManager::migrateToVersion3(QSqlDatabase &db, QString *errorMessage) const
@@ -956,6 +1010,11 @@ bool DatabaseManager::ensureEmbeddedMetadataSchemaCompatibility(QSqlDatabase &db
                        "search_text TEXT NOT NULL DEFAULT '',"
                        "raw_json TEXT NOT NULL DEFAULT '',"
                        "error_message TEXT NOT NULL DEFAULT '',"
+                       "retry_count INTEGER NOT NULL DEFAULT 0,"
+                       "next_retry_at TEXT NOT NULL DEFAULT '',"
+                       "retry_policy_version INTEGER NOT NULL DEFAULT 0,"
+                       "failure_kind TEXT NOT NULL DEFAULT '',"
+                       "last_attempt_at TEXT NOT NULL DEFAULT '',"
                        "updated_at TEXT NOT NULL DEFAULT '',"
                        "FOREIGN KEY(asset_id) REFERENCES asset_file(id) ON DELETE CASCADE"
                        ");"),
@@ -963,7 +1022,23 @@ bool DatabaseManager::ensureEmbeddedMetadataSchemaCompatibility(QSqlDatabase &db
         QStringLiteral("CREATE INDEX IF NOT EXISTS idx_embedded_metadata_capture ON embedded_metadata(capture_time);"),
         QStringLiteral("CREATE INDEX IF NOT EXISTS idx_embedded_metadata_camera ON embedded_metadata(camera_make, camera_model);")
     };
-    return executeBatch(db, statements, errorMessage);
+    if (!executeBatch(db, statements, errorMessage)
+        || !ensureColumns(db,
+                          QStringLiteral("embedded_metadata"),
+                          {
+                              {QStringLiteral("retry_count"), QStringLiteral("retry_count INTEGER NOT NULL DEFAULT 0")},
+                              {QStringLiteral("next_retry_at"), QStringLiteral("next_retry_at TEXT NOT NULL DEFAULT ''")},
+                              {QStringLiteral("retry_policy_version"), QStringLiteral("retry_policy_version INTEGER NOT NULL DEFAULT 0")},
+                              {QStringLiteral("failure_kind"), QStringLiteral("failure_kind TEXT NOT NULL DEFAULT ''")},
+                              {QStringLiteral("last_attempt_at"), QStringLiteral("last_attempt_at TEXT NOT NULL DEFAULT ''")}
+                          },
+                          errorMessage)) {
+        return false;
+    }
+    return executeBatch(db,
+                        {QStringLiteral("CREATE INDEX IF NOT EXISTS idx_embedded_metadata_retry "
+                                        "ON embedded_metadata(status, next_retry_at, retry_policy_version, asset_id);")},
+                        errorMessage);
 }
 
 bool DatabaseManager::migrateToVersion6(QSqlDatabase &db, QString *errorMessage) const
@@ -1230,6 +1305,34 @@ bool DatabaseManager::ensureCatalogChangeLogSchemaCompatibility(QSqlDatabase &db
         "next_log_id = MAX(next_log_id, COALESCE((SELECT MAX(log_id) FROM catalog_change_log), 0)) "
         "WHERE singleton_id = 1"));
     return executeBatch(db, triggerStatements, errorMessage);
+}
+
+bool DatabaseManager::migrateToVersion9(QSqlDatabase &db, QString *errorMessage) const
+{
+    if (!ensureMediaSchemaCompatibility(db, errorMessage)
+        || !executeBatch(db,
+                         {QStringLiteral(
+                             "CREATE INDEX IF NOT EXISTS idx_thumbnail_retry_schedule "
+                             "ON thumbnail(status, next_retry_at, retry_policy_version, asset_id)")},
+                         errorMessage)) {
+        return false;
+    }
+    return setSchemaVersion(db, 9, errorMessage);
+}
+
+bool DatabaseManager::ensureMetadataRetrySchemaCompatibility(QSqlDatabase &db,
+                                                             QString *errorMessage) const
+{
+    return ensureMediaSchemaCompatibility(db, errorMessage)
+        && ensureEmbeddedMetadataSchemaCompatibility(db, errorMessage);
+}
+
+bool DatabaseManager::migrateToVersion10(QSqlDatabase &db, QString *errorMessage) const
+{
+    if (!ensureMetadataRetrySchemaCompatibility(db, errorMessage)) {
+        return false;
+    }
+    return setSchemaVersion(db, 10, errorMessage);
 }
 
 int DatabaseManager::currentSchemaVersion(QSqlDatabase &db) const

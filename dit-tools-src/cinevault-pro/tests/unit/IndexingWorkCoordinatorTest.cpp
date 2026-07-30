@@ -150,6 +150,26 @@ private slots:
         QTRY_VERIFY(waiting.isFinished());
     }
 
+    void waitingRequestHonorsTimeout()
+    {
+        IndexingWorkCoordinator coordinator;
+        auto owner = coordinator.acquire(request(
+            coordinator, IndexingWorkCoordinator::Resource::SqliteWriter));
+        QVERIFY(owner);
+
+        auto timedRequest = request(
+            coordinator, IndexingWorkCoordinator::Resource::SqliteWriter);
+        timedRequest.timeoutMs = 80;
+        QElapsedTimer timer;
+        timer.start();
+        const auto timedOut = coordinator.acquire(timedRequest);
+
+        QVERIFY(!timedOut);
+        QVERIFY(timer.elapsed() >= 60);
+        QVERIFY(timer.elapsed() < 500);
+        QCOMPARE(coordinator.queuedRequestCount(), 0);
+    }
+
     void foregroundRequestDisplacesQueuedBackgroundWhenFull()
     {
         IndexingWorkCoordinator coordinator(1);

@@ -599,6 +599,9 @@ QJsonObject makeChatPayload(const QString &model,
     return QJsonObject{
         {QStringLiteral("model"), model},
         {QStringLiteral("max_tokens"), maxTokens},
+        {QStringLiteral("temperature"), 0},
+        {QStringLiteral("chat_template_kwargs"),
+         QJsonObject{{QStringLiteral("enable_thinking"), false}}},
         {QStringLiteral("response_format"), jsonSchemaResponseFormat(schemaName, schema)},
         {QStringLiteral("messages"), QJsonArray{
             QJsonObject{
@@ -623,10 +626,52 @@ HttpResult postChatPayload(const QString &endpoint,
                            QJsonObject payload,
                            int timeoutSec)
 {
-    auto result = postJson(endpoint, apiKey, payload, timeoutSec);
-    if (!result.success && isResponseFormatRejected(result)) {
-        payload.insert(QStringLiteral("response_format"), textResponseFormat());
-        result = postJson(endpoint, apiKey, payload, timeoutSec);
+    const auto postWithFormatFallback = [&](QJsonObject *requestPayload) {
+        auto response = postJson(endpoint, apiKey, *requestPayload, timeoutSec);
+        if (!response.success && isResponseFormatRejected(response)) {
+            requestPayload->insert(QStringLiteral("response_format"), textResponseFormat());
+            response = postJson(endpoint, apiKey, *requestPayload, timeoutSec);
+        }
+        return response;
+    };
+
+    auto result = postWithFormatFallback(&payload);
+    QString envelopeError;
+    const auto envelope = result.success
+        ? VisionResponseParser::extractAssistantEnvelope(result.body, &envelopeError)
+        : std::nullopt;
+    if (envelope.has_value() && envelope->content.trimmed().isEmpty()) {
+        const auto originalMaxTokens = payload.value(QStringLiteral("max_tokens")).toInt();
+        const auto retryMaxTokens = qBound(640, qMax(1, originalMaxTokens) * 2, 2048);
+        payload.insert(QStringLiteral("max_tokens"), retryMaxTokens);
+        payload.insert(QStringLiteral("chat_template_kwargs"),
+                       QJsonObject{{QStringLiteral("enable_thinking"), false}});
+        Logger::warn(QStringLiteral(
+            "vision_empty_content_retry finish_reason=%1 reasoning_chars=%2 "
+            "prompt_tokens=%3 completion_tokens=%4 max_tokens=%5")
+                         .arg(envelope->finishReason.isEmpty()
+                                  ? QStringLiteral("unknown")
+                                  : envelope->finishReason)
+                         .arg(envelope->reasoningLength)
+                         .arg(envelope->promptTokens)
+                         .arg(envelope->completionTokens)
+                         .arg(retryMaxTokens));
+        result = postWithFormatFallback(&payload);
+
+        const auto retryEnvelope = result.success
+            ? VisionResponseParser::extractAssistantEnvelope(result.body, &envelopeError)
+            : std::nullopt;
+        if (retryEnvelope.has_value() && retryEnvelope->content.trimmed().isEmpty()) {
+            Logger::warn(QStringLiteral(
+                "vision_empty_content_failed finish_reason=%1 reasoning_chars=%2 "
+                "prompt_tokens=%3 completion_tokens=%4")
+                             .arg(retryEnvelope->finishReason.isEmpty()
+                                      ? QStringLiteral("unknown")
+                                      : retryEnvelope->finishReason)
+                             .arg(retryEnvelope->reasoningLength)
+                             .arg(retryEnvelope->promptTokens)
+                             .arg(retryEnvelope->completionTokens));
+        }
     }
     return result;
 }
@@ -654,7 +699,7 @@ std::optional<QJsonObject> repairAssistantPayload(const QByteArray &responseBody
     auto boundedContent = originalContent->trimmed();
     if (boundedContent.isEmpty()) {
         if (errorMessage) {
-            *errorMessage = QStringLiteral("%1；自动修复失败：原始返回内容为空").arg(failureReason);
+            *errorMessage = failureReason;
         }
         return std::nullopt;
     }
@@ -722,6 +767,12 @@ std::optional<VisionFrameAnalysis> fallbackFrameAnalysisFromResponse(const QByte
         }
         return std::nullopt;
     }
+    if (content->trimmed().isEmpty()) {
+        if (errorMessage && existingError.trimmed().isEmpty()) {
+            *errorMessage = QStringLiteral("视觉服务返回 HTTP 200，但最终正文为空");
+        }
+        return std::nullopt;
+    }
 
     QString fallbackError;
     auto analysis = VisionResponseParser::fallbackFrameAnalysisFromContent(*content, &fallbackError);
@@ -748,6 +799,12 @@ std::optional<VisionVideoSummary> fallbackVideoSummaryFromResponse(const QByteAr
     if (!content.has_value()) {
         if (errorMessage) {
             *errorMessage = combineFallbackError(existingError, contentError);
+        }
+        return std::nullopt;
+    }
+    if (content->trimmed().isEmpty()) {
+        if (errorMessage && existingError.trimmed().isEmpty()) {
+            *errorMessage = QStringLiteral("视觉服务返回 HTTP 200，但最终正文为空");
         }
         return std::nullopt;
     }
@@ -999,8 +1056,8 @@ std::optional<VisionFrameAnalysis> VisionApiClient::analyzeFrame(const QString &
     const auto result = postChatPayload(endpoint,
                                         apiKey,
                                         makeChatPayload(model,
-                                                        content,
-                                                        300,
+                                                         content,
+                                                         640,
                                                         QStringLiteral("vision_frame_analysis"),
                                                         frameAnalysisSchema()),
                                         timeoutSec);
@@ -1029,7 +1086,7 @@ std::optional<VisionFrameAnalysis> VisionApiClient::analyzeFrame(const QString &
                                          timeoutSec,
                                          schema,
                                          parseError,
-                                         350,
+                                         640,
                                          errorMessage);
         usedRepair = true;
         if (!payload.has_value()) {
@@ -1047,7 +1104,7 @@ std::optional<VisionFrameAnalysis> VisionApiClient::analyzeFrame(const QString &
                                          timeoutSec,
                                          schema,
                                          normalizeError,
-                                         350,
+                                         640,
                                          errorMessage);
         usedRepair = true;
         if (payload.has_value()) {
