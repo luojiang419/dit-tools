@@ -34,6 +34,30 @@ QString Formatters::formatDuration(qint64 durationMs)
         .arg(seconds, 2, 10, QLatin1Char('0'));
 }
 
+QString Formatters::formatFrameTimestamp(qint64 timestampMs)
+{
+    if (timestampMs < 0) {
+        return QStringLiteral("未知时间");
+    }
+
+    const qint64 totalSeconds = timestampMs / 1000;
+    const qint64 milliseconds = timestampMs % 1000;
+    const qint64 hours = totalSeconds / 3600;
+    const qint64 minutes = (totalSeconds % 3600) / 60;
+    const qint64 seconds = totalSeconds % 60;
+    if (hours > 0) {
+        return QStringLiteral("%1:%2:%3.%4")
+            .arg(hours)
+            .arg(minutes, 2, 10, QLatin1Char('0'))
+            .arg(seconds, 2, 10, QLatin1Char('0'))
+            .arg(milliseconds, 3, 10, QLatin1Char('0'));
+    }
+    return QStringLiteral("%1:%2.%3")
+        .arg(minutes)
+        .arg(seconds, 2, 10, QLatin1Char('0'))
+        .arg(milliseconds, 3, 10, QLatin1Char('0'));
+}
+
 QString Formatters::formatBitRate(qint64 bitRate)
 {
     if (bitRate <= 0) {

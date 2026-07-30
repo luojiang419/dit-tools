@@ -328,6 +328,8 @@ struct FeedbackConversation {
 
 struct VideoAnalysisDetail {
     GlobalVideoAsset asset;
+    VisualAnalysisPlan visualAnalysisPlan;
+    bool hasVisualAnalysisPlan = false;
     QVector<FrameAnalysisRecord> frames;
     QVector<MaterialDimensionAnalysis> dimensionAnalyses;
 };

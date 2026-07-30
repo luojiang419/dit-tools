@@ -78,6 +78,7 @@ class MaterialCenterViewModel : public QObject {
     Q_PROPERTY(QVariantList selectedScenes READ selectedScenes NOTIFY selectionChanged)
     Q_PROPERTY(QVariantList selectedDimensionAnalyses READ selectedDimensionAnalyses NOTIFY selectionChanged)
     Q_PROPERTY(QVariantList selectedFrames READ selectedFrames NOTIFY selectionChanged)
+    Q_PROPERTY(QString selectedFrameSamplingText READ selectedFrameSamplingText NOTIFY selectionChanged)
     Q_PROPERTY(QString selectedFrameSearchStatus READ selectedFrameSearchStatus NOTIFY selectionChanged)
     Q_PROPERTY(int selectedFrameCount READ selectedFrameCount NOTIFY selectionChanged)
     Q_PROPERTY(int selectedVisibleFrameCount READ selectedVisibleFrameCount NOTIFY selectionChanged)
@@ -166,6 +167,7 @@ public:
     QVariantList selectedScenes() const;
     QVariantList selectedDimensionAnalyses() const;
     QVariantList selectedFrames() const;
+    QString selectedFrameSamplingText() const;
     QString selectedFrameSearchStatus() const;
     int selectedFrameCount() const;
     int selectedVisibleFrameCount() const;
@@ -205,6 +207,7 @@ public:
     Q_INVOKABLE void moveVideoSelection(int delta);
     Q_INVOKABLE void syncCurrentProject();
     Q_INVOKABLE void rebuildGlobalIndex();
+    Q_INVOKABLE void updateSemanticIndexNow();
     Q_INVOKABLE void analyzeSelected();
     Q_INVOKABLE void analyzeVisibleSupplement();
     Q_INVOKABLE void analyzeVisibleAll();

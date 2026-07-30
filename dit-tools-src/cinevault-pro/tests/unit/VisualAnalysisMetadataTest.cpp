@@ -32,12 +32,26 @@ private slots:
         QCOMPARE(restored.at(1).colors, QStringList{QStringLiteral("蓝色")});
     }
 
-    void plannedFrameNumbers_usesOnlyFixedInterval()
+    void plannedFrameNumbers_usesFixedIntervalWithTerminalCoverage()
     {
         QCOMPARE(VisualAnalysisMetadata::fixedFrameInterval(AnalysisMode::EveryFrame, 99), 1);
         QCOMPARE(VisualAnalysisMetadata::fixedFrameInterval(AnalysisMode::Every10Frames, 3), 10);
         QCOMPARE(VisualAnalysisMetadata::fixedFrameInterval(AnalysisMode::CustomInterval, 7), 7);
-        QCOMPARE(VisualAnalysisMetadata::plannedFrameNumbers(25, 10), QVector<int>({1, 11, 21}));
+        QCOMPARE(VisualAnalysisMetadata::plannedFrameNumbers(0, 15), QVector<int>());
+        QCOMPARE(VisualAnalysisMetadata::plannedFrameNumbers(1, 15), QVector<int>({1}));
+        QCOMPARE(VisualAnalysisMetadata::plannedFrameNumbers(5, 1), QVector<int>({1, 2, 3, 4, 5}));
+        QCOMPARE(VisualAnalysisMetadata::plannedFrameNumbers(16, 15), QVector<int>({1, 16}));
+        QCOMPARE(VisualAnalysisMetadata::plannedFrameNumbers(17, 15), QVector<int>({1, 16, 17}));
+        QCOMPARE(VisualAnalysisMetadata::plannedFrameNumbers(10, 30), QVector<int>({1, 10}));
+        QCOMPARE(VisualAnalysisMetadata::plannedFrameNumbers(25, 10), QVector<int>({1, 11, 21, 25}));
+
+        const auto sixtyFpsSample = VisualAnalysisMetadata::plannedFrameNumbers(1260, 15);
+        QCOMPARE(sixtyFpsSample.size(), 85);
+        QCOMPARE(sixtyFpsSample.constLast(), 1260);
+
+        const auto twentyFiveFpsSample = VisualAnalysisMetadata::plannedFrameNumbers(1462, 15);
+        QCOMPARE(twentyFiveFpsSample.size(), 99);
+        QCOMPARE(twentyFiveFpsSample.constLast(), 1462);
     }
 
     void incompletePlan_detectsMissingFailedAndLegacyFramesOnly()
@@ -59,7 +73,23 @@ private slots:
 
         QCOMPARE(VisualAnalysisMetadata::incompletePlannedFrameNumbers(
                      35, 10, {complete, legacy, failed}, 2),
-                 QVector<int>({11, 21, 31}));
+                 QVector<int>({11, 21, 31, 35}));
+    }
+
+    void legacyFixedIntervalPlan_detectsOnlyMissingTerminalFrame()
+    {
+        FrameAnalysisRecord first;
+        first.frameNumber = 1;
+        first.analysisState = FrameAnalysisState::Success;
+        first.factsComplete = true;
+        first.structuredProfileVersion = 2;
+
+        FrameAnalysisRecord intervalPoint = first;
+        intervalPoint.frameNumber = 16;
+
+        QCOMPARE(VisualAnalysisMetadata::incompletePlannedFrameNumbers(
+                     17, 15, {first, intervalPoint}, 2),
+                 QVector<int>({17}));
     }
 };
 

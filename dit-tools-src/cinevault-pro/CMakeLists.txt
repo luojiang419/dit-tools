@@ -1061,6 +1061,23 @@ if(BUILD_TESTING)
     target_link_libraries(VisualAnalysisMetadataTest PRIVATE Qt6::Core Qt6::Test)
     add_test(NAME VisualAnalysisMetadataTest COMMAND VisualAnalysisMetadataTest)
 
+    qt_add_executable(FormattersTest
+        tests/unit/FormattersTest.cpp
+        src/shared/Formatters.cpp
+    )
+    target_include_directories(FormattersTest PRIVATE src)
+    target_link_libraries(FormattersTest PRIVATE Qt6::Core Qt6::Test)
+    add_test(NAME FormattersTest COMMAND FormattersTest)
+
+    qt_add_executable(FFmpegAdapterFrameExtractionTest
+        tests/unit/FFmpegAdapterFrameExtractionTest.cpp
+        src/infrastructure/ffmpeg/FFmpegAdapter.cpp
+        src/shared/VisualAnalysisMetadata.cpp
+    )
+    target_include_directories(FFmpegAdapterFrameExtractionTest PRIVATE src)
+    target_link_libraries(FFmpegAdapterFrameExtractionTest PRIVATE Qt6::Core Qt6::Test)
+    add_test(NAME FFmpegAdapterFrameExtractionTest COMMAND FFmpegAdapterFrameExtractionTest)
+
     qt_add_executable(NaturalLanguageQueryParserTest
         tests/unit/NaturalLanguageQueryParserTest.cpp
         src/core/search/NaturalLanguageQueryParser.cpp
@@ -1563,6 +1580,8 @@ if(BUILD_TESTING)
             AppSettingsSearchTest
             QuickSearchControllerTest
             VisualAnalysisMetadataTest
+            FormattersTest
+            FFmpegAdapterFrameExtractionTest
             NaturalLanguageQueryParserTest
             SearchReliabilityEvaluatorTest
             SearchAssistantRouterTest

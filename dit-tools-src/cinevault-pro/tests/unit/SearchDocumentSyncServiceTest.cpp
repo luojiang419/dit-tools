@@ -1,3 +1,4 @@
+#include "application/IndexingWorkCoordinator.h"
 #include "application/SearchDocumentSyncService.h"
 #include "core/search/SemanticSearchIndexService.h"
 #include "infrastructure/db/GlobalDatabaseManager.h"
@@ -270,6 +271,66 @@ private slots:
         QCOMPARE(scalarCount(fixture.manager.database(),
                              QStringLiteral("SELECT COUNT(*) FROM search_document")),
                  qint64{4});
+    }
+
+    void backgroundSyncWaitsSilentlyUntilIdle()
+    {
+        Fixture fixture;
+        QVERIFY2(fixture.valid, qPrintable(fixture.errorMessage));
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        SemanticSearchIndexService semanticIndex(
+            &fixture.manager,
+            QDir(temp.path()).filePath(QStringLiteral("background-idle.usearch")));
+        IndexingWorkCoordinator coordinator;
+        SearchDocumentSyncService syncService(&fixture.manager, &semanticIndex);
+        syncService.setWorkCoordinator(&coordinator);
+        QSignalSpy completion(&syncService,
+                              &SearchDocumentSyncService::synchronizationFinished);
+        QSignalSpy progress(&syncService,
+                            &SearchDocumentSyncService::synchronizationProgress);
+
+        syncService.scheduleFullSync();
+        QTest::qWait(3000);
+        QCOMPARE(progress.size(), 0);
+        QCOMPARE(completion.size(), 0);
+
+        coordinator.setSystemIdle(true);
+        syncService.resumePendingWork();
+        QVERIFY2(completion.wait(10000), "系统空闲后未继续执行静默语义索引");
+        QVERIFY(!progress.isEmpty());
+        const auto arguments = completion.takeFirst();
+        QVERIFY(arguments.at(0).toBool());
+        QCOMPARE(arguments.at(1).toInt(), 4);
+    }
+
+    void immediateSyncBypassesIdleGate()
+    {
+        Fixture fixture;
+        QVERIFY2(fixture.valid, qPrintable(fixture.errorMessage));
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        SemanticSearchIndexService semanticIndex(
+            &fixture.manager,
+            QDir(temp.path()).filePath(QStringLiteral("manual-immediate.usearch")));
+        IndexingWorkCoordinator coordinator;
+        SearchDocumentSyncService syncService(&fixture.manager, &semanticIndex);
+        syncService.setWorkCoordinator(&coordinator);
+        QSignalSpy completion(&syncService,
+                              &SearchDocumentSyncService::synchronizationFinished);
+        QSignalSpy progress(&syncService,
+                            &SearchDocumentSyncService::synchronizationProgress);
+
+        syncService.scheduleFullSync();
+        QElapsedTimer immediateElapsed;
+        immediateElapsed.start();
+        syncService.scheduleImmediateFullSync();
+        QVERIFY2(completion.wait(10000), "手动语义索引未绕过空闲门槛");
+        QVERIFY(immediateElapsed.elapsed() < 10000);
+        QVERIFY(!progress.isEmpty());
+        const auto arguments = completion.takeFirst();
+        QVERIFY(arguments.at(0).toBool());
+        QCOMPARE(arguments.at(1).toInt(), 4);
     }
 
     void materialDelta_skipsThumbnailVectorsAndUpdatesOnlyChangedDocuments()

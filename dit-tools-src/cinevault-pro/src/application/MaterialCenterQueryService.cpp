@@ -1043,6 +1043,26 @@ VideoAnalysisDetail MaterialCenterQueryService::fetchDetail(const QString &video
     }
     detail.asset = readAssetRow(assetQuery);
 
+    QSqlQuery planQuery(m_globalDatabaseManager->database());
+    planQuery.prepare(QStringLiteral(
+        "SELECT sampling_policy, frame_interval, structured_profile_version, source_frame_count, planned_frame_count, "
+        "asset_size_bytes, asset_modified_at, created_at, updated_at "
+        "FROM video_analysis_plan WHERE video_key = ?"));
+    planQuery.addBindValue(videoKey.trimmed());
+    if (execOrEmpty(planQuery) && planQuery.next()) {
+        detail.hasVisualAnalysisPlan = true;
+        detail.visualAnalysisPlan.videoKey = videoKey.trimmed();
+        detail.visualAnalysisPlan.samplingPolicy = planQuery.value(0).toString();
+        detail.visualAnalysisPlan.frameInterval = planQuery.value(1).toInt();
+        detail.visualAnalysisPlan.structuredProfileVersion = planQuery.value(2).toInt();
+        detail.visualAnalysisPlan.sourceFrameCount = planQuery.value(3).toInt();
+        detail.visualAnalysisPlan.plannedFrameCount = planQuery.value(4).toInt();
+        detail.visualAnalysisPlan.assetSizeBytes = planQuery.value(5).toLongLong();
+        detail.visualAnalysisPlan.assetModifiedAt = planQuery.value(6).toString();
+        detail.visualAnalysisPlan.createdAt = planQuery.value(7).toString();
+        detail.visualAnalysisPlan.updatedAt = planQuery.value(8).toString();
+    }
+
     QSqlQuery frameQuery(m_globalDatabaseManager->database());
     frameQuery.prepare(QStringLiteral(
         "SELECT id, frame_number, timestamp_ms, COALESCE(image_path, ''), COALESCE(caption, ''), "

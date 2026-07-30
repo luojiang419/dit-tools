@@ -8,6 +8,7 @@ class Formatters {
 public:
     static QString formatBytes(qint64 bytes);
     static QString formatDuration(qint64 durationMs);
+    static QString formatFrameTimestamp(qint64 timestampMs);
     static QString formatBitRate(qint64 bitRate);
     static QString assetTypeLabel(AssetType type);
     static QString statusLabel(const QString &status);

@@ -134,9 +134,16 @@ QVector<int> VisualAnalysisMetadata::plannedFrameNumbers(int sourceFrameCount, i
     QVector<int> numbers;
     const auto count = qMax(0, sourceFrameCount);
     const auto interval = qMax(1, frameInterval);
+    if (count == 0) {
+        return numbers;
+    }
+
     numbers.reserve((count + interval - 1) / interval);
     for (int zeroBased = 0; zeroBased < count; zeroBased += interval) {
         numbers.append(zeroBased + 1);
+    }
+    if (numbers.constLast() != count) {
+        numbers.append(count);
     }
     return numbers;
 }

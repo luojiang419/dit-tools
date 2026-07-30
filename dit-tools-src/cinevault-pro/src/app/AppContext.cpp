@@ -221,6 +221,11 @@ AppContext::AppContext(QObject *parent)
             &SystemIdleMonitor::activityResumed,
             m_indexingWorkCoordinator,
             [this]() { m_indexingWorkCoordinator->setSystemIdle(false); });
+    connect(m_systemIdleMonitor,
+            &SystemIdleMonitor::becameIdle,
+            m_searchDocumentSyncService,
+            &SearchDocumentSyncService::resumePendingWork,
+            Qt::QueuedConnection);
 
     QString globalDbError;
     m_globalDatabaseManager->openDatabase(&globalDbError);

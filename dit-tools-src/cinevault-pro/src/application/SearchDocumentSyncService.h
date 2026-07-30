@@ -33,6 +33,8 @@ public:
 
 public slots:
     void scheduleFullSync();
+    void scheduleImmediateFullSync();
+    void resumePendingWork();
     void scheduleCatalogChanges(const CatalogChangeSet &changeSet);
     void scheduleAssetSync(const QString &videoKey);
 
@@ -65,5 +67,7 @@ private:
     QHash<QString, PendingCatalogChange> m_pendingCatalogChanges;
     QSet<QString> m_pendingAnalysisVideoKeys;
     bool m_pendingFullSync = false;
+    bool m_pendingImmediateFullSync = false;
     bool m_running = false;
+    bool m_runningFullSync = false;
 };

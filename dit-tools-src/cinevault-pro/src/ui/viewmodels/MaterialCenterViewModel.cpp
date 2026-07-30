@@ -482,9 +482,6 @@ QString MaterialCenterViewModel::semanticSearchStatusText() const
     if (m_lastParsedQuery.semanticText.trimmed().isEmpty()) {
         return QStringLiteral("已按日期、类型与结果目标执行结构化检索");
     }
-    if (m_semanticIndexing) {
-        return QStringLiteral("语义索引正在后台更新，当前搜索不会等待索引");
-    }
     return m_semanticSearchAvailable
         ? QStringLiteral("语义检索已启用")
         : QStringLiteral("语义检索不可用，当前使用词法、路径与结构化筛选");
@@ -730,6 +727,28 @@ QVariantList MaterialCenterViewModel::selectedDimensionAnalyses() const
 QVariantList MaterialCenterViewModel::selectedFrames() const
 {
     return m_selectedFramesCache;
+}
+
+QString MaterialCenterViewModel::selectedFrameSamplingText() const
+{
+    if (!selectedIsVideo() || !m_detail.hasVisualAnalysisPlan) {
+        return {};
+    }
+
+    const auto &plan = m_detail.visualAnalysisPlan;
+    const auto interval = qMax(1, plan.frameInterval);
+    const auto modeText = interval == 1
+        ? QStringLiteral("逐帧解析")
+        : QStringLiteral("每 %1 帧抽 1 帧").arg(interval);
+    const auto terminalCovered = plan.sourceFrameCount > 0
+        && !m_detail.frames.isEmpty()
+        && m_detail.frames.constLast().frameNumber == plan.sourceFrameCount;
+    const auto coverageText = terminalCovered
+        ? QStringLiteral("首尾必含")
+        : QStringLiteral("尾帧待补齐");
+    return QStringLiteral("当前结果：%1 · %2 · 共 %3 帧")
+        .arg(modeText, coverageText)
+        .arg(m_detail.frames.size());
 }
 
 QString MaterialCenterViewModel::selectedFrameSearchStatus() const
@@ -1427,6 +1446,13 @@ void MaterialCenterViewModel::rebuildGlobalIndex()
     }
 }
 
+void MaterialCenterViewModel::updateSemanticIndexNow()
+{
+    if (m_searchDocumentSyncService && !m_semanticIndexing) {
+        m_searchDocumentSyncService->scheduleImmediateFullSync();
+    }
+}
+
 void MaterialCenterViewModel::analyzeSelected()
 {
     if (!hasSelection() || !m_analysisService) {
@@ -1965,7 +1991,7 @@ void MaterialCenterViewModel::refreshSelectedCaches()
         }
         m_selectedAllFramesCache.append(QVariantMap{
             {QStringLiteral("frameNumber"), frame.frameNumber},
-            {QStringLiteral("timestampLabel"), Formatters::formatDuration(frame.timestampMs)},
+            {QStringLiteral("timestampLabel"), Formatters::formatFrameTimestamp(frame.timestampMs)},
             {QStringLiteral("imagePath"), frame.imagePath},
             {QStringLiteral("caption"), frame.caption},
             {QStringLiteral("tags"), frame.tags.join(QStringLiteral("、"))},

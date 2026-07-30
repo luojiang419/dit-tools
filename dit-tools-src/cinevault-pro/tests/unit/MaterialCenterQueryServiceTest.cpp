@@ -234,6 +234,17 @@ private:
 
         if (!execSql(db,
                      QStringLiteral(
+                         "INSERT INTO video_analysis_plan "
+                         "(video_key, sampling_policy, frame_interval, structured_profile_version, source_frame_count, "
+                         "planned_frame_count, asset_size_bytes, asset_modified_at, created_at, updated_at) "
+                         "VALUES ('video-1', 'fixed_interval', 60, 2, 61, 2, 1024, "
+                         "'2026-07-04T10:00:00', '2026-07-04T10:01:00', '2026-07-04T10:01:00')"),
+                     &errorMessage)) {
+            return false;
+        }
+
+        if (!execSql(db,
+                     QStringLiteral(
                          "INSERT INTO video_frame_analysis "
                          "(video_key, frame_number, timestamp_ms, image_path, caption, tags_json, objects_json, "
                          "actions, setting_text, entities_json, structured_profile_version, facts_complete, analysis_state) "
@@ -560,6 +571,22 @@ private slots:
         QCOMPARE(detail.dimensionAnalyses.size(), 1);
         QCOMPARE(detail.dimensionAnalyses.first().name, QStringLiteral("色彩风格"));
         QVERIFY(detail.dimensionAnalyses.first().detail.contains(QStringLiteral("冷蓝色调")));
+    }
+
+    void fetchDetail_exposesPersistedVisualAnalysisPlan()
+    {
+        GlobalDbFixture fixture;
+        QVERIFY2(fixture.valid, qPrintable(fixture.errorMessage));
+        SearchEngine searchEngine;
+        MaterialCenterQueryService service(&fixture.manager, &searchEngine);
+
+        const auto detail = service.fetchDetail(QStringLiteral("video-1"));
+
+        QVERIFY(detail.hasVisualAnalysisPlan);
+        QCOMPARE(detail.visualAnalysisPlan.samplingPolicy, QStringLiteral("fixed_interval"));
+        QCOMPARE(detail.visualAnalysisPlan.frameInterval, 60);
+        QCOMPARE(detail.visualAnalysisPlan.sourceFrameCount, 61);
+        QCOMPARE(detail.visualAnalysisPlan.plannedFrameCount, 2);
     }
 
     void searchMaterials_partitionsFolderAndAssetResults()

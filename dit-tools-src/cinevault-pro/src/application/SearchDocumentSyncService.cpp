@@ -774,6 +774,32 @@ void SearchDocumentSyncService::scheduleFullSync()
     schedulePendingWork();
 }
 
+void SearchDocumentSyncService::scheduleImmediateFullSync()
+{
+    if (!m_globalDatabaseManager || !m_globalDatabaseManager->isOpen()
+        || !m_semanticSearchIndexService
+        || (m_running && m_runningFullSync)) {
+        return;
+    }
+    m_pendingFullSync = true;
+    m_pendingImmediateFullSync = true;
+    m_pendingCatalogChanges.clear();
+    m_pendingAnalysisVideoKeys.clear();
+    schedulePendingWork();
+}
+
+void SearchDocumentSyncService::resumePendingWork()
+{
+    if (m_running
+        || (!m_pendingFullSync
+            && m_pendingCatalogChanges.isEmpty()
+            && m_pendingAnalysisVideoKeys.isEmpty())) {
+        return;
+    }
+    m_debounceWindow.invalidate();
+    m_debounceTimer->start(0);
+}
+
 void SearchDocumentSyncService::scheduleCatalogChanges(const CatalogChangeSet &changeSet)
 {
     if (!m_globalDatabaseManager || !m_globalDatabaseManager->isOpen()
@@ -855,6 +881,11 @@ void SearchDocumentSyncService::schedulePendingWork()
     if (m_running) {
         return;
     }
+    if (m_pendingImmediateFullSync) {
+        m_debounceWindow.invalidate();
+        m_debounceTimer->start(0);
+        return;
+    }
     if (!m_debounceWindow.isValid()) {
         m_debounceWindow.start();
     }
@@ -868,8 +899,15 @@ void SearchDocumentSyncService::startScheduledSync()
         || !m_semanticSearchIndexService) {
         return;
     }
-    m_debounceWindow.invalidate();
     const bool fullSync = m_pendingFullSync;
+    const bool immediateFullSync = fullSync && m_pendingImmediateFullSync;
+    if (!immediateFullSync
+        && m_workCoordinator
+        && !m_workCoordinator->isSystemIdle()) {
+        m_debounceWindow.invalidate();
+        return;
+    }
+    m_debounceWindow.invalidate();
     QVector<CatalogChangeSet> changeSets;
     if (!fullSync) {
         QHash<QString, CatalogChangeSet> changesByProject;
@@ -884,12 +922,14 @@ void SearchDocumentSyncService::startScheduledSync()
         ? QStringList()
         : QStringList(m_pendingAnalysisVideoKeys.cbegin(), m_pendingAnalysisVideoKeys.cend());
     m_pendingFullSync = false;
+    m_pendingImmediateFullSync = false;
     m_pendingCatalogChanges.clear();
     m_pendingAnalysisVideoKeys.clear();
     if (!fullSync && changeSets.isEmpty() && analysisVideoKeys.isEmpty()) {
         return;
     }
     m_running = true;
+    m_runningFullSync = fullSync;
     emit synchronizationProgress(
         0,
         0,
@@ -909,6 +949,7 @@ void SearchDocumentSyncService::startScheduledSync()
         workCoordinator,
         workGeneration,
         fullSync,
+        immediateFullSync,
         changeSets,
         analysisVideoKeys]() {
         SemanticIndexUpdateResult updateResult;
@@ -918,8 +959,10 @@ void SearchDocumentSyncService::startScheduledSync()
         if (workCoordinator) {
             heavyIoLease = workCoordinator->acquire({
                 IndexingWorkCoordinator::Resource::HeavyIo,
-                IndexingWorkCoordinator::Priority::Background,
-                true,
+                immediateFullSync
+                    ? IndexingWorkCoordinator::Priority::Foreground
+                    : IndexingWorkCoordinator::Priority::Background,
+                false,
                 workGeneration});
             if (!heavyIoLease) {
                 errorMessage = QStringLiteral("搜索文档同步因项目切换、队列拥塞或应用退出而取消");
@@ -929,7 +972,9 @@ void SearchDocumentSyncService::startScheduledSync()
         if (errorMessage.isEmpty() && workCoordinator) {
             writerLease = workCoordinator->acquire({
                 IndexingWorkCoordinator::Resource::SqliteWriter,
-                IndexingWorkCoordinator::Priority::Background,
+                immediateFullSync
+                    ? IndexingWorkCoordinator::Priority::Foreground
+                    : IndexingWorkCoordinator::Priority::Background,
                 false,
                 workGeneration});
             if (!writerLease) {
@@ -984,6 +1029,7 @@ void SearchDocumentSyncService::startScheduledSync()
                 guard->m_semanticSearchIndexService->discardLoadedIndex();
             }
             guard->m_running = false;
+            guard->m_runningFullSync = false;
             const auto message = success
                 ? QStringLiteral("搜索文档同步完成")
                 : errorMessage;

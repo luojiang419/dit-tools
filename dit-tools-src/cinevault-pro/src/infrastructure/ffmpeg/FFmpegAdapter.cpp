@@ -319,12 +319,18 @@ FrameExtractionResult FFmpegAdapter::extractFrames(const FrameExtractionRequest 
         }
     }
 
-    QVector<ExtractedFrame> selectedFrames;
-    selectedFrames.reserve(frames.size());
     const int interval = result.frameInterval;
+    const auto plannedNumbers = VisualAnalysisMetadata::plannedFrameNumbers(frames.size(), interval);
+    QSet<int> plannedFrameNumbers;
+    for (const auto frameNumber : plannedNumbers) {
+        plannedFrameNumbers.insert(frameNumber);
+    }
+
+    QVector<ExtractedFrame> selectedFrames;
+    selectedFrames.reserve(plannedNumbers.size());
     for (int index = 0; index < frames.size(); ++index) {
         const auto frameNumber = index + 1;
-        if ((index % interval) != 0
+        if (!plannedFrameNumbers.contains(frameNumber)
             || (!requestedFrameNumbers.isEmpty() && !requestedFrameNumbers.contains(frameNumber))) {
             continue;
         }

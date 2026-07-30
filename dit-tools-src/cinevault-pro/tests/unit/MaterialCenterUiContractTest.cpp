@@ -247,12 +247,15 @@ private slots:
         QVERIFY(source.contains(QStringLiteral("m_searchEmptyReason")));
         QVERIFY(source.contains(QStringLiteral("SearchDocumentSyncService::synchronizationProgress")));
         QVERIFY(source.contains(QStringLiteral("SearchDocumentSyncService::synchronizationFinished")));
+        QVERIFY(source.contains(QStringLiteral("scheduleImmediateFullSync")));
         QVERIFY(source.contains(QStringLiteral("m_searchRefreshTimer->start(0)")));
         QVERIFY(source.contains(QStringLiteral("understandQuery")));
         QVERIFY(!source.contains(QStringLiteral("rerankFrameCandidates")));
         QVERIFY(!source.contains(QStringLiteral("startFrameRerank")));
         QVERIFY(source.contains(QStringLiteral("task.cacheKey != currentCacheKey")));
         QVERIFY(!source.contains(QStringLiteral("task.generation != m_searchGeneration")));
+        QVERIFY(source.contains(QStringLiteral("Formatters::formatFrameTimestamp(frame.timestampMs)")));
+        QVERIFY(source.contains(QStringLiteral("尾帧待补齐")));
     }
 
     void qmlConsumesSearchStateAndFolderActions()
@@ -272,8 +275,8 @@ private slots:
             QStringLiteral("viewModel.semanticSearchAvailable"),
             QStringLiteral("viewModel.semanticSearchStatusText"),
             QStringLiteral("viewModel.semanticIndexing"),
-            QStringLiteral("viewModel.semanticIndexProgress"),
-            QStringLiteral("viewModel.semanticIndexStatusText"),
+            QStringLiteral("text: \"立即更新语义索引\""),
+            QStringLiteral("viewModel.updateSemanticIndexNow()"),
             QStringLiteral("viewModel.searchWarningMessage"),
             QStringLiteral("viewModel.searchInterpretationText"),
             QStringLiteral("viewModel.searchAssistantStatusText"),
@@ -296,6 +299,8 @@ private slots:
             QStringLiteral("id: detailColumn"),
             QStringLiteral("contentHeight: detailColumn.implicitHeight"),
             QStringLiteral("ScrollBar.horizontal.policy: ScrollBar.AlwaysOff"),
+            QStringLiteral("text: \"抽帧解析\""),
+            QStringLiteral("viewModel.selectedFrameSamplingText"),
             QStringLiteral("viewModel.openFolderProject(folderKey)"),
             QStringLiteral("viewModel.locateFolder(folderKey)"),
             QStringLiteral("viewModel.openAssetFolder(frameContextMenu.targetVideoKey)"),
@@ -323,6 +328,10 @@ private slots:
         for (const auto &contract : contracts) {
             QVERIFY2(source.contains(contract), qPrintable(QStringLiteral("QML 缺少接口：%1").arg(contract)));
         }
+        QVERIFY(!source.contains(
+            QStringLiteral("visible: viewModel && viewModel.semanticIndexing")));
+        QVERIFY(!source.contains(QStringLiteral("viewModel.semanticIndexProgress")));
+        QVERIFY(!source.contains(QStringLiteral("viewModel.semanticIndexStatusText")));
         QVERIFY(source.contains(QStringLiteral("id: frameRankText")));
         QVERIFY(source.contains(QStringLiteral("id: assetRankText")));
         QVERIFY(!source.contains(QStringLiteral("text: \"全部确认\"")));
