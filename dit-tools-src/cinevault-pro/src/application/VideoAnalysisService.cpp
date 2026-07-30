@@ -1039,7 +1039,10 @@ bool syncFramePlanRows(QSqlDatabase &db,
     return true;
 }
 
-bool hasIncompleteVisualFrames(QSqlDatabase &db, const QString &videoKey, QString *errorMessage)
+bool hasIncompleteVisualFrames(QSqlDatabase &db,
+                               const QString &videoKey,
+                               int contactSheetFrameCount,
+                               QString *errorMessage)
 {
     if (errorMessage) {
         errorMessage->clear();
@@ -1062,6 +1065,7 @@ bool hasIncompleteVisualFrames(QSqlDatabase &db, const QString &videoKey, QStrin
     return !VisualAnalysisMetadata::incompletePlannedFrameNumbers(
                 plan.sourceFrameCount,
                 plan.frameInterval,
+                contactSheetFrameCount,
                 frames,
                 cinevault::searchconfig::kStructuredVisionProfileVersion)
                 .isEmpty();
@@ -1688,7 +1692,13 @@ bool VideoAnalysisService::enqueueVideo(const QString &videoKey, QString *errorM
     if (asset.analysisStatus == VideoAnalysisStatus::Ready) {
         QString completenessError;
         const auto hasVisualGap = (asset.assetType == AssetType::Video || asset.assetType == AssetType::Image)
-            && hasIncompleteVisualFrames(db, normalizedKey, &completenessError);
+            && hasIncompleteVisualFrames(
+                db,
+                normalizedKey,
+                asset.assetType == AssetType::Video && m_settings
+                    ? m_settings->contactSheetFrameCount()
+                    : 0,
+                &completenessError);
         if (!completenessError.trimmed().isEmpty()) {
             if (errorMessage) {
                 *errorMessage = completenessError;
@@ -1786,7 +1796,13 @@ int VideoAnalysisService::enqueueVideosForSupplement(const QStringList &videoKey
             }
 
             QString completenessError;
-            const auto hasVisualGap = hasIncompleteVisualFrames(db, normalizedKey, &completenessError);
+            const auto hasVisualGap = hasIncompleteVisualFrames(
+                db,
+                normalizedKey,
+                asset.assetType == AssetType::Video && m_settings
+                    ? m_settings->contactSheetFrameCount()
+                    : 0,
+                &completenessError);
             if (!completenessError.trimmed().isEmpty()) {
                 rejectedMessages.append(completenessError);
                 continue;
@@ -2744,10 +2760,22 @@ void VideoAnalysisService::startNextAnalysis()
             return loadFrameRows(db, job.videoKey, &errorMessage);
         };
 
-        auto buildContactSheet = [&](const QVector<FrameAnalysisRecord> &frames) {
+        auto buildContactSheet = [&](const QVector<FrameAnalysisRecord> &frames,
+                                     int sourceFrameCount = 0) {
+            QSet<int> contactSheetNumbers;
+            for (const auto frameNumber : VisualAnalysisMetadata::contactSheetFrameNumbers(
+                     sourceFrameCount,
+                     config.contactSheetFrameCount)) {
+                contactSheetNumbers.insert(frameNumber);
+            }
+
             QStringList imagePaths;
             imagePaths.reserve(frames.size());
             for (const auto &frame : frames) {
+                if (!contactSheetNumbers.isEmpty()
+                    && !contactSheetNumbers.contains(frame.frameNumber)) {
+                    continue;
+                }
                 if (!frame.imagePath.trimmed().isEmpty()) {
                     imagePaths.append(frame.imagePath);
                 }
@@ -2983,6 +3011,7 @@ void VideoAnalysisService::startNextAnalysis()
                 request.outputDirectory = cacheDirectory;
                 request.mode = config.mode;
                 request.frameInterval = config.frameInterval;
+                request.contactSheetFrameCount = config.contactSheetFrameCount;
 
                 const auto extraction = m_ffmpegAdapter->extractFrames(request);
                 if (!extraction.success || extraction.frames.isEmpty()) {
@@ -3029,7 +3058,7 @@ void VideoAnalysisService::startNextAnalysis()
                     finishFailure(errorMessage, &db, false);
                     return;
                 }
-                buildContactSheet(frames);
+                buildContactSheet(frames, plan.sourceFrameCount);
                 updateRunning(10,
                               QStringLiteral("已抽取 %1 帧，开始视觉解析").arg(frames.size()),
                               analysisProgressContext(2, 4, QStringLiteral("解析视频帧"), 0, frames.size(), QStringLiteral("帧")));
@@ -3048,6 +3077,7 @@ void VideoAnalysisService::startNextAnalysis()
                     request.outputDirectory = cacheDirectory;
                     request.mode = config.mode;
                     request.frameInterval = config.frameInterval;
+                    request.contactSheetFrameCount = config.contactSheetFrameCount;
                     request.preserveExistingFrames = !hasPlan || plan.frameInterval == configuredInterval;
                     const auto extraction = m_ffmpegAdapter->extractFrames(request);
                     if (!extraction.success || extraction.frames.isEmpty()) {
@@ -3089,7 +3119,8 @@ void VideoAnalysisService::startNextAnalysis()
                     QVector<int> missingCacheFrames;
                     const auto expectedNumbers = VisualAnalysisMetadata::plannedFrameNumbers(
                         plan.sourceFrameCount,
-                        plan.frameInterval);
+                        plan.frameInterval,
+                        config.contactSheetFrameCount);
                     for (const auto frameNumber : expectedNumbers) {
                         if (!existingFrames.contains(frameNumber)) {
                             missingCacheFrames.append(frameNumber);
@@ -3117,6 +3148,7 @@ void VideoAnalysisService::startNextAnalysis()
                         request.outputDirectory = cacheDirectory;
                         request.mode = config.mode;
                         request.frameInterval = config.frameInterval;
+                        request.contactSheetFrameCount = config.contactSheetFrameCount;
                         request.requestedFrameNumbers = missingCacheFrames;
                         request.preserveExistingFrames = true;
                         const auto extraction = m_ffmpegAdapter->extractFrames(request);
@@ -3165,7 +3197,7 @@ void VideoAnalysisService::startNextAnalysis()
                         return;
                     }
                 }
-                buildContactSheet(frames);
+                buildContactSheet(frames, plan.sourceFrameCount);
                 updateRunning(10,
                               QStringLiteral("继续解析视频帧，已完成 %1/%2，跳过 %3 帧")
                                   .arg(task.completedFrames)
@@ -3273,6 +3305,7 @@ void VideoAnalysisService::startNextAnalysis()
             const auto remainingStructuredGaps = VisualAnalysisMetadata::incompletePlannedFrameNumbers(
                 plan.sourceFrameCount,
                 plan.frameInterval,
+                config.contactSheetFrameCount,
                 frames,
                 cinevault::searchconfig::kStructuredVisionProfileVersion);
             if (!remainingStructuredGaps.isEmpty()) {

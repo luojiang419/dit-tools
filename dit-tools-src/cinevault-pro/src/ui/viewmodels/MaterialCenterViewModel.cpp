@@ -147,6 +147,30 @@ bool frameMatches(const FrameAnalysisRecord &frame, const QStringList &terms)
     return terms.isEmpty() || !matchedFrameTerms(frame, terms).isEmpty();
 }
 
+QStringList contactSheetImagePaths(const VideoAnalysisDetail &detail, int contactSheetFrameCount)
+{
+    QSet<int> plannedNumbers;
+    if (detail.hasVisualAnalysisPlan) {
+        for (const auto frameNumber : VisualAnalysisMetadata::contactSheetFrameNumbers(
+                 detail.visualAnalysisPlan.sourceFrameCount,
+                 contactSheetFrameCount)) {
+            plannedNumbers.insert(frameNumber);
+        }
+    }
+
+    QStringList imagePaths;
+    imagePaths.reserve(detail.frames.size());
+    for (const auto &frame : detail.frames) {
+        if (!plannedNumbers.isEmpty() && !plannedNumbers.contains(frame.frameNumber)) {
+            continue;
+        }
+        if (!frame.imagePath.trimmed().isEmpty()) {
+            imagePaths.append(frame.imagePath);
+        }
+    }
+    return imagePaths;
+}
+
 int persistedAnalysisProgress(const GlobalVideoAsset &asset)
 {
     if (asset.analysisStatus == VideoAnalysisStatus::Ready) {
@@ -737,15 +761,31 @@ QString MaterialCenterViewModel::selectedFrameSamplingText() const
 
     const auto &plan = m_detail.visualAnalysisPlan;
     const auto interval = qMax(1, plan.frameInterval);
+    const auto contactSheetFrameCount = m_settings ? m_settings->contactSheetFrameCount() : 24;
     const auto modeText = interval == 1
-        ? QStringLiteral("逐帧解析")
-        : QStringLiteral("每 %1 帧抽 1 帧").arg(interval);
+        ? QStringLiteral("逐帧解析（已包含拼图画面）")
+        : QStringLiteral("每 %1 帧抽 1 帧 + 拼图均匀取样").arg(interval);
     const auto terminalCovered = plan.sourceFrameCount > 0
         && !m_detail.frames.isEmpty()
         && m_detail.frames.constLast().frameNumber == plan.sourceFrameCount;
-    const auto coverageText = terminalCovered
-        ? QStringLiteral("首尾必含")
-        : QStringLiteral("尾帧待补齐");
+    QSet<int> actualFrameNumbers;
+    for (const auto &frame : m_detail.frames) {
+        actualFrameNumbers.insert(frame.frameNumber);
+    }
+    bool contactSheetCovered = true;
+    for (const auto frameNumber : VisualAnalysisMetadata::contactSheetFrameNumbers(
+             plan.sourceFrameCount,
+             contactSheetFrameCount)) {
+        if (!actualFrameNumbers.contains(frameNumber)) {
+            contactSheetCovered = false;
+            break;
+        }
+    }
+    const auto coverageText = !terminalCovered
+        ? QStringLiteral("尾帧待补齐")
+        : (contactSheetCovered
+               ? QStringLiteral("首尾及拼图取样已覆盖")
+               : QStringLiteral("拼图取样待补齐"));
     return QStringLiteral("当前结果：%1 · %2 · 共 %3 帧")
         .arg(modeText, coverageText)
         .arg(m_detail.frames.size());
@@ -2057,16 +2097,10 @@ void MaterialCenterViewModel::refreshSelectedThumbnailUrl(bool allowContactSheet
         return;
     }
 
-    QStringList frameImagePaths;
-    frameImagePaths.reserve(m_detail.frames.size());
-    for (const auto &frame : m_detail.frames) {
-        if (!frame.imagePath.trimmed().isEmpty()) {
-            frameImagePaths.append(frame.imagePath);
-        }
-    }
+    const int frameCount = m_settings ? m_settings->contactSheetFrameCount() : 24;
+    const auto frameImagePaths = contactSheetImagePaths(m_detail, frameCount);
 
     if (!frameImagePaths.isEmpty()) {
-        const int frameCount = m_settings ? m_settings->contactSheetFrameCount() : 24;
         const auto contactSheetPath = Paths::projectContactSheetPath(m_detail.asset.projectDatabasePath,
                                                                      m_detail.asset.videoKey,
                                                                      frameCount);
@@ -2104,18 +2138,12 @@ void MaterialCenterViewModel::buildPendingContactSheet()
         return;
     }
 
-    QStringList frameImagePaths;
-    frameImagePaths.reserve(detail.frames.size());
-    for (const auto &frame : detail.frames) {
-        if (!frame.imagePath.trimmed().isEmpty()) {
-            frameImagePaths.append(frame.imagePath);
-        }
-    }
+    const int frameCount = m_settings ? m_settings->contactSheetFrameCount() : 24;
+    const auto frameImagePaths = contactSheetImagePaths(detail, frameCount);
     if (frameImagePaths.isEmpty()) {
         return;
     }
 
-    const int frameCount = m_settings ? m_settings->contactSheetFrameCount() : 24;
     const auto contactSheetPath = Paths::projectContactSheetPath(detail.asset.projectDatabasePath,
                                                                  detail.asset.videoKey,
                                                                  frameCount);

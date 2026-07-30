@@ -137,6 +137,7 @@ struct FrameExtractionRequest {
     QString outputDirectory;
     AnalysisMode mode = AnalysisMode::Every10Frames;
     int frameInterval = 10;
+    int contactSheetFrameCount = 0;
     int maxWidth = 1920;
     int maxHeight = 1080;
     QVector<int> requestedFrameNumbers;

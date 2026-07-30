@@ -54,6 +54,31 @@ private slots:
         QCOMPARE(twentyFiveFpsSample.constLast(), 1462);
     }
 
+    void plannedFrameNumbers_mergesContactSheetCoverageWithRuleFrames()
+    {
+        QCOMPARE(VisualAnalysisMetadata::contactSheetFrameNumbers(0, 24), QVector<int>());
+        QCOMPARE(VisualAnalysisMetadata::contactSheetFrameNumbers(1, 24), QVector<int>({1}));
+        QCOMPARE(VisualAnalysisMetadata::contactSheetFrameNumbers(5, 1), QVector<int>({1}));
+        QCOMPARE(VisualAnalysisMetadata::contactSheetFrameNumbers(5, 3), QVector<int>({1, 3, 5}));
+        QCOMPARE(VisualAnalysisMetadata::contactSheetFrameNumbers(5, 24),
+                 QVector<int>({1, 2, 3, 4, 5}));
+
+        QCOMPARE(VisualAnalysisMetadata::plannedFrameNumbers(17, 15, 4),
+                 QVector<int>({1, 6, 12, 16, 17}));
+        QCOMPARE(VisualAnalysisMetadata::plannedFrameNumbers(16, 15, 4),
+                 QVector<int>({1, 6, 11, 16}));
+        QCOMPARE(VisualAnalysisMetadata::plannedFrameNumbers(5, 1, 4),
+                 QVector<int>({1, 2, 3, 4, 5}));
+
+        const auto realSample = VisualAnalysisMetadata::plannedFrameNumbers(1260, 15, 24);
+        QCOMPARE(realSample.size(), 106);
+        QCOMPARE(realSample.constFirst(), 1);
+        QCOMPARE(realSample.constLast(), 1260);
+        for (const auto frameNumber : VisualAnalysisMetadata::contactSheetFrameNumbers(1260, 24)) {
+            QVERIFY(realSample.contains(frameNumber));
+        }
+    }
+
     void incompletePlan_detectsMissingFailedAndLegacyFramesOnly()
     {
         FrameAnalysisRecord complete;
@@ -90,6 +115,25 @@ private slots:
         QCOMPARE(VisualAnalysisMetadata::incompletePlannedFrameNumbers(
                      17, 15, {first, intervalPoint}, 2),
                  QVector<int>({17}));
+    }
+
+    void legacyFixedIntervalPlan_detectsMissingContactSheetFrames()
+    {
+        FrameAnalysisRecord first;
+        first.frameNumber = 1;
+        first.analysisState = FrameAnalysisState::Success;
+        first.factsComplete = true;
+        first.structuredProfileVersion = 2;
+
+        FrameAnalysisRecord intervalPoint = first;
+        intervalPoint.frameNumber = 16;
+
+        FrameAnalysisRecord last = first;
+        last.frameNumber = 17;
+
+        QCOMPARE(VisualAnalysisMetadata::incompletePlannedFrameNumbers(
+                     17, 15, 4, {first, intervalPoint, last}, 2),
+                 QVector<int>({6, 12}));
     }
 };
 

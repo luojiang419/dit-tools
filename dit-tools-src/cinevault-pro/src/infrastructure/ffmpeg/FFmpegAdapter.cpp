@@ -320,7 +320,10 @@ FrameExtractionResult FFmpegAdapter::extractFrames(const FrameExtractionRequest 
     }
 
     const int interval = result.frameInterval;
-    const auto plannedNumbers = VisualAnalysisMetadata::plannedFrameNumbers(frames.size(), interval);
+    const auto plannedNumbers = VisualAnalysisMetadata::plannedFrameNumbers(
+        frames.size(),
+        interval,
+        request.contactSheetFrameCount);
     QSet<int> plannedFrameNumbers;
     for (const auto frameNumber : plannedNumbers) {
         plannedFrameNumbers.insert(frameNumber);

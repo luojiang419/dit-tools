@@ -6,6 +6,8 @@
 #include <QJsonObject>
 #include <QSet>
 
+#include <algorithm>
+
 namespace {
 QStringList normalizedList(const QStringList &values)
 {
@@ -148,6 +150,46 @@ QVector<int> VisualAnalysisMetadata::plannedFrameNumbers(int sourceFrameCount, i
     return numbers;
 }
 
+QVector<int> VisualAnalysisMetadata::contactSheetFrameNumbers(int sourceFrameCount,
+                                                              int contactSheetFrameCount)
+{
+    QVector<int> numbers;
+    const auto count = qMax(0, sourceFrameCount);
+    if (count == 0 || contactSheetFrameCount <= 0) {
+        return numbers;
+    }
+
+    const auto targetCount = qMin(count, contactSheetFrameCount);
+    numbers.reserve(targetCount);
+    if (targetCount == 1) {
+        numbers.append(1);
+        return numbers;
+    }
+
+    const auto denominator = static_cast<qint64>(targetCount - 1);
+    for (int index = 0; index < targetCount; ++index) {
+        const auto numerator = static_cast<qint64>(count - 1) * index;
+        const auto zeroBased = (numerator + denominator / 2) / denominator;
+        numbers.append(static_cast<int>(zeroBased) + 1);
+    }
+    return numbers;
+}
+
+QVector<int> VisualAnalysisMetadata::plannedFrameNumbers(int sourceFrameCount,
+                                                         int frameInterval,
+                                                         int contactSheetFrameCount)
+{
+    auto numbers = plannedFrameNumbers(sourceFrameCount, frameInterval);
+    const auto contactSheetNumbers = contactSheetFrameNumbers(sourceFrameCount, contactSheetFrameCount);
+    numbers.reserve(numbers.size() + contactSheetNumbers.size());
+    for (const auto frameNumber : contactSheetNumbers) {
+        numbers.append(frameNumber);
+    }
+    std::sort(numbers.begin(), numbers.end());
+    numbers.erase(std::unique(numbers.begin(), numbers.end()), numbers.end());
+    return numbers;
+}
+
 bool VisualAnalysisMetadata::isFrameAnalysisComplete(const FrameAnalysisRecord &frame,
                                                      int requiredProfileVersion)
 {
@@ -163,13 +205,31 @@ QVector<int> VisualAnalysisMetadata::incompletePlannedFrameNumbers(
     const QVector<FrameAnalysisRecord> &frames,
     int requiredProfileVersion)
 {
+    return incompletePlannedFrameNumbers(
+        sourceFrameCount,
+        frameInterval,
+        0,
+        frames,
+        requiredProfileVersion);
+}
+
+QVector<int> VisualAnalysisMetadata::incompletePlannedFrameNumbers(
+    int sourceFrameCount,
+    int frameInterval,
+    int contactSheetFrameCount,
+    const QVector<FrameAnalysisRecord> &frames,
+    int requiredProfileVersion)
+{
     QHash<int, FrameAnalysisRecord> byNumber;
     for (const auto &frame : frames) {
         byNumber.insert(frame.frameNumber, frame);
     }
 
     QVector<int> incomplete;
-    for (const auto frameNumber : plannedFrameNumbers(sourceFrameCount, frameInterval)) {
+    for (const auto frameNumber : plannedFrameNumbers(
+             sourceFrameCount,
+             frameInterval,
+             contactSheetFrameCount)) {
         if (!byNumber.contains(frameNumber)
             || !isFrameAnalysisComplete(byNumber.value(frameNumber), requiredProfileVersion)) {
             incomplete.append(frameNumber);

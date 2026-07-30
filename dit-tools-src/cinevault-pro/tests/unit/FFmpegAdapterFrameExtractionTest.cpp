@@ -103,6 +103,7 @@ private slots:
         fullRequest.outputDirectory = QDir(temporaryDir.path()).filePath(QStringLiteral("full"));
         fullRequest.mode = AnalysisMode::CustomInterval;
         fullRequest.frameInterval = 15;
+        fullRequest.contactSheetFrameCount = 4;
         fullRequest.maxWidth = 64;
         fullRequest.maxHeight = 64;
 
@@ -110,10 +111,12 @@ private slots:
         QVERIFY2(fullResult.success, qPrintable(fullResult.errorMessage));
         QCOMPARE(fullResult.sourceFrameCount, 17);
         QCOMPARE(fullResult.frameInterval, 15);
-        QCOMPARE(fullResult.frames.size(), 3);
+        QCOMPARE(fullResult.frames.size(), 5);
         QCOMPARE(fullResult.frames.at(0).frameNumber, 1);
-        QCOMPARE(fullResult.frames.at(1).frameNumber, 16);
-        QCOMPARE(fullResult.frames.at(2).frameNumber, 17);
+        QCOMPARE(fullResult.frames.at(1).frameNumber, 6);
+        QCOMPARE(fullResult.frames.at(2).frameNumber, 12);
+        QCOMPARE(fullResult.frames.at(3).frameNumber, 16);
+        QCOMPARE(fullResult.frames.at(4).frameNumber, 17);
         for (const auto &frame : fullResult.frames) {
             const QFileInfo image(frame.imagePath);
             QVERIFY(image.isFile());
@@ -122,13 +125,16 @@ private slots:
 
         FrameExtractionRequest repairRequest = fullRequest;
         repairRequest.outputDirectory = QDir(temporaryDir.path()).filePath(QStringLiteral("repair"));
-        repairRequest.requestedFrameNumbers = {17};
+        repairRequest.requestedFrameNumbers = {6, 12};
 
         const auto repairResult = adapter.extractFrames(repairRequest);
         QVERIFY2(repairResult.success, qPrintable(repairResult.errorMessage));
-        QCOMPARE(repairResult.frames.size(), 1);
-        QCOMPARE(repairResult.frames.constFirst().frameNumber, 17);
-        QVERIFY(QFileInfo(repairResult.frames.constFirst().imagePath).size() > 0);
+        QCOMPARE(repairResult.frames.size(), 2);
+        QCOMPARE(repairResult.frames.at(0).frameNumber, 6);
+        QCOMPARE(repairResult.frames.at(1).frameNumber, 12);
+        for (const auto &frame : repairResult.frames) {
+            QVERIFY(QFileInfo(frame.imagePath).size() > 0);
+        }
     }
 };
 

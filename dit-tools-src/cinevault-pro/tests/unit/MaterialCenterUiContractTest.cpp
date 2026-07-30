@@ -256,6 +256,8 @@ private slots:
         QVERIFY(!source.contains(QStringLiteral("task.generation != m_searchGeneration")));
         QVERIFY(source.contains(QStringLiteral("Formatters::formatFrameTimestamp(frame.timestampMs)")));
         QVERIFY(source.contains(QStringLiteral("尾帧待补齐")));
+        QVERIFY(source.contains(QStringLiteral("拼图均匀取样")));
+        QVERIFY(source.contains(QStringLiteral("拼图取样待补齐")));
     }
 
     void qmlConsumesSearchStateAndFolderActions()
