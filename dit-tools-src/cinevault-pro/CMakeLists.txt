@@ -567,6 +567,8 @@ else()
     src/application/MaterialCatalogSyncService.cpp
     src/application/MaterialCenterQueryService.h
     src/application/MaterialCenterQueryService.cpp
+    src/application/websearch/WebSearchService.h
+    src/application/websearch/WebSearchService.cpp
     src/application/ApplicationIdleMonitor.h
     src/application/ApplicationIdleMonitor.cpp
     src/application/SearchAssistantLifecycleController.h
@@ -718,6 +720,9 @@ qt_add_resources(CineVault "CineVault_assets"
     BASE resources
     FILES
         resources/icons/app.ico
+        resources/websearch/index.html
+        resources/websearch/styles.css
+        resources/websearch/app.js
 )
 
 set_source_files_properties(src/ui/qml/themes/Theme.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
@@ -1052,6 +1057,32 @@ if(BUILD_TESTING)
         Qt6::Widgets
     )
     add_test(NAME QuickSearchControllerTest COMMAND QuickSearchControllerTest)
+
+    qt_add_executable(WebSearchServiceTest
+        tests/unit/WebSearchServiceTest.cpp
+        src/application/websearch/WebSearchService.cpp
+        src/application/MaterialCenterQueryService.cpp
+        src/core/search/SearchEngine.cpp
+        src/core/search/NaturalLanguageQueryParser.cpp
+        src/core/search/SearchReliabilityEvaluator.cpp
+        src/core/search/SearchQueryUnderstanding.cpp
+        src/infrastructure/db/GlobalDatabaseManager.cpp
+        src/infrastructure/db/DatabaseMigration.cpp
+        src/shared/Formatters.cpp
+        src/shared/Paths.cpp
+        src/shared/VisualAnalysisMetadata.cpp
+    )
+    target_include_directories(WebSearchServiceTest PRIVATE src)
+    target_link_libraries(WebSearchServiceTest PRIVATE Qt6::Core Qt6::Network Qt6::Sql Qt6::Test)
+    qt_add_resources(WebSearchServiceTest "WebSearchServiceTest_assets"
+        PREFIX "/"
+        BASE resources
+        FILES
+            resources/websearch/index.html
+            resources/websearch/styles.css
+            resources/websearch/app.js
+    )
+    add_test(NAME WebSearchServiceTest COMMAND WebSearchServiceTest)
 
     qt_add_executable(VisualAnalysisMetadataTest
         tests/unit/VisualAnalysisMetadataTest.cpp
@@ -1579,6 +1610,7 @@ if(BUILD_TESTING)
             RawWorkerClientTest
             AppSettingsSearchTest
             QuickSearchControllerTest
+            WebSearchServiceTest
             VisualAnalysisMetadataTest
             FormattersTest
             FFmpegAdapterFrameExtractionTest

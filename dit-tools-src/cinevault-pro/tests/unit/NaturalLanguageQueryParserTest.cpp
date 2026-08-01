@@ -95,6 +95,27 @@ private slots:
         QCOMPARE(query.semanticText, QStringLiteral("夜景"));
     }
 
+    void parsesCalendarYearWordsAsStrictRanges()
+    {
+        NaturalLanguageQueryParser parser;
+
+        const auto lastYear = parser.parse(QStringLiteral("去年的视频"), QDate(2026, 7, 31));
+        QCOMPARE(lastYear.dateConstraint.startDate, QStringLiteral("2025-01-01"));
+        QCOMPARE(lastYear.dateConstraint.endDate, QStringLiteral("2025-12-31"));
+        QCOMPARE(lastYear.dateConstraint.matchedText, QStringLiteral("去年"));
+        QCOMPARE(lastYear.assetTypeFilter, static_cast<int>(AssetType::Video));
+        QVERIFY(lastYear.semanticText.isEmpty());
+
+        const auto thisYear = parser.parse(QStringLiteral("今年的素材"), QDate(2026, 7, 31));
+        QCOMPARE(thisYear.dateConstraint.startDate, QStringLiteral("2026-01-01"));
+        QCOMPARE(thisYear.dateConstraint.endDate, QStringLiteral("2026-07-31"));
+
+        const auto explicitYear = parser.parse(QStringLiteral("2025年的视频"), QDate(2026, 7, 31));
+        QCOMPARE(explicitYear.dateConstraint.startDate, QStringLiteral("2025-01-01"));
+        QCOMPARE(explicitYear.dateConstraint.endDate, QStringLiteral("2025-12-31"));
+        QCOMPARE(explicitYear.dateConstraint.matchedText, QStringLiteral("2025年"));
+    }
+
     void parsesOneCalendarMonthAgoAsExactDate()
     {
         NaturalLanguageQueryParser parser;

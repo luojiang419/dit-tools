@@ -33,6 +33,7 @@ class MediaTaskService;
 class MetadataExtractionService;
 class MaterialCatalogSyncService;
 class MaterialCenterQueryService;
+class WebSearchService;
 class VideoAnalysisService;
 class FeedbackService;
 class UpdateService;
@@ -118,6 +119,7 @@ private:
     MetadataExtractionService *m_metadataExtractionService = nullptr;
     MaterialCatalogSyncService *m_materialCatalogSyncService = nullptr;
     MaterialCenterQueryService *m_materialCenterQueryService = nullptr;
+    WebSearchService *m_webSearchService = nullptr;
     VisionApiClient *m_visionApiClient = nullptr;
     LocalSearchAssistantRuntime *m_localSearchAssistantRuntime = nullptr;
     SearchAssistantClient *m_searchAssistantClient = nullptr;

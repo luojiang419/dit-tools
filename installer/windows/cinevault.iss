@@ -71,27 +71,56 @@ function StopCineVaultProcesses(const Phase: String): Boolean;
 var
   Attempt: Integer;
   ResultCode: Integer;
+  PowerShellPath: String;
 begin
-  Result := True;
+  Result := False;
+  PowerShellPath := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
 
-  if not IsCineVaultRunning() then
-    Exit;
-
-  Log('CineVault process detected during ' + Phase + '; forcing shutdown before installation continues.');
-
-  for Attempt := 1 to 3 do
+  for Attempt := 1 to 12 do
   begin
+    if not IsCineVaultRunning() then
+    begin
+      Result := True;
+      Exit;
+    end;
+
+    if Attempt = 1 then
+      Log('CineVault process detected during ' + Phase + '; forcing shutdown before installation continues.');
+
     Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM CineVault.exe',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Sleep(500);
+    Log('taskkill attempt ' + IntToStr(Attempt) + ' returned ' + IntToStr(ResultCode) + '.');
 
     if not IsCineVaultRunning() then
+    begin
+      Result := True;
       Exit;
+    end;
+
+    { Some older elevated processes can survive the taskkill image-tree pass.
+      Stop-Process is a second forceful path, executed after UAC elevation. }
+    if FileExists(PowerShellPath) then
+    begin
+      Exec(PowerShellPath,
+        '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ' +
+        '"$ErrorActionPreference = ''SilentlyContinue''; ' +
+        'Get-Process -Name ''CineVault'' -ErrorAction SilentlyContinue | Stop-Process -Force"',
+        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      Log('PowerShell Stop-Process attempt ' + IntToStr(Attempt) +
+        ' returned ' + IntToStr(ResultCode) + '.');
+    end;
+
+    Sleep(250 + Attempt * 250);
+
+    if not IsCineVaultRunning() then
+    begin
+      Result := True;
+      Exit;
+    end;
   end;
 
-  MsgBox('检测到旧版影资管家仍在运行，安装程序无法自动结束进程。请手动退出影资管家后重新运行安装包。',
+  MsgBox('安装器已尝试强制结束旧版影资管家，但进程仍未退出。请检查是否有其他管理员会话或安全软件阻止结束进程，然后重新运行安装包。',
     mbError, MB_OK);
-  Result := False;
 end;
 
 function ShouldForceStopCineVaultProcesses(): Boolean;
@@ -106,10 +135,11 @@ begin
   UpdateProgressFilePath := ExpandConstant('{param:UPDATEPROGRESSFILE|}');
   LastReportedInstallProgress := -1;
 
-  if ShouldForceStopCineVaultProcesses() then
-    Result := StopCineVaultProcesses('setup initialization')
-  else
-    Result := True;
+  { InitializeSetup may run before the installer has completed UAC
+    elevation. Do not reject the installation here when an old process is
+    still running; PrepareToInstall is the authoritative elevated cleanup
+    point immediately before files are replaced. }
+  Result := True;
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
@@ -125,12 +155,6 @@ end;
 function NextButtonClick(CurPageID: Integer): Boolean;
 begin
   Result := True;
-
-  if CurPageID = wpReady then
-  begin
-    if ShouldForceStopCineVaultProcesses() then
-      Result := StopCineVaultProcesses('ready page');
-  end;
 end;
 
 function InitializeUninstall(): Boolean;

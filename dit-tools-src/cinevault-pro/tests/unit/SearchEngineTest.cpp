@@ -118,6 +118,18 @@ private:
                 "capture_date = '2026-07-13', capture_time_source = 'quicktime_creation_date', "
                 "capture_time_confidence = 1.0 WHERE video_key = 'asset-semantic'"),
             QStringLiteral(
+                "INSERT INTO global_video_asset("
+                "video_key, project_uuid, project_name, project_database_path, source_root_id, source_root_name, "
+                "folder_key, asset_id, file_name, extension, absolute_path, relative_path, asset_type, modified_at, "
+                "analysis_status, confirmation_status, technical_summary, source_text, updated_at, is_available) VALUES "
+                "('asset-last-year', 'project-a', '上海项目', 'G:/projects/a/project.sqlite', 1, '主素材', '', 5, "
+                "'去年素材.mp4', 'mp4', 'G:/projects/a/2025/去年素材.mp4', '2025/去年素材.mp4', 1, "
+                "'2025-11-20T22:00:00', 2, 0, '4K 视频', '', '2025-11-20T22:00:00', 1)"),
+            QStringLiteral(
+                "UPDATE global_video_asset SET capture_time = '2025-11-20T14:00:00+08:00', "
+                "capture_date = '2025-11-20', capture_time_source = 'quicktime_creation_date', "
+                "capture_time_confidence = 1.0 WHERE video_key = 'asset-last-year'"),
+            QStringLiteral(
                 "UPDATE global_video_asset SET embedded_metadata_text = "
                 "'EXIF:Make Sony EXIF:Model AlphaA7M4 EXIF:LensModel FE24-70GM2' "
                 "WHERE video_key = 'asset-night-image'"),
@@ -207,6 +219,28 @@ private slots:
         QVERIFY(findHit(result, SearchDocumentType::Asset, QStringLiteral("asset-night-image")));
         for (const auto &hit : result.hits) {
             QCOMPARE(hit.documentType, SearchDocumentType::Asset);
+        }
+    }
+
+    void lastCalendarYearFiltersSemanticAssetCandidates()
+    {
+        Fixture fixture;
+        QVERIFY2(fixture.valid, qPrintable(fixture.errorMessage));
+        SearchEngine engine(&fixture.manager);
+
+        const auto result = engine.searchMaterials(
+            QStringLiteral("去年的视频"),
+            {},
+            QDate(2026, 7, 31));
+
+        const auto *lastYear = findHit(result,
+                                       SearchDocumentType::Asset,
+                                       QStringLiteral("asset-last-year"));
+        QVERIFY(lastYear);
+        QCOMPARE(lastYear->dateSource, QStringLiteral("quicktime_creation_date"));
+        for (const auto &hit : result.hits) {
+            QCOMPARE(hit.documentType, SearchDocumentType::Asset);
+            QVERIFY(hit.entityKey == QStringLiteral("asset-last-year"));
         }
     }
 

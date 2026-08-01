@@ -109,6 +109,37 @@ ParsedDateText normalizedDateFromText(const QString &text,
         return exactDate(referenceDate, QStringLiteral("今天"));
     }
 
+    const auto calendarYear = [](int year, const QString &matchedText) {
+        return dateRange(QDate(year, 1, 1), QDate(year, 12, 31), matchedText);
+    };
+    if (text.contains(QStringLiteral("前年"))) {
+        return calendarYear(referenceDate.year() - 2, QStringLiteral("前年"));
+    }
+    if (text.contains(QStringLiteral("去年"))) {
+        return calendarYear(referenceDate.year() - 1, QStringLiteral("去年"));
+    }
+    if (text.contains(QStringLiteral("上年度"))) {
+        return calendarYear(referenceDate.year() - 1, QStringLiteral("上年度"));
+    }
+    if (text.contains(QStringLiteral("上一年"))) {
+        return calendarYear(referenceDate.year() - 1, QStringLiteral("上一年"));
+    }
+    if (text.contains(QStringLiteral("今年"))) {
+        return dateRange(QDate(referenceDate.year(), 1, 1),
+                         referenceDate,
+                         QStringLiteral("今年"));
+    }
+    if (text.contains(QStringLiteral("本年度"))) {
+        return dateRange(QDate(referenceDate.year(), 1, 1),
+                         referenceDate,
+                         QStringLiteral("本年度"));
+    }
+    if (text.contains(QStringLiteral("本年"))) {
+        return dateRange(QDate(referenceDate.year(), 1, 1),
+                         referenceDate,
+                         QStringLiteral("本年"));
+    }
+
     static const QRegularExpression daysAgo(
         QStringLiteral("(?<!\\d)(\\d{1,3})\\s*天前"));
     auto match = daysAgo.match(text);
@@ -220,6 +251,13 @@ ParsedDateText normalizedDateFromText(const QString &text,
         if (date.isValid()) {
             return exactDate(date, match.captured(0));
         }
+    }
+
+    static const QRegularExpression yearOnly(
+        QStringLiteral("(?<!\\d)((?:19|20)\\d{2})\\s*年(?!\\s*\\d{1,2}\\s*月)"));
+    match = yearOnly.match(text);
+    if (match.hasMatch()) {
+        return calendarYear(match.captured(1).toInt(), match.captured(0));
     }
 
     static const QRegularExpression compact(QStringLiteral("(?<!\\d)(\\d{4})(\\d{2})(\\d{2})(?!\\d)"));

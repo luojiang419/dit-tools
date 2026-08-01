@@ -31,6 +31,7 @@
 #include "application/SearchAssistantLifecycleController.h"
 #include "application/UpdateService.h"
 #include "application/VideoAnalysisService.h"
+#include "application/websearch/WebSearchService.h"
 #include "core/media/MediaProbeEngine.h"
 #include "core/jobs/JobEngine.h"
 #include "core/scan/ScanEngine.h"
@@ -149,6 +150,7 @@ AppContext::AppContext(QObject *parent)
           m_databaseManager, m_jobEngine, m_exifToolAdapter, this))
     , m_materialCatalogSyncService(new MaterialCatalogSyncService(m_globalDatabaseManager, m_jobEngine, m_projectService, this))
     , m_materialCenterQueryService(new MaterialCenterQueryService(m_globalDatabaseManager, m_searchEngine, this))
+    , m_webSearchService(new WebSearchService(m_materialCenterQueryService, this))
     , m_visionApiClient(new VisionApiClient)
     , m_localSearchAssistantRuntime(new LocalSearchAssistantRuntime({}, {}, this))
     , m_searchAssistantClient(new SearchAssistantClient(this))
@@ -324,6 +326,9 @@ AppContext::AppContext(QObject *parent)
 AppContext::~AppContext()
 {
 #if !CINEVAULT_BUILD_MINIMAL_GUI
+    if (m_webSearchService) {
+        m_webSearchService->stop();
+    }
     const auto currentProjectPath = m_projectService
         ? m_projectService->currentProject().databasePath
         : QString();
@@ -446,6 +451,26 @@ void AppContext::startInteractiveServices()
     }
     if (m_backgroundMaintenanceCoordinator) {
         m_backgroundMaintenanceCoordinator->start();
+    }
+    if (m_webSearchService) {
+        QString webSearchError;
+        if (m_webSearchService->start(17890, &webSearchError)) {
+            if (auto *application = QCoreApplication::instance()) {
+                QObject::connect(application,
+                                 &QCoreApplication::aboutToQuit,
+                                 m_webSearchService,
+                                 [this]() {
+                                     if (m_webSearchService) {
+                                         m_webSearchService->stop();
+                                     }
+                                 },
+                                 Qt::DirectConnection);
+            }
+            Logger::info(QStringLiteral("web_search_service_started urls=%1")
+                             .arg(m_webSearchService->localAccessUrls().join(QStringLiteral(","))));
+        } else {
+            Logger::error(webSearchError);
+        }
     }
 #endif
 }
