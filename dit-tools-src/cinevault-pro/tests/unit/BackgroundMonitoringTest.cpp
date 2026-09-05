@@ -149,6 +149,27 @@ private slots:
         QVERIFY(batch.overflowed);
         QVERIFY(batch.changedPaths.isEmpty());
     }
+
+    void sourceMonitorKeepsChangesBelowDriveRoot()
+    {
+#ifndef Q_OS_WIN
+        QSKIP("盘符根路径契约仅适用于 Windows。");
+#else
+        SourceChangeMonitor monitor;
+        QSignalSpy batches(&monitor, &SourceChangeMonitor::sourceChangesDetected);
+        monitor.recordChangesForTesting(
+            7,
+            QStringLiteral("G:/"),
+            {QStringLiteral("G:/DCIM/sample.mov")});
+
+        QTRY_COMPARE_WITH_TIMEOUT(batches.count(), 1, 5000);
+        const auto batch = qvariant_cast<SourceChangeBatch>(batches.first().at(0));
+        QCOMPARE(batch.sourceRootId, qint64{7});
+        QVERIFY(!batch.overflowed);
+        QVERIFY(batch.changedPaths.contains(QStringLiteral("G:/DCIM/sample.mov")));
+        QVERIFY(batch.changedPaths.contains(QStringLiteral("G:/DCIM")));
+#endif
+    }
 };
 
 QTEST_GUILESS_MAIN(BackgroundMonitoringTest)

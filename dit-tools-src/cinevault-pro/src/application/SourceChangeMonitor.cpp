@@ -1,5 +1,7 @@
 #include "application/SourceChangeMonitor.h"
 
+#include "core/scan/ScanPathPolicy.h"
+
 #include <QDir>
 #include <QFileInfo>
 #include <QMetaObject>
@@ -28,17 +30,6 @@ constexpr qsizetype MaximumChangedPathsPerBatch = 4096;
 QString normalizedAbsolutePath(const QString &path)
 {
     return QDir::cleanPath(QFileInfo(path).absoluteFilePath());
-}
-
-bool isPathInside(const QString &candidatePath, const QString &rootPath)
-{
-    auto candidate = QDir::fromNativeSeparators(normalizedAbsolutePath(candidatePath));
-    auto root = QDir::fromNativeSeparators(normalizedAbsolutePath(rootPath));
-#ifdef Q_OS_WIN
-    candidate = candidate.toCaseFolded();
-    root = root.toCaseFolded();
-#endif
-    return candidate == root || candidate.startsWith(root + QLatin1Char('/'));
 }
 
 #ifdef Q_OS_WIN
@@ -338,7 +329,7 @@ void SourceChangeMonitor::postChanges(qint64 sourceRootId,
             const auto absolutePath = normalizedAbsolutePath(changedPath);
             const auto parentPath = QFileInfo(absolutePath).absolutePath();
             for (const auto &candidate : {absolutePath, parentPath}) {
-                if (isPathInside(candidate, pending.sourcePath)) {
+                if (ScanPathPolicy::isPathInside(candidate, pending.sourcePath)) {
                     pending.changedPaths.insert(normalizedAbsolutePath(candidate));
                 }
             }
