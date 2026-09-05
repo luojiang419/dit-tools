@@ -5,6 +5,7 @@
 #include <QDateTime>
 #include <QList>
 #include <QString>
+#include <stop_token>
 #include <QStringList>
 #include <QVariantList>
 #include <QVector>
@@ -146,6 +147,7 @@ struct FrameExtractionRequest {
     double intervalSeconds = 1.0;
     double sceneThreshold = 0.3;
     double minimumSharpness = 0.01;
+    std::stop_token stopToken;
 };
 
 struct FrameExtractionResult {

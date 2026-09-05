@@ -567,6 +567,8 @@ else()
     src/application/MaterialCatalogSyncService.cpp
     src/application/MaterialCenterQueryService.h
     src/application/MaterialCenterQueryService.cpp
+    src/application/MaterialCenterReadContext.h
+    src/application/MaterialCenterReadContext.cpp
     src/application/websearch/WebSearchService.h
     src/application/websearch/WebSearchService.cpp
     src/application/ApplicationIdleMonitor.h
@@ -1062,6 +1064,7 @@ if(BUILD_TESTING)
         tests/unit/WebSearchServiceTest.cpp
         src/application/websearch/WebSearchService.cpp
         src/application/MaterialCenterQueryService.cpp
+        src/application/MaterialCenterReadContext.cpp
         src/core/search/SearchEngine.cpp
         src/core/search/NaturalLanguageQueryParser.cpp
         src/core/search/SearchReliabilityEvaluator.cpp
@@ -1269,6 +1272,7 @@ if(BUILD_TESTING)
 
     qt_add_executable(JobEngineTest
         tests/unit/JobEngineTest.cpp
+        src/application/IndexingWorkCoordinator.cpp
         src/core/jobs/JobEngine.cpp
         src/infrastructure/db/DatabaseManager.cpp
         src/infrastructure/db/DatabaseMigration.cpp

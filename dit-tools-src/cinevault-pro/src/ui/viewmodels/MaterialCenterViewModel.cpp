@@ -3,6 +3,7 @@
 #include "shared/FileRevealService.h"
 
 #include "application/MaterialCatalogSyncService.h"
+#include "application/MaterialCenterReadContext.h"
 #include "application/MaterialCenterQueryService.h"
 #include "application/ProjectService.h"
 #include "application/SearchDocumentSyncService.h"
@@ -10,11 +11,8 @@
 #include "core/search/SearchQueryUnderstanding.h"
 #include "core/search/SearchAssistantRouter.h"
 #include "core/search/SearchResultFusion.h"
-#include "core/search/SearchEngine.h"
-#include "core/search/SemanticSearchIndexService.h"
 #include "core/thumbnail/ContactSheetBuilder.h"
 #include "infrastructure/config/AppSettings.h"
-#include "infrastructure/db/GlobalDatabaseManager.h"
 #include "infrastructure/search/LocalSearchAssistantRuntime.h"
 #include "infrastructure/search/SearchAssistantClient.h"
 #include "shared/Formatters.h"
@@ -38,12 +36,12 @@
 #include <QtConcurrent/QtConcurrentRun>
 
 #include <algorithm>
-#include <memory>
 #include <optional>
 
 namespace {
 constexpr int kInitialVisibleFrameCount = 24;
 constexpr int kVisibleFrameBatchSize = 24;
+constexpr int kMaxLoadedDetailFrames = 240;
 constexpr int kMaxFrameRetryCount = 3;
 
 bool sameProjectDatabasePath(const QString &left, const QString &right)
@@ -289,55 +287,6 @@ struct ContactSheetTaskResult {
     QString outputPath;
     bool success = false;
 };
-
-class MaterialCenterReadContext final {
-public:
-    ~MaterialCenterReadContext()
-    {
-        queryService.reset();
-        searchEngine.reset();
-        semanticIndex.reset();
-        manager.closeDatabase();
-    }
-
-    bool open(const QString &databasePath, int backendGeneration, QString *errorMessage)
-    {
-        if (!manager.openReadOnlyDatabase(databasePath, errorMessage)) {
-            return false;
-        }
-        semanticIndex = std::make_unique<SemanticSearchIndexService>(&manager);
-        searchEngine = std::make_unique<SearchEngine>(&manager, semanticIndex.get());
-        queryService = std::make_unique<MaterialCenterQueryService>(&manager, searchEngine.get());
-        path = databasePath;
-        generation = backendGeneration;
-        return true;
-    }
-
-    QString path;
-    int generation = -1;
-    GlobalDatabaseManager manager;
-    std::unique_ptr<SemanticSearchIndexService> semanticIndex;
-    std::unique_ptr<SearchEngine> searchEngine;
-    std::unique_ptr<MaterialCenterQueryService> queryService;
-};
-
-MaterialCenterReadContext *materialCenterReadContext(const QString &databasePath,
-                                                     int backendGeneration,
-                                                     QString *errorMessage)
-{
-    thread_local std::unique_ptr<MaterialCenterReadContext> context;
-    if (!context || context->path != databasePath || context->generation != backendGeneration) {
-        auto replacement = std::make_unique<MaterialCenterReadContext>();
-        if (!replacement->open(databasePath, backendGeneration, errorMessage)) {
-            return nullptr;
-        }
-        context = std::move(replacement);
-    }
-    if (errorMessage) {
-        errorMessage->clear();
-    }
-    return context.get();
-}
 
 }
 
@@ -907,7 +856,9 @@ bool MaterialCenterViewModel::canExpandSelectedFrames() const
 
 bool MaterialCenterViewModel::canLoadMoreSelectedFrames() const
 {
-    return m_selectedFramesHasMore && !m_selectedFramesLoading;
+    return m_selectedFramesHasMore
+        && !m_selectedFramesLoading
+        && m_detail.frames.size() < kMaxLoadedDetailFrames;
 }
 
 bool MaterialCenterViewModel::selectedFramesLoading() const
@@ -1191,16 +1142,16 @@ void MaterialCenterViewModel::executeSearch(const ModelSearchUnderstanding *mode
             task.logicalGeneration = logicalGeneration;
             task.requestGeneration = requestGeneration;
             task.enhanced = understanding.has_value();
-            auto *context = materialCenterReadContext(
+            auto *context = materialCenterReadContextForCurrentThread(
                 databasePath, backendGeneration, &task.errorMessage);
-            if (!context || !context->queryService) {
+            if (!context || !context->queryService()) {
                 return task;
             }
             if (!task.enhanced) {
-                task.projectOptions = context->queryService->fetchProjectOptions();
-                task.sourceOptions = context->queryService->fetchSourceOptions(projectFilter);
+                task.projectOptions = context->queryService()->fetchProjectOptions();
+                task.sourceOptions = context->queryService()->fetchSourceOptions(projectFilter);
             }
-            task.result = context->queryService->searchMaterials(
+            task.result = context->queryService()->searchMaterials(
                 queryText,
                 scope,
                 referenceDate,
@@ -1976,6 +1927,13 @@ void MaterialCenterViewModel::toggleSelectedFramesExpanded()
 
 void MaterialCenterViewModel::loadMoreSelectedFrames()
 {
+    if (m_detail.frames.size() >= kMaxLoadedDetailFrames) {
+        m_selectedFrameSearchStatusCache = QStringLiteral(
+            "已加载 %1 帧，达到单次浏览上限；可重新选择素材继续浏览。")
+            .arg(m_detail.frames.size());
+        emit selectionChanged();
+        return;
+    }
     if (!canLoadMoreSelectedFrames()) {
         return;
     }
@@ -2134,6 +2092,9 @@ void MaterialCenterViewModel::loadDetailPage(const QString &videoKey,
                 existingFrameNumbers.insert(frame.frameNumber);
             }
             for (auto &frame : task.page.detail.frames) {
+                if (m_detail.frames.size() >= kMaxLoadedDetailFrames) {
+                    break;
+                }
                 if (!existingFrameNumbers.contains(frame.frameNumber)) {
                     existingFrameNumbers.insert(frame.frameNumber);
                     m_detail.frames.append(std::move(frame));
@@ -2164,12 +2125,12 @@ void MaterialCenterViewModel::loadDetailPage(const QString &videoKey,
             task.requestGeneration = requestGeneration;
             task.videoKey = normalizedKey;
             task.replaceCurrent = replaceCurrent;
-            auto *context = materialCenterReadContext(
+            auto *context = materialCenterReadContextForCurrentThread(
                 databasePath, backendGeneration, &task.errorMessage);
-            if (!context || !context->queryService) {
+            if (!context || !context->queryService()) {
                 return task;
             }
-            task.page = context->queryService->fetchDetailPage(
+            task.page = context->queryService()->fetchDetailPage(
                 normalizedKey,
                 kVisibleFrameBatchSize,
                 afterFrameNumber,
@@ -2232,7 +2193,12 @@ void MaterialCenterViewModel::refreshSelectedCaches()
 
     applySelectedFrameExpansion();
 
-    if (terms.isEmpty()) {
+    if (terms.isEmpty() && m_detail.frames.size() >= kMaxLoadedDetailFrames
+        && m_selectedFramesHasMore) {
+        m_selectedFrameSearchStatusCache = QStringLiteral(
+            "已加载 %1 帧，达到单次浏览上限；可重新选择素材继续浏览。")
+            .arg(m_detail.frames.size());
+    } else if (terms.isEmpty()) {
         m_selectedFrameSearchStatusCache = m_selectedFramesHasMore
             ? QStringLiteral("共 %1 帧解析结果，已加载 %2 帧")
                   .arg(m_selectedTotalFrameCount)

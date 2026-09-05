@@ -1,8 +1,10 @@
 #include "core/jobs/JobEngine.h"
 
+#include "application/IndexingWorkCoordinator.h"
 #include "infrastructure/db/DatabaseManager.h"
 
 #include <QDateTime>
+#include <QCoreApplication>
 #include <QDebug>
 #include <QDir>
 #include <QFileInfo>
@@ -213,6 +215,11 @@ JobEngine::JobEngine(DatabaseManager *databaseManager, QObject *parent)
             &QTimer::timeout,
             this,
             &JobEngine::flushPendingPersistence);
+}
+
+void JobEngine::setWorkCoordinator(IndexingWorkCoordinator *workCoordinator)
+{
+    m_workCoordinator = workCoordinator;
 }
 
 qint64 JobEngine::createJob(JobType type,
@@ -660,25 +667,10 @@ void JobEngine::startPersistenceBatch(QVector<PendingPersistence> batch,
     if (observeCompletion) {
         m_persistenceRunning = true;
     }
-    auto *databaseManager = m_databaseManager;
-    auto future = QtConcurrent::run(&m_persistencePool, [databaseManager, batch = std::move(batch)]() mutable {
-        PersistenceBatchResult result;
-        for (auto &pending : batch) {
-            QString errorMessage;
-            if (!executeJobUpdate(databaseManager,
-                                  pending.projectDatabasePath,
-                                  pending.statement,
-                                  pending.values,
-                                  &errorMessage)) {
-                ++pending.attempt;
-                result.failed.append(std::move(pending));
-                if (result.errorMessage.isEmpty()) {
-                    result.errorMessage = errorMessage;
-                }
-            }
-        }
-        return result;
-    });
+    m_persistenceFuture = QtConcurrent::run(&m_persistencePool,
+                                            [this, batch = std::move(batch)]() mutable {
+                                                return executePersistenceBatch(std::move(batch));
+                                            });
     if (!observeCompletion) {
         return;
     }
@@ -686,35 +678,96 @@ void JobEngine::startPersistenceBatch(QVector<PendingPersistence> batch,
     connect(watcher, &QFutureWatcher<PersistenceBatchResult>::finished, this, [this, watcher]() {
         const auto result = watcher->result();
         watcher->deleteLater();
+        if (!m_persistenceRunning) {
+            return;
+        }
         m_persistenceRunning = false;
-        for (const auto &failed : result.failed) {
-            if (failed.attempt < 3 && !m_pendingPersistence.contains(failed.key)) {
-                m_pendingPersistence.insert(failed.key, failed);
-            }
-        }
-        if (!result.errorMessage.isEmpty()) {
-            reportPersistenceError(result.errorMessage);
-        }
-        if (!m_pendingPersistence.isEmpty()) {
-            m_persistenceTimer.start(result.failed.isEmpty() ? 0 : 500);
-        }
+        handlePersistenceResult(result);
     });
-    watcher->setFuture(future);
+    watcher->setFuture(m_persistenceFuture);
 }
 
 void JobEngine::waitForPersistence()
 {
     m_persistenceTimer.stop();
-    if (!m_pendingPersistence.isEmpty()) {
+    while (true) {
+        m_persistencePool.waitForDone();
+        QCoreApplication::processEvents(QEventLoop::AllEvents);
+        if (m_persistenceRunning) {
+            m_persistenceFuture.waitForFinished();
+            const auto result = m_persistenceFuture.result();
+            m_persistenceRunning = false;
+            handlePersistenceResult(result);
+            m_persistenceFuture = {};
+            continue;
+        }
+        if (m_pendingPersistence.isEmpty()) {
+            break;
+        }
+
         QVector<PendingPersistence> batch;
         batch.reserve(m_pendingPersistence.size());
         for (auto &pending : m_pendingPersistence) {
             batch.append(std::move(pending));
         }
         m_pendingPersistence.clear();
-        startPersistenceBatch(std::move(batch), false);
+        m_persistenceRunning = true;
+        auto future = QtConcurrent::run(&m_persistencePool,
+                                        [this, batch = std::move(batch)]() mutable {
+                                            return executePersistenceBatch(std::move(batch));
+                                        });
+        future.waitForFinished();
+        const auto result = future.result();
+        m_persistenceRunning = false;
+        handlePersistenceResult(result);
     }
-    m_persistencePool.waitForDone();
+}
+
+JobEngine::PersistenceBatchResult JobEngine::executePersistenceBatch(
+    QVector<PendingPersistence> batch) const
+{
+    PersistenceBatchResult result;
+    for (auto &pending : batch) {
+        QString errorMessage;
+        auto writerLease = m_workCoordinator
+            ? m_workCoordinator->acquire({IndexingWorkCoordinator::Resource::SqliteWriter,
+                                          IndexingWorkCoordinator::Priority::Background,
+                                          false,
+                                          m_workCoordinator->currentGeneration()})
+            : IndexingWorkCoordinator::Lease{};
+        const auto persisted = (!m_workCoordinator || writerLease)
+            && executeJobUpdate(m_databaseManager,
+                                pending.projectDatabasePath,
+                                pending.statement,
+                                pending.values,
+                                &errorMessage);
+        if (!persisted) {
+            if (errorMessage.isEmpty()) {
+                errorMessage = QStringLiteral("任务写入等待 SqliteWriter 资源失败");
+            }
+            ++pending.attempt;
+            result.failed.append(std::move(pending));
+            if (result.errorMessage.isEmpty()) {
+                result.errorMessage = errorMessage;
+            }
+        }
+    }
+    return result;
+}
+
+void JobEngine::handlePersistenceResult(const PersistenceBatchResult &result)
+{
+    for (const auto &failed : result.failed) {
+        if (failed.attempt < 3 && !m_pendingPersistence.contains(failed.key)) {
+            m_pendingPersistence.insert(failed.key, failed);
+        }
+    }
+    if (!result.errorMessage.isEmpty()) {
+        reportPersistenceError(result.errorMessage);
+    }
+    if (!m_pendingPersistence.isEmpty() && !m_persistenceRunning) {
+        m_persistenceTimer.start(result.failed.isEmpty() ? 0 : 500);
+    }
 }
 
 bool JobEngine::persistJob(const Job &job)

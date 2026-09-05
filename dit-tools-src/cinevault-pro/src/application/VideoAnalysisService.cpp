@@ -1455,6 +1455,8 @@ void VideoAnalysisService::waitForIdle()
 
 void VideoAnalysisService::cancelPendingWork(const QString &reason)
 {
+    m_analysisStopSource.request_stop();
+    m_dimensionStopSource.request_stop();
     m_analysisQueue.clear();
     m_dimensionAnalysisQueue.clear();
     m_queuedVideoKeys.clear();
@@ -1466,10 +1468,10 @@ void VideoAnalysisService::cancelPendingWork(const QString &reason)
 
 void VideoAnalysisService::beginShutdown()
 {
-    if (m_shuttingDown) {
+    if (m_shuttingDown.load()) {
         return;
     }
-    m_shuttingDown = true;
+    m_shuttingDown.store(true);
     cancelPendingWork(QStringLiteral("应用正在退出，未开始的解析任务已保存待恢复"));
 }
 
@@ -1600,7 +1602,7 @@ bool VideoAnalysisService::hasPendingAnalysisWork() const
 
 bool VideoAnalysisService::validateReadyForEnqueue(const QString &videoKey, QString *errorMessage) const
 {
-    if (m_shuttingDown) {
+    if (m_shuttingDown.load()) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("应用正在退出，已停止派发新的解析任务。");
         }
@@ -2005,7 +2007,7 @@ bool VideoAnalysisService::analyzeDimensions(const QString &videoKey,
                                              const QStringList &dimensions,
                                              QString *errorMessage)
 {
-    if (m_shuttingDown) {
+    if (m_shuttingDown.load()) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("应用正在退出，已停止派发新的解析任务。");
         }
@@ -2111,7 +2113,9 @@ bool VideoAnalysisService::startDimensionAnalysisNow(const QString &videoKey,
                                  analysisProgressContext(1, 4, QStringLiteral("准备多维度解析")))
         : 0;
 
-    auto future = QtConcurrent::run([this, normalizedKey, requestedDimensions, config, jobProjectDatabasePath, jobId]() {
+    m_dimensionStopSource = std::stop_source{};
+    const auto stopToken = m_dimensionStopSource.get_token();
+    auto future = QtConcurrent::run([this, normalizedKey, requestedDimensions, config, jobProjectDatabasePath, jobId, stopToken]() {
         const auto connectionName = QStringLiteral("dimension_analysis_%1").arg(reinterpret_cast<quintptr>(QThread::currentThreadId()));
         QString errorMessage;
         QSqlDatabase db;
@@ -2147,11 +2151,20 @@ bool VideoAnalysisService::startDimensionAnalysisNow(const QString &videoKey,
             }, Qt::QueuedConnection);
         };
 
+        const auto cancelled = [&]() {
+            if (!stopToken.stop_requested() && !m_shuttingDown.load()) {
+                return false;
+            }
+            finish(false, QStringLiteral("多维度解析已取消"), QStringLiteral("任务已取消"));
+            return true;
+        };
+
         db = m_globalDatabaseManager->openThreadConnection(connectionName, &errorMessage);
         if (!db.isOpen()) {
             finish(false, QStringLiteral("多维度解析失败"), errorMessage);
             return;
         }
+        if (cancelled()) return;
 
         report(QStringLiteral("正在读取基础解析结果"),
                10,
@@ -2225,6 +2238,7 @@ bool VideoAnalysisService::startDimensionAnalysisNow(const QString &videoKey,
 
             int frameRequestIndex = 0;
             for (const auto &frame : usableFrames) {
+                if (cancelled()) return;
                 QStringList framePendingDimensions;
                 for (const auto &dimension : pendingDimensions) {
                     if (!completedFrames.value(dimensionKey(dimension)).contains(frame.frameNumber)) {
@@ -2327,6 +2341,7 @@ bool VideoAnalysisService::startDimensionAnalysisNow(const QString &videoKey,
                                            frameDimensionAnalyses.size(),
                                            frameDimensionAnalyses.size(),
                                            QStringLiteral("条明细")));
+            if (cancelled()) return;
             analyses = m_visionApiClient->analyzeDimensions(asset.fileName,
                                                             summaryContext,
                                                             pendingDimensions,
@@ -2346,6 +2361,7 @@ bool VideoAnalysisService::startDimensionAnalysisNow(const QString &videoKey,
                                            pendingDimensions.size(),
                                            pendingDimensions.size(),
                                            QStringLiteral("个维度")));
+            if (cancelled()) return;
             analyses = m_visionApiClient->analyzeDimensions(asset.fileName,
                                                             baseContext,
                                                             pendingDimensions,
@@ -2476,7 +2492,9 @@ void VideoAnalysisService::startNextAnalysis()
                            job.mode == AnalysisRunMode::SingleFrame ? QStringLiteral("准备重解析失败视频帧") : QStringLiteral("准备解析素材内容"),
                            JobState::Running);
 
-    auto future = QtConcurrent::run([this, job, config, jobProjectDatabasePath, jobId]() {
+    m_analysisStopSource = std::stop_source{};
+    const auto stopToken = m_analysisStopSource.get_token();
+    auto future = QtConcurrent::run([this, job, config, jobProjectDatabasePath, jobId, stopToken]() {
         const auto connectionName = QStringLiteral("video_analysis_%1").arg(reinterpret_cast<quintptr>(QThread::currentThreadId()));
         QString errorMessage;
         qint64 lastProgress = 0;
@@ -2532,6 +2550,14 @@ void VideoAnalysisService::startNextAnalysis()
             reportAnalysisProgress(job.videoKey, progress, detail, JobState::Running);
         };
 
+        const auto cancelled = [&]() {
+            if (!stopToken.stop_requested() && !m_shuttingDown.load()) {
+                return false;
+            }
+            finishFailure(QStringLiteral("解析任务已取消"), db.isOpen() ? &db : nullptr);
+            return true;
+        };
+
         auto finishSuccess = [&](const QString &successMessage) {
             completeJob(jobProjectDatabasePath, jobId, successMessage);
             reportAnalysisProgress(job.videoKey, 100, successMessage, JobState::Completed);
@@ -2546,6 +2572,7 @@ void VideoAnalysisService::startNextAnalysis()
             finishFailure(errorMessage, nullptr, false);
             return;
         }
+        if (cancelled()) return;
 
         GlobalVideoAsset asset;
         if (!loadVideoAsset(db, job.videoKey, &asset, &errorMessage)) {
@@ -2603,6 +2630,7 @@ void VideoAnalysisService::startNextAnalysis()
             }
             int httpStatusCode = 0;
             QString imageError;
+            if (cancelled()) return;
             const auto analysis = m_visionApiClient->analyzeFrame(analysisImagePath,
                                                                   asset.fileName,
                                                                   config.baseUrl,
@@ -2743,6 +2771,7 @@ void VideoAnalysisService::startNextAnalysis()
                           analysisProgressContext(2, 3, QStringLiteral("归纳文本内容"), 1, 1, QStringLiteral("个文件")));
             int httpStatusCode = 0;
             QString summaryError;
+            if (cancelled()) return;
             const auto summary = m_visionApiClient->summarizeText(asset.fileName,
                                                                   sourceText,
                                                                   config.baseUrl,
@@ -2837,6 +2866,7 @@ void VideoAnalysisService::startNextAnalysis()
                                                   task.successfulFrames,
                                                   task.totalFrames,
                                                   QStringLiteral("帧")));
+            if (cancelled()) return false;
             const auto summary = m_visionApiClient->summarizeVideo(asset.fileName,
                                                                    successfulFrames(frames),
                                                                    config.baseUrl,
@@ -3091,7 +3121,9 @@ void VideoAnalysisService::startNextAnalysis()
                 request.minimumSharpness = config.minimumSharpness;
                 request.maxWidth = kAnalysisFrameMaxWidth;
                 request.maxHeight = kAnalysisFrameMaxHeight;
+                request.stopToken = stopToken;
 
+                if (cancelled()) return;
                 const auto extraction = m_ffmpegAdapter->extractFrames(request);
                 if (!extraction.success || extraction.frames.isEmpty()) {
                     task.lastErrorMessage = extraction.errorMessage;
@@ -3190,6 +3222,7 @@ void VideoAnalysisService::startNextAnalysis()
                 requestPool.setMaxThreadCount(maxFrameRequests);
 
                 while (true) {
+                    if (cancelled()) return;
                     QVector<int> frameIndexes;
                     frameIndexes.reserve(maxFrameRequests);
                     for (int index = 0; index < frames.size() && frameIndexes.size() < maxFrameRequests; ++index) {
@@ -3211,11 +3244,13 @@ void VideoAnalysisService::startNextAnalysis()
                             ? 0
                             : qBound(0, sourceFrame.retryCount, kMaxFrameRetryCount);
                         pendingRequests.append(QtConcurrent::run(&requestPool,
-                                                                 [this, frameIndex, sourceFrame, initialAttempt, asset, config]() {
+                                                                 [this, frameIndex, sourceFrame, initialAttempt, asset, config, stopToken]() {
                             FrameRequestResult result;
                             result.frameIndex = frameIndex;
                             result.attempt = initialAttempt;
-                            while (result.attempt < kMaxFrameRetryCount) {
+                            while (result.attempt < kMaxFrameRetryCount
+                                   && !stopToken.stop_requested()
+                                   && !m_shuttingDown.load()) {
                                 ++result.attempt;
                                 result.wasAttempted = true;
                                 result.analysis = m_visionApiClient->analyzeFrame(sourceFrame.imagePath,
@@ -3236,6 +3271,7 @@ void VideoAnalysisService::startNextAnalysis()
 
                     for (auto &pendingRequest : pendingRequests) {
                         const auto result = pendingRequest.result();
+                        if (cancelled()) return;
                         auto &frame = frames[result.frameIndex];
                         if (result.wasAttempted) {
                             frame.retryCount = result.attempt;
@@ -3288,6 +3324,7 @@ void VideoAnalysisService::startNextAnalysis()
                 }
             } else {
             for (int index = 0; index < frames.size(); ++index) {
+                if (cancelled()) return;
                 auto &frame = frames[index];
                 if (VisualAnalysisMetadata::isFrameAnalysisComplete(
                         frame,
@@ -3298,7 +3335,9 @@ void VideoAnalysisService::startNextAnalysis()
                 int attempt = job.mode == AnalysisRunMode::Resume
                     ? 0
                     : qBound(0, frame.retryCount, kMaxFrameRetryCount);
-                while (attempt < kMaxFrameRetryCount) {
+                while (attempt < kMaxFrameRetryCount
+                       && !stopToken.stop_requested()
+                       && !m_shuttingDown.load()) {
                     ++attempt;
                     int httpStatusCode = 0;
                     QString frameError;

@@ -231,7 +231,7 @@ private slots:
         QVERIFY2(!source.isEmpty(), "无法读取 MaterialCenterViewModel.cpp");
         QVERIFY(source.contains(QStringLiteral("QtConcurrent::run(")));
         QVERIFY(source.contains(QStringLiteral("&m_queryPool")));
-        QVERIFY(source.contains(QStringLiteral("context->queryService->searchMaterials(")));
+        QVERIFY(source.contains(QStringLiteral("context->queryService()->searchMaterials(")));
         QVERIFY(!source.contains(QStringLiteral("m_queryService->searchMaterials(")));
         QVERIFY(!source.contains(QStringLiteral("m_queryService->fetchAssets(")));
         QVERIFY(source.contains(QStringLiteral("scope.projectUuid = m_projectFilter")));

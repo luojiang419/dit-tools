@@ -1,6 +1,7 @@
 #include "infrastructure/ffmpeg/FFmpegAdapter.h"
 
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFileInfo>
 #include <QImage>
 #include <QProcess>
@@ -169,6 +170,33 @@ private slots:
         QCOMPARE(result.sourceFrameCount, 1);
         QCOMPARE(result.frames.size(), 1);
         QCOMPARE(result.frames.first().timestampMs, qint64{0});
+    }
+
+    void cancellationStopsExternalProcessPromptly()
+    {
+        QTemporaryDir temporaryDir;
+        QVERIFY(temporaryDir.isValid());
+        const auto sourcePath = createVideo(
+            temporaryDir,
+            QStringLiteral("cancel.mkv"),
+            QStringLiteral("testsrc=size=256x128:rate=30"),
+            300);
+
+        std::stop_source stopSource;
+        stopSource.request_stop();
+        FrameExtractionRequest request;
+        request.sourcePath = sourcePath;
+        request.outputDirectory = QDir(temporaryDir.path()).filePath(QStringLiteral("frames"));
+        request.strategy = VideoFrameExtractionStrategy::PerFrame;
+        request.stopToken = stopSource.get_token();
+        FFmpegAdapter adapter;
+        QElapsedTimer elapsed;
+        elapsed.start();
+        const auto result = adapter.extractFrames(request);
+        QVERIFY(!result.success);
+        QVERIFY(result.errorMessage.contains(QStringLiteral("取消")));
+        QVERIFY2(elapsed.elapsed() < 2000,
+                 qPrintable(QStringLiteral("取消耗时 %1ms").arg(elapsed.elapsed())));
     }
 
 private:

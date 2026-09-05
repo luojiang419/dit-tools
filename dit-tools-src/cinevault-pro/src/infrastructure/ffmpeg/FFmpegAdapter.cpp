@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <numeric>
+#include <stop_token>
 #include <utility>
 
 namespace {
@@ -119,7 +120,10 @@ QString exeFromRoot(const QString &root, const QString &exeName)
     return QDir(root).filePath(QStringLiteral("bin/%1").arg(exeName));
 }
 
-ProcessResult runProcess(const QString &program, const QStringList &arguments, int timeoutMs)
+ProcessResult runProcess(const QString &program,
+                         const QStringList &arguments,
+                         int timeoutMs,
+                         std::stop_token stopToken = {})
 {
     ProcessResult result;
     QProcess process;
@@ -134,7 +138,24 @@ ProcessResult runProcess(const QString &program, const QStringList &arguments, i
         return result;
     }
 
-    if (!process.waitForFinished(timeoutMs)) {
+    QElapsedTimer elapsed;
+    elapsed.start();
+    while (!process.waitForFinished(100)) {
+        if (process.state() == QProcess::NotRunning) {
+            break;
+        }
+        if (stopToken.stop_requested()) {
+            process.terminate();
+            if (!process.waitForFinished(500)) {
+                process.kill();
+                process.waitForFinished(3000);
+            }
+            result.errorMessage = QStringLiteral("命令已取消");
+            return result;
+        }
+        if (elapsed.elapsed() <= timeoutMs) {
+            continue;
+        }
         process.kill();
         process.waitForFinished(3000);
         result.retryable = true;
@@ -152,7 +173,8 @@ ProcessResult runProcess(const QString &program, const QStringList &arguments, i
 
 FrameTimelineProbeResult probeFrameTimeline(const QString &program,
                                             const QString &sourcePath,
-                                            int timeoutMs)
+                                            int timeoutMs,
+                                            std::stop_token stopToken)
 {
     FrameTimelineProbeResult result;
     QProcess process;
@@ -210,6 +232,15 @@ FrameTimelineProbeResult probeFrameTimeline(const QString &program,
         pendingOutput.append(process.readAllStandardOutput());
         appendBoundedError(&errorTail, process.readAllStandardError());
         consumeLines(false);
+        if (stopToken.stop_requested()) {
+            process.terminate();
+            if (!process.waitForFinished(500)) {
+                process.kill();
+                process.waitForFinished(3000);
+            }
+            result.errorMessage = QStringLiteral("ffprobe 读取视频时间轴已取消");
+            return result;
+        }
         if (elapsed.elapsed() > timeoutMs) {
             process.kill();
             process.waitForFinished(3000);
@@ -237,7 +268,8 @@ FrameTimelineProbeResult probeFrameTimeline(const QString &program,
 
 TimestampProcessResult runTimestampProcess(const QString &program,
                                            const QStringList &arguments,
-                                           int timeoutMs)
+                                           int timeoutMs,
+                                           std::stop_token stopToken)
 {
     TimestampProcessResult result;
     QProcess process;
@@ -286,6 +318,15 @@ TimestampProcessResult runTimestampProcess(const QString &program,
         pendingError.append(process.readAllStandardError());
         process.readAllStandardOutput();
         consumeLines(false);
+        if (stopToken.stop_requested()) {
+            process.terminate();
+            if (!process.waitForFinished(500)) {
+                process.kill();
+                process.waitForFinished(3000);
+            }
+            result.process.errorMessage = QStringLiteral("命令已取消");
+            return result;
+        }
         if (elapsed.elapsed() > timeoutMs) {
             process.kill();
             process.waitForFinished(3000);
@@ -575,7 +616,8 @@ FrameExtractionResult FFmpegAdapter::extractFrames(const FrameExtractionRequest 
         return result;
     }
 
-    const auto timeline = probeFrameTimeline(m_ffprobePath, request.sourcePath, 120000);
+    const auto timeline = probeFrameTimeline(
+        m_ffprobePath, request.sourcePath, 120000, request.stopToken);
     if (!timeline.ok) {
         result.errorMessage = QStringLiteral("ffprobe 读取视频时间轴失败：%1")
                                   .arg(timeline.errorMessage);
@@ -607,7 +649,8 @@ FrameExtractionResult FFmpegAdapter::extractFrames(const FrameExtractionRequest 
         QStringLiteral("-start_number"), QStringLiteral("0"),
         candidatePattern
     };
-    const auto extraction = runTimestampProcess(m_ffmpegPath, extractionArguments, 120000);
+    const auto extraction = runTimestampProcess(
+        m_ffmpegPath, extractionArguments, 120000, request.stopToken);
     const auto &extractionProcess = extraction.process;
     const auto candidateFiles = QDir(request.outputDirectory).entryInfoList(
         {QStringLiteral("candidate_*.jpg")}, QDir::Files, QDir::Name);
@@ -635,45 +678,51 @@ FrameExtractionResult FFmpegAdapter::extractFrames(const FrameExtractionRequest 
         candidates.append({candidateFiles.at(index).absoluteFilePath(), timestampMs, index == 0});
     }
 
-    const auto terminalToleranceMs = qMax<qint64>(1, qMin<qint64>(250, result.frameInterval / 4));
     auto terminalCandidate = std::min_element(
         candidates.begin(), candidates.end(), [terminalSourceTimestampMs](const auto &left, const auto &right) {
             return qAbs(left.timestampMs - terminalSourceTimestampMs)
                 < qAbs(right.timestampMs - terminalSourceTimestampMs);
         });
     const auto terminalAlreadyCovered = terminalCandidate != candidates.end()
-        && qAbs(terminalCandidate->timestampMs - terminalSourceTimestampMs) <= terminalToleranceMs;
+        && qAbs(terminalCandidate->timestampMs - terminalSourceTimestampMs) <= 1;
     if (terminalAlreadyCovered) {
         terminalCandidate->requiredAnchor = true;
-        terminalCandidate->timestampMs = terminalSourceTimestampMs;
     }
     if (!terminalAlreadyCovered) {
-        const auto terminalPath = outputDir.filePath(QStringLiteral("candidate_terminal.jpg"));
+        const auto terminalPattern = outputDir.filePath(QStringLiteral("candidate_terminal_%06d.jpg"));
         const auto tailWindowMs = qMin<qint64>(5000, qMax<qint64>(1000, result.frameInterval * 2LL));
-        const auto seekStartMs = qMax(firstSourceTimestampMs,
-                                      terminalSourceTimestampMs - tailWindowMs);
-        const auto relativeSeekMs = qMax<qint64>(0, terminalSourceTimestampMs - seekStartMs);
         const QStringList terminalArguments = {
             QStringLiteral("-y"),
-            QStringLiteral("-v"), QStringLiteral("error"),
-            QStringLiteral("-ss"), QString::number(seekStartMs / 1000.0, 'f', 3),
+            QStringLiteral("-v"), QStringLiteral("info"),
+            QStringLiteral("-copyts"),
+            QStringLiteral("-sseof"), QString::number(-tailWindowMs / 1000.0, 'f', 3),
             QStringLiteral("-i"), request.sourcePath,
-            QStringLiteral("-ss"), QString::number(relativeSeekMs / 1000.0, 'f', 3),
             QStringLiteral("-map"), QStringLiteral("0:v:0"),
-            QStringLiteral("-frames:v"), QStringLiteral("1"),
-            QStringLiteral("-vf"), QStringLiteral("%1,format=yuvj420p")
+            QStringLiteral("-vf"), QStringLiteral("%1,format=yuvj420p,showinfo")
                                       .arg(scaleFilter(request.maxWidth, request.maxHeight)),
+            QStringLiteral("-fps_mode"), QStringLiteral("vfr"),
             QStringLiteral("-q:v"), QStringLiteral("2"),
-            terminalPath
+            QStringLiteral("-start_number"), QStringLiteral("0"),
+            terminalPattern
         };
-        const auto terminalProcess = runProcess(m_ffmpegPath, terminalArguments, 120000);
-        const QFileInfo terminalFile(terminalPath);
-        if (!terminalProcess.ok || !terminalFile.isFile() || terminalFile.size() <= 0) {
+        const auto terminalExtraction = runTimestampProcess(
+            m_ffmpegPath, terminalArguments, 120000, request.stopToken);
+        const auto &terminalProcess = terminalExtraction.process;
+        const auto terminalFiles = outputDir.entryInfoList(
+            {QStringLiteral("candidate_terminal_*.jpg")}, QDir::Files, QDir::Name);
+        if (!terminalProcess.ok || terminalFiles.isEmpty()) {
             result.errorMessage = QStringLiteral("无法抽取视频尾部锚点：%1")
                                       .arg(terminalProcess.errorMessage);
             return result;
         }
-        candidates.append({terminalPath, terminalSourceTimestampMs, true});
+        const auto terminalPath = terminalFiles.constLast().absoluteFilePath();
+        for (int index = 0; index + 1 < terminalFiles.size(); ++index) {
+            QFile::remove(terminalFiles.at(index).absoluteFilePath());
+        }
+        const auto actualTerminalTimestampMs = terminalExtraction.timestamps.isEmpty()
+            ? terminalSourceTimestampMs
+            : terminalExtraction.timestamps.constLast();
+        candidates.append({terminalPath, actualTerminalTimestampMs, true});
     }
     if (candidates.isEmpty()) {
         result.errorMessage = extractionProcess.errorMessage.isEmpty()

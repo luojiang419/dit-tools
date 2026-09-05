@@ -241,7 +241,8 @@ function Invoke-VcVarsCommand {
     )
 
     $vcvarsPath = Get-VcVars64Path
-    $fullCommand = "call `"$vcvarsPath`" >nul && $CommandLine"
+    # Keep MSVC /showIncludes UTF-8 and stable for Ninja dependency scanning across Windows locales.
+    $fullCommand = "chcp 65001 >nul && set `"VSLANG=1033`" && call `"$vcvarsPath`" >nul && $CommandLine"
     & cmd.exe /d /s /c $fullCommand
     if ($LASTEXITCODE -ne 0) {
         throw "Command failed: $CommandLine"

@@ -613,6 +613,7 @@ private slots:
             sourceRootId);
         scanEngine.startScan(sourceRootById(databaseManager.database(), sourceRootId), initialJobId);
         scanEngine.waitForIdle();
+        jobEngine.waitForPersistence();
         QCoreApplication::processEvents();
         QCOMPARE(countAssets(databaseManager.database(), &errorMessage), qint64{3});
 
@@ -629,6 +630,7 @@ private slots:
                      "SELECT RAISE(ABORT, 'unrelated directory was traversed'); END")),
                  qPrintable(protectUntouched.lastError().text()));
 
+        protectUntouched.finish();
         writeFile(QDir(dirtyPath).filePath(QStringLiteral("changed.mov")), "new-content");
         QVERIFY(QFile::remove(QDir(dirtyPath).filePath(QStringLiteral("removed.txt"))));
         writeFile(QDir(dirtyPath).filePath(QStringLiteral("New/nested.raw")), "raw");

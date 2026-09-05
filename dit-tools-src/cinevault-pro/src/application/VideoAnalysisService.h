@@ -8,6 +8,9 @@
 #include <QSet>
 #include <QStringList>
 
+#include <atomic>
+#include <stop_token>
+
 class AppSettings;
 class FFmpegAdapter;
 class GlobalDatabaseManager;
@@ -124,5 +127,7 @@ private:
     QHash<QString, QString> m_batchLabels;
     qint64 m_batchCurrentProgress = 0;
     QString m_batchCurrentDetail;
-    bool m_shuttingDown = false;
+    std::atomic_bool m_shuttingDown = false;
+    std::stop_source m_analysisStopSource;
+    std::stop_source m_dimensionStopSource;
 };

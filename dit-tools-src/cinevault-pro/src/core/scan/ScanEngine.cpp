@@ -646,7 +646,7 @@ void ScanEngine::runScan(SourceRoot sourceRoot,
                 "extension = (SELECT s.extension FROM temp.scan_asset_stage s WHERE s.source_root_id = asset_file.source_root_id AND s.path_key = asset_file.path_key), "
                 "absolute_path = (SELECT s.absolute_path FROM temp.scan_asset_stage s WHERE s.source_root_id = asset_file.source_root_id AND s.path_key = asset_file.path_key), "
                 "relative_path = (SELECT s.relative_path FROM temp.scan_asset_stage s WHERE s.source_root_id = asset_file.source_root_id AND s.path_key = asset_file.path_key), "
-                "parent_relative_path = (SELECT s.parent_relative_path FROM temp.scan_asset_stage s WHERE s.source_root_id = asset_file.source_root_id AND s.path_key = asset_file.path_key), "
+                "parent_relative_path = (SELECT CASE WHEN length(s.relative_path) > length(s.name) THEN substr(s.relative_path, 1, length(s.relative_path) - length(s.name) - 1) ELSE '' END FROM temp.scan_asset_stage s WHERE s.source_root_id = asset_file.source_root_id AND s.path_key = asset_file.path_key), "
                 "parent_path = (SELECT s.parent_path FROM temp.scan_asset_stage s WHERE s.source_root_id = asset_file.source_root_id AND s.path_key = asset_file.path_key), "
                 "asset_type = (SELECT s.asset_type FROM temp.scan_asset_stage s WHERE s.source_root_id = asset_file.source_root_id AND s.path_key = asset_file.path_key), "
                 "size_bytes = (SELECT s.size_bytes FROM temp.scan_asset_stage s WHERE s.source_root_id = asset_file.source_root_id AND s.path_key = asset_file.path_key), "
@@ -658,7 +658,7 @@ void ScanEngine::runScan(SourceRoot sourceRoot,
                 "INSERT INTO asset_file "
                 "(source_root_id, name, extension, absolute_path, relative_path, parent_relative_path, parent_path, path_key, asset_type, "
                 "size_bytes, modified_at, is_readable, created_at) "
-                "SELECT s.source_root_id, s.name, s.extension, s.absolute_path, s.relative_path, s.parent_relative_path, s.parent_path, s.path_key, "
+                "SELECT s.source_root_id, s.name, s.extension, s.absolute_path, s.relative_path, CASE WHEN length(s.relative_path) > length(s.name) THEN substr(s.relative_path, 1, length(s.relative_path) - length(s.name) - 1) ELSE '' END, s.parent_path, s.path_key, "
                 "s.asset_type, s.size_bytes, s.modified_at, s.is_readable, s.created_at FROM temp.scan_asset_stage s "
                 "WHERE s.source_root_id = ? AND NOT EXISTS (SELECT 1 FROM asset_file af "
                 "WHERE af.source_root_id = s.source_root_id AND af.path_key = s.path_key)"),
@@ -1512,6 +1512,8 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
             throw std::runtime_error(message.toStdString());
         }
 
+        countWriterLease.reset();
+
         auto batch = readBatch();
         if (!errorMessage.isEmpty()) {
             throw std::runtime_error(errorMessage.toStdString());
@@ -1687,7 +1689,7 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
             QSqlQuery childCount(db);
             childCount.prepare(QStringLiteral(
                 "SELECT COALESCE(SUM(recursive_file_count), 0) FROM folder_node "
-                "WHERE source_root_id = ? AND parent_relative_path = ?"));
+                "WHERE source_root_id = ? AND parent_relative_path = ? AND relative_path <> ?"));
             QSqlQuery refreshFolderCounts(db);
             refreshFolderCounts.prepare(QStringLiteral(
                 "UPDATE folder_node SET direct_file_count = ?, file_count = ?, "
@@ -1706,6 +1708,7 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
                 directCount.finish();
 
                 childCount.addBindValue(sourceRoot.id);
+                childCount.addBindValue(relativePath);
                 childCount.addBindValue(relativePath);
                 if (!childCount.exec() || !childCount.next()) {
                     const auto message = childCount.lastError().text();
@@ -1751,7 +1754,6 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
             db.rollback();
             throw std::runtime_error(message.toStdString());
         }
-        countWriterLease.reset();
         batch.totalFiles = finalAssetCounts.value(0).toLongLong();
         batch.totalSizeBytes = finalAssetCounts.value(1).toLongLong();
         batch.warningCount = finalAssetCounts.value(2).toLongLong();

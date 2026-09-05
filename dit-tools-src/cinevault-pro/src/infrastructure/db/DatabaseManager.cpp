@@ -1361,7 +1361,7 @@ bool DatabaseManager::ensureAssetParentPathSchemaCompatibility(QSqlDatabase &db,
             "UPDATE asset_file SET parent_relative_path = CASE "
             "WHEN length(relative_path) > length(name) "
             "THEN substr(relative_path, 1, length(relative_path) - length(name) - 1) "
-            "ELSE '' END WHERE COALESCE(parent_relative_path, '') = ''"))) {
+            "ELSE '' END WHERE parent_relative_path = '' AND length(relative_path) > length(name)"))) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("回填素材父目录路径失败：%1")
                                 .arg(backfill.lastError().text());

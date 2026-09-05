@@ -188,6 +188,32 @@ QByteArray httpGet(quint16 port, const QByteArray &path)
     return response;
 }
 
+QByteArray httpFragments(quint16 port, const QList<QByteArray> &fragments)
+{
+    QTcpSocket socket;
+    socket.connectToHost(QHostAddress::LocalHost, port);
+    QElapsedTimer timer;
+    timer.start();
+    while (socket.state() != QAbstractSocket::ConnectedState && timer.elapsed() < 3000) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 25);
+    }
+    if (socket.state() != QAbstractSocket::ConnectedState) return {};
+    for (const auto &fragment : fragments) {
+        socket.write(fragment);
+        socket.flush();
+        socket.waitForBytesWritten(1000);
+        QTest::qWait(20);
+    }
+    QByteArray response;
+    while (timer.elapsed() < 5000 && socket.state() != QAbstractSocket::UnconnectedState) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 25);
+        response += socket.readAll();
+        QTest::qWait(1);
+    }
+    response += socket.readAll();
+    return response;
+}
+
 QByteArray responseBody(const QByteArray &response)
 {
     const auto delimiter = response.indexOf("\r\n\r\n");
@@ -276,6 +302,41 @@ private slots:
         QVERIFY(frames.first().toObject().value(QStringLiteral("imageUrl")).toString().contains(
             QStringLiteral("/api/thumbnail")));
         QVERIFY(detailBody.value(QStringLiteral("visualAnalysisPlan")).isObject());
+    }
+
+    void fragmentedHeader_waitsForCompleteRequest()
+    {
+        GlobalDbFixture fixture;
+        QVERIFY2(fixture.valid, qPrintable(fixture.errorMessage));
+        SearchEngine searchEngine(&fixture.manager);
+        MaterialCenterQueryService queryService(&fixture.manager, &searchEngine);
+        WebSearchService service(&queryService);
+        QString errorMessage;
+        QVERIFY2(service.start(17890, &errorMessage), qPrintable(errorMessage));
+
+        const auto response = httpFragments(service.port(), {
+            QByteArrayLiteral("GET /api/hea"),
+            QByteArrayLiteral("lth HTTP/1.1\r\nHost: 127.0.0.1\r\n"),
+            QByteArrayLiteral("Connection: close\r\n\r\n")
+        });
+        QVERIFY2(response.startsWith("HTTP/1.1 200 OK"), qPrintable(response));
+    }
+
+    void oversizedHeader_isRejectedBeforeRouting()
+    {
+        GlobalDbFixture fixture;
+        QVERIFY2(fixture.valid, qPrintable(fixture.errorMessage));
+        SearchEngine searchEngine(&fixture.manager);
+        MaterialCenterQueryService queryService(&fixture.manager, &searchEngine);
+        WebSearchService service(&queryService);
+        QString errorMessage;
+        QVERIFY2(service.start(17890, &errorMessage), qPrintable(errorMessage));
+
+        QByteArray request = QByteArrayLiteral("GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Fill: ");
+        request.append(QByteArray(33 * 1024, 'a'));
+        request.append(QByteArrayLiteral("\r\n\r\n"));
+        const auto response = httpFragments(service.port(), {request});
+        QVERIFY2(response.startsWith("HTTP/1.1 413 Content Too Large"), qPrintable(response));
     }
 };
 

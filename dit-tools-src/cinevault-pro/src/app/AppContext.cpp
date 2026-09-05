@@ -199,6 +199,7 @@ AppContext::AppContext(QObject *parent)
     , m_feedbackViewModel(new FeedbackViewModel(m_feedbackService, this))
 {
     m_scanEngine->setWorkCoordinator(m_indexingWorkCoordinator);
+    m_jobEngine->setWorkCoordinator(m_indexingWorkCoordinator);
     m_mediaTaskService->setWorkCoordinator(m_indexingWorkCoordinator);
     m_metadataExtractionService->setWorkCoordinator(m_indexingWorkCoordinator);
     m_materialCatalogSyncService->setWorkCoordinator(m_indexingWorkCoordinator);

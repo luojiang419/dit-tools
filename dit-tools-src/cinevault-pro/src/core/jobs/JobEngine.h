@@ -3,6 +3,7 @@
 #include "domain/Entities.h"
 
 #include <QObject>
+#include <QFuture>
 #include <QHash>
 #include <QTimer>
 #include <QThreadPool>
@@ -10,12 +11,15 @@
 #include <QVector>
 
 class DatabaseManager;
+class IndexingWorkCoordinator;
 
 class JobEngine : public QObject {
     Q_OBJECT
 
 public:
     explicit JobEngine(DatabaseManager *databaseManager, QObject *parent = nullptr);
+
+    void setWorkCoordinator(IndexingWorkCoordinator *workCoordinator);
 
     qint64 createJob(JobType type,
                      const QString &title,
@@ -79,6 +83,8 @@ private:
                             bool flushImmediately = false);
     void flushPendingPersistence();
     void startPersistenceBatch(QVector<PendingPersistence> batch, bool observeCompletion);
+    PersistenceBatchResult executePersistenceBatch(QVector<PendingPersistence> batch) const;
+    void handlePersistenceResult(const PersistenceBatchResult &result);
     void reportPersistenceError(const QString &errorMessage);
     Job *findJob(qint64 jobId);
     bool isCurrentProject(const QString &projectDatabasePath) const;
@@ -91,10 +97,12 @@ private:
                      const JobProgressContext &progressContext);
 
     DatabaseManager *m_databaseManager = nullptr;
+    IndexingWorkCoordinator *m_workCoordinator = nullptr;
     QVector<Job> m_jobs;
     qint64 m_nextId = 1;
     QHash<QString, PendingPersistence> m_pendingPersistence;
     QTimer m_persistenceTimer;
     QThreadPool m_persistencePool;
+    QFuture<PersistenceBatchResult> m_persistenceFuture;
     bool m_persistenceRunning = false;
 };
