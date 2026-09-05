@@ -731,7 +731,8 @@ std::optional<QJsonObject> repairAssistantPayload(const QByteArray &responseBody
                                                   const QString &schema,
                                                   const QString &failureReason,
                                                   int maxTokens,
-                                                  QString *errorMessage)
+                                                  QString *errorMessage,
+                                                  std::stop_token stopToken = {})
 {
     QString contentError;
     const auto originalContent = VisionResponseParser::extractAssistantContent(responseBody, &contentError);
@@ -775,7 +776,8 @@ std::optional<QJsonObject> repairAssistantPayload(const QByteArray &responseBody
                                                         maxTokens,
                                                         QStringLiteral("vision_repair"),
                                                         genericJsonSchema()),
-                                        timeoutSec);
+                                        timeoutSec,
+                                        stopToken);
     if (!result.success) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("%1；自动修复失败：%2").arg(failureReason, result.errorMessage);
@@ -1141,7 +1143,8 @@ std::optional<VisionFrameAnalysis> VisionApiClient::analyzeFrame(const QString &
                                          schema,
                                          parseError,
                                          640,
-                                         errorMessage);
+                                         errorMessage,
+                                         stopToken);
         usedRepair = true;
         if (!payload.has_value()) {
             return fallbackFrameAnalysisFromResponse(result.body, errorMessage);
@@ -1159,7 +1162,8 @@ std::optional<VisionFrameAnalysis> VisionApiClient::analyzeFrame(const QString &
                                          schema,
                                          normalizeError,
                                          640,
-                                         errorMessage);
+                                         errorMessage,
+                                         stopToken);
         usedRepair = true;
         if (payload.has_value()) {
             analysis = VisionResponseParser::normalizeFrameAnalysis(*payload, &normalizeError);
@@ -1258,7 +1262,8 @@ std::optional<QVector<MaterialDimensionAnalysis>> VisionApiClient::analyzeFrameD
                                          schema,
                                          parseError,
                                          maxTokens,
-                                         errorMessage);
+                                         errorMessage,
+                                         stopToken);
         usedRepair = true;
         if (!payload.has_value()) {
             return std::nullopt;
@@ -1276,7 +1281,8 @@ std::optional<QVector<MaterialDimensionAnalysis>> VisionApiClient::analyzeFrameD
                                          schema,
                                          normalizeError,
                                          maxTokens,
-                                         errorMessage);
+                                         errorMessage,
+                                         stopToken);
         if (payload.has_value()) {
             analyses = normalizeDimensionAnalyses(*payload, requestedDimensions, &normalizeError);
         }
@@ -1351,7 +1357,8 @@ std::optional<VisionVideoSummary> VisionApiClient::analyzeImage(const QString &i
                                          schema,
                                          parseError,
                                          700,
-                                         errorMessage);
+                                         errorMessage,
+                                         stopToken);
         usedRepair = true;
         if (!payload.has_value()) {
             return fallbackVideoSummaryFromResponse(result.body, errorMessage);
@@ -1369,7 +1376,8 @@ std::optional<VisionVideoSummary> VisionApiClient::analyzeImage(const QString &i
                                          schema,
                                          normalizeError,
                                          700,
-                                         errorMessage);
+                                         errorMessage,
+                                         stopToken);
         usedRepair = true;
         if (payload.has_value()) {
             summary = VisionResponseParser::normalizeVideoSummary(*payload, &normalizeError);
@@ -1451,7 +1459,8 @@ std::optional<VisionVideoSummary> VisionApiClient::summarizeText(const QString &
                                          schema,
                                          parseError,
                                          800,
-                                         errorMessage);
+                                         errorMessage,
+                                         stopToken);
         usedRepair = true;
         if (!payload.has_value()) {
             return fallbackVideoSummaryFromResponse(result.body, errorMessage);
@@ -1469,7 +1478,8 @@ std::optional<VisionVideoSummary> VisionApiClient::summarizeText(const QString &
                                          schema,
                                          normalizeError,
                                          800,
-                                         errorMessage);
+                                         errorMessage,
+                                         stopToken);
         usedRepair = true;
         if (payload.has_value()) {
             summary = VisionResponseParser::normalizeVideoSummary(*payload, &normalizeError);
@@ -1596,7 +1606,8 @@ std::optional<VisionVideoSummary> VisionApiClient::summarizeVideo(const QString 
                                              schema,
                                              parseError,
                                              maxTokens,
-                                             attemptError);
+                                             attemptError,
+                                             stopToken);
             usedRepair = true;
             if (!payload.has_value()) {
                 return fallbackVideoSummaryFromResponse(result.body, attemptError);
@@ -1614,7 +1625,8 @@ std::optional<VisionVideoSummary> VisionApiClient::summarizeVideo(const QString 
                                              schema,
                                              normalizeError,
                                              maxTokens,
-                                             attemptError);
+                                             attemptError,
+                                             stopToken);
             usedRepair = true;
             if (payload.has_value()) {
                 summary = VisionResponseParser::normalizeVideoSummary(*payload, &normalizeError);
@@ -1778,7 +1790,8 @@ std::optional<QVector<MaterialDimensionAnalysis>> VisionApiClient::analyzeDimens
                                              schema,
                                              parseError,
                                              maxTokens,
-                                             attemptError);
+                                             attemptError,
+                                             stopToken);
             usedRepair = true;
             if (!payload.has_value()) {
                 return std::nullopt;
@@ -1796,7 +1809,8 @@ std::optional<QVector<MaterialDimensionAnalysis>> VisionApiClient::analyzeDimens
                                              schema,
                                              normalizeError,
                                              maxTokens,
-                                             attemptError);
+                                             attemptError,
+                                             stopToken);
             if (payload.has_value()) {
                 analyses = normalizeDimensionAnalyses(*payload, requestedDimensions, &normalizeError);
             }
