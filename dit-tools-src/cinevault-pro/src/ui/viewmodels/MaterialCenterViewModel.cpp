@@ -42,7 +42,25 @@ namespace {
 constexpr int kInitialVisibleFrameCount = 24;
 constexpr int kVisibleFrameBatchSize = 24;
 constexpr int kMaxLoadedDetailFrames = 240;
+constexpr qsizetype kMaxLoadedDetailBytes = 8 * 1024 * 1024;
 constexpr int kMaxFrameRetryCount = 3;
+
+qsizetype estimatedFrameCacheBytes(const FrameAnalysisRecord &frame)
+{
+    // QString storage is UTF-16; account for the fields copied into QVariantList.
+    qsizetype bytes = 256;
+    const auto add = [&bytes](const QString &value) {
+        bytes += static_cast<qsizetype>(value.size()) * 2;
+    };
+    add(frame.imagePath);
+    add(frame.caption);
+    add(frame.actions);
+    add(frame.setting);
+    add(frame.errorMessage);
+    for (const auto &item : frame.tags) add(item);
+    for (const auto &item : frame.objects) add(item);
+    return bytes;
+}
 
 bool sameProjectDatabasePath(const QString &left, const QString &right)
 {
@@ -2005,6 +2023,8 @@ void MaterialCenterViewModel::prepareSelection(const QString &videoKey)
     m_selectedThumbnailUrlCache = {};
     m_selectedTotalFrameCount = 0;
     m_selectedFrameCursor = 0;
+    m_selectedFrameCacheBytes = 0;
+    m_selectedFrameCacheByteLimited = false;
     m_selectedFramesHasMore = false;
     m_selectedFramesLoading = false;
     m_detail = {};
@@ -2081,10 +2101,22 @@ void MaterialCenterViewModel::loadDetailPage(const QString &videoKey,
         }
 
         const auto selectedAsset = assetByVideoKey(task.videoKey);
+        bool hitByteLimit = false;
         if (task.replaceCurrent) {
             m_detail = std::move(task.page.detail);
             if (!selectedAsset.videoKey.trimmed().isEmpty()) {
                 m_detail.asset = selectedAsset;
+            }
+            while (!m_detail.frames.isEmpty()) {
+                qsizetype bytes = 0;
+                for (const auto &frame : std::as_const(m_detail.frames)) {
+                    bytes += estimatedFrameCacheBytes(frame);
+                }
+                if (bytes <= kMaxLoadedDetailBytes) {
+                    break;
+                }
+                m_detail.frames.removeLast();
+                hitByteLimit = true;
             }
         } else {
             QSet<int> existingFrameNumbers;
@@ -2095,9 +2127,15 @@ void MaterialCenterViewModel::loadDetailPage(const QString &videoKey,
                 if (m_detail.frames.size() >= kMaxLoadedDetailFrames) {
                     break;
                 }
+                const auto frameBytes = estimatedFrameCacheBytes(frame);
+                if (m_selectedFrameCacheBytes + frameBytes > kMaxLoadedDetailBytes) {
+                    hitByteLimit = true;
+                    break;
+                }
                 if (!existingFrameNumbers.contains(frame.frameNumber)) {
                     existingFrameNumbers.insert(frame.frameNumber);
                     m_detail.frames.append(std::move(frame));
+                    m_selectedFrameCacheBytes += frameBytes;
                 }
             }
             std::sort(m_detail.frames.begin(), m_detail.frames.end(), [](const auto &left, const auto &right) {
@@ -2107,6 +2145,13 @@ void MaterialCenterViewModel::loadDetailPage(const QString &videoKey,
         m_selectedTotalFrameCount = task.page.totalFrameCount;
         m_selectedFrameCursor = task.page.nextFrameNumber;
         m_selectedFramesHasMore = task.page.hasMoreFrames;
+        if (hitByteLimit) {
+            m_selectedFramesHasMore = false;
+            m_selectedFrameCacheByteLimited = true;
+            m_selectedFrameSearchStatusCache = QStringLiteral(
+                "已加载 %1 帧，达到详情缓存字节上限；可重新选择素材继续浏览。")
+                .arg(m_detail.frames.size());
+        }
         refreshSelectedCaches();
         emit selectionChanged();
         emit analysisProgressChanged();
@@ -2143,12 +2188,14 @@ void MaterialCenterViewModel::refreshSelectedCaches()
 {
     m_selectedAllFramesCache.clear();
     m_selectedFramesCache.clear();
+    m_selectedFrameCacheBytes = 0;
 
     if (!hasSelection()) {
         m_selectedTotalFrameCount = 0;
         m_selectedFrameCursor = 0;
         m_selectedFramesHasMore = false;
         m_selectedFramesLoading = false;
+        m_selectedFrameCacheByteLimited = false;
         m_selectedFrameSearchStatusCache.clear();
         m_selectedThumbnailUrlCache = {};
         return;
@@ -2162,6 +2209,7 @@ void MaterialCenterViewModel::refreshSelectedCaches()
     int matchCount = 0;
 
     for (const auto &frame : m_detail.frames) {
+        m_selectedFrameCacheBytes += estimatedFrameCacheBytes(frame);
         const bool semanticFrameMatch = m_detail.asset.matchedFrameNumber >= 0
             && frame.frameNumber == m_detail.asset.matchedFrameNumber;
         if (!semanticFrameMatch && !frameMatches(frame, terms)) {
@@ -2193,7 +2241,11 @@ void MaterialCenterViewModel::refreshSelectedCaches()
 
     applySelectedFrameExpansion();
 
-    if (terms.isEmpty() && m_detail.frames.size() >= kMaxLoadedDetailFrames
+    if (m_selectedFrameCacheByteLimited) {
+        m_selectedFrameSearchStatusCache = QStringLiteral(
+            "已加载 %1 帧，达到详情缓存字节上限；可重新选择素材继续浏览。")
+            .arg(m_detail.frames.size());
+    } else if (terms.isEmpty() && m_detail.frames.size() >= kMaxLoadedDetailFrames
         && m_selectedFramesHasMore) {
         m_selectedFrameSearchStatusCache = QStringLiteral(
             "已加载 %1 帧，达到单次浏览上限；可重新选择素材继续浏览。")

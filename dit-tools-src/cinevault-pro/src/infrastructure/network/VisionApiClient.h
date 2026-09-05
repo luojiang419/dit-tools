@@ -3,6 +3,7 @@
 #include "domain/Entities.h"
 
 #include <optional>
+#include <stop_token>
 
 class VisionApiClient {
 public:
@@ -21,8 +22,9 @@ public:
                                                     const QString &apiKey,
                                                     const QString &model,
                                                     int timeoutSec,
-                                                    QString *errorMessage,
-                                                    int *httpStatusCode = nullptr) const;
+                                                     QString *errorMessage,
+                                                     int *httpStatusCode = nullptr,
+                                                     std::stop_token stopToken = {}) const;
 
     std::optional<QVector<MaterialDimensionAnalysis>> analyzeFrameDimensions(const QString &imagePath,
                                                                              const QString &sourceFileName,
@@ -33,7 +35,8 @@ public:
                                                                              const QString &model,
                                                                              int timeoutSec,
                                                                              QString *errorMessage,
-                                                                             int *httpStatusCode = nullptr) const;
+                                                                             int *httpStatusCode = nullptr,
+                                                                             std::stop_token stopToken = {}) const;
 
     std::optional<VisionVideoSummary> analyzeImage(const QString &imagePath,
                                                    const QString &fileName,
@@ -42,7 +45,8 @@ public:
                                                    const QString &model,
                                                    int timeoutSec,
                                                    QString *errorMessage,
-                                                   int *httpStatusCode = nullptr) const;
+                                                   int *httpStatusCode = nullptr,
+                                                   std::stop_token stopToken = {}) const;
 
     std::optional<VisionVideoSummary> summarizeText(const QString &fileName,
                                                     const QString &text,
@@ -51,7 +55,8 @@ public:
                                                     const QString &model,
                                                     int timeoutSec,
                                                     QString *errorMessage,
-                                                    int *httpStatusCode = nullptr) const;
+                                                    int *httpStatusCode = nullptr,
+                                                    std::stop_token stopToken = {}) const;
 
     std::optional<VisionVideoSummary> summarizeVideo(const QString &fileName,
                                                      const QVector<FrameAnalysisRecord> &frames,
@@ -61,7 +66,8 @@ public:
                                                      int timeoutSec,
                                                      QString *errorMessage,
                                                      int *attemptCount = nullptr,
-                                                     int *httpStatusCode = nullptr) const;
+                                                     int *httpStatusCode = nullptr,
+                                                     std::stop_token stopToken = {}) const;
 
     std::optional<QVector<MaterialDimensionAnalysis>> analyzeDimensions(const QString &fileName,
                                                                         const QString &baseContext,
@@ -71,5 +77,6 @@ public:
                                                                         const QString &model,
                                                                         int timeoutSec,
                                                                         QString *errorMessage,
-                                                                        int *httpStatusCode = nullptr) const;
+                                                                        int *httpStatusCode = nullptr,
+                                                                        std::stop_token stopToken = {}) const;
 };

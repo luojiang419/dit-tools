@@ -2291,7 +2291,8 @@ bool VideoAnalysisService::startDimensionAnalysisNow(const QString &videoKey,
                                                                                     config.model,
                                                                                     config.timeoutSec,
                                                                                     &frameError,
-                                                                                    &frameHttpStatusCode);
+                                                                                    &frameHttpStatusCode,
+                                                                                    stopToken);
                 if (frameAnalyses.has_value()) {
                     if (!persistDimensionFrameAnalyses(db, normalizedKey, frame, *frameAnalyses, config.model, &errorMessage)) {
                         finish(false, QStringLiteral("多维度解析失败"), errorMessage);
@@ -2350,7 +2351,8 @@ bool VideoAnalysisService::startDimensionAnalysisNow(const QString &videoKey,
                                                             config.model,
                                                             config.timeoutSec,
                                                             &analysisError,
-                                                            &httpStatusCode);
+                                                            &httpStatusCode,
+                                                            stopToken);
         } else {
             const auto baseContext = buildDimensionBaseContext(asset, summary, frames, existingDimensions);
             report(QStringLiteral("正在补充 %1 个维度").arg(pendingDimensions.size()),
@@ -2370,7 +2372,8 @@ bool VideoAnalysisService::startDimensionAnalysisNow(const QString &videoKey,
                                                             config.model,
                                                             config.timeoutSec,
                                                             &analysisError,
-                                                            &httpStatusCode);
+                                                            &httpStatusCode,
+                                                            stopToken);
         }
         if (!analyses.has_value()) {
             finish(false, QStringLiteral("多维度解析失败"), analysisError);
@@ -2638,7 +2641,8 @@ void VideoAnalysisService::startNextAnalysis()
                                                                   config.model,
                                                                   config.timeoutSec,
                                                                   &imageError,
-                                                                  &httpStatusCode);
+                                                                  &httpStatusCode,
+                                                                  stopToken);
             if (!analysis.has_value()) {
                 updateAssetState(db, job.videoKey, VideoAnalysisStatus::Failed, ConfirmationStatus::Pending, imageError, nullptr);
                 finishFailure(imageError, &db, false);
@@ -2779,7 +2783,8 @@ void VideoAnalysisService::startNextAnalysis()
                                                                   config.model,
                                                                   config.timeoutSec,
                                                                   &summaryError,
-                                                                  &httpStatusCode);
+                                                                  &httpStatusCode,
+                                                                  stopToken);
             if (!summary.has_value()) {
                 finishFailure(summaryError, &db);
                 return;
@@ -2875,7 +2880,8 @@ void VideoAnalysisService::startNextAnalysis()
                                                                    config.timeoutSec,
                                                                    &summaryError,
                                                                    &summaryAttempts,
-                                                                   &summaryHttpStatus);
+                                                                   &summaryHttpStatus,
+                                                                   stopToken);
             task.summaryRetryCount = qMax(0, summaryAttempts - 1);
             if (!summary.has_value()) {
                 task.lastErrorMessage = summaryError;
@@ -2999,7 +3005,8 @@ void VideoAnalysisService::startNextAnalysis()
                                                                       config.model,
                                                                       config.timeoutSec,
                                                                       &frameError,
-                                                                      &httpStatusCode);
+                                                                      &httpStatusCode,
+                                                                      stopToken);
                 target.retryCount = attempt;
                 target.lastHttpStatus = httpStatusCode;
                 target.lastAttemptAt = nowIso();
@@ -3260,7 +3267,8 @@ void VideoAnalysisService::startNextAnalysis()
                                                                                    config.model,
                                                                                    config.timeoutSec,
                                                                                    &result.errorMessage,
-                                                                                   &result.httpStatusCode);
+                                                                                   &result.httpStatusCode,
+                                                                                   stopToken);
                                 if (result.analysis.has_value()) {
                                     break;
                                 }
@@ -3348,7 +3356,8 @@ void VideoAnalysisService::startNextAnalysis()
                                                                           config.model,
                                                                           config.timeoutSec,
                                                                           &frameError,
-                                                                          &httpStatusCode);
+                                                                          &httpStatusCode,
+                                                                          stopToken);
                     frame.retryCount = attempt;
                     frame.lastHttpStatus = httpStatusCode;
                     frame.lastAttemptAt = nowIso();

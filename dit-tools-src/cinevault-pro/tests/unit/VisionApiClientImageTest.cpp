@@ -13,6 +13,8 @@
 #include <QTcpSocket>
 #include <QUrl>
 
+#include <stop_token>
+
 namespace {
 struct ChatCompletionResponse {
     int statusCode = 200;
@@ -283,7 +285,37 @@ private slots:
     void testConnection_stopsAfterBoundedGatewayRetries();
     void endpointPolicy_defaultsRemoteToHttpsAndAllowsExplicitHttp();
     void miniMaxM3_usesNativeEndpointAndFrameConcurrency();
+    void analyzeFrame_honorsPreCancelledToken();
 };
+
+void VisionApiClientImageTest::analyzeFrame_honorsPreCancelledToken()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const auto imagePath = QDir(tempDir.path()).filePath(QStringLiteral("cancelled-frame.webp"));
+    QFile imageFile(imagePath);
+    QVERIFY(imageFile.open(QIODevice::WriteOnly));
+    QCOMPARE(imageFile.write(sampleWebp()), sampleWebp().size());
+    imageFile.close();
+
+    std::stop_source stopSource;
+    stopSource.request_stop();
+    VisionApiClient client;
+    QString error;
+    int statusCode = 0;
+    const auto result = client.analyzeFrame(imagePath,
+                                            QStringLiteral("cancelled.mov"),
+                                            QStringLiteral("http://127.0.0.1:1/v1"),
+                                            QStringLiteral("test-key"),
+                                            QStringLiteral("test-model"),
+                                            5,
+                                            &error,
+                                            &statusCode,
+                                            stopSource.get_token());
+    QVERIFY(!result.has_value());
+    QCOMPARE(statusCode, 0);
+    QCOMPARE(error, QStringLiteral("请求已取消"));
+}
 
 void VisionApiClientImageTest::analyzeFrame_requestsStoryboardSchema()
 {

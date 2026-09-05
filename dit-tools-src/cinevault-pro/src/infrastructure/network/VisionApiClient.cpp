@@ -232,7 +232,8 @@ bool isTransientHttpFailure(const HttpResult &result)
 HttpResult postJsonOnce(const QString &endpoint,
                         const QString &apiKey,
                         const QByteArray &requestBody,
-                        int timeoutSec)
+                        int timeoutSec,
+                        std::stop_token stopToken)
 {
     HttpResult result;
     QElapsedTimer elapsed;
@@ -254,8 +255,29 @@ HttpResult postJsonOnce(const QString &endpoint,
     auto *reply = manager.post(request, requestBody);
     QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
     QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+    QTimer cancellationPoll;
+    cancellationPoll.setInterval(40);
+    QObject::connect(&cancellationPoll, &QTimer::timeout, &loop, [&]() {
+        if (stopToken.stop_requested() && reply->isRunning()) {
+            reply->abort();
+            loop.quit();
+        }
+    });
+    cancellationPoll.start();
     timer.start(qMax(5, timeoutSec) * 1000);
     loop.exec();
+
+    cancellationPoll.stop();
+
+    if (stopToken.stop_requested()) {
+        if (reply->isRunning()) {
+            reply->abort();
+        }
+        result.errorMessage = QStringLiteral("请求已取消");
+        result.elapsedMs = elapsed.elapsed();
+        reply->deleteLater();
+        return result;
+    }
 
     if (timer.isActive()) {
         timer.stop();
@@ -290,7 +312,8 @@ HttpResult postJsonOnce(const QString &endpoint,
 HttpResult postJson(const QString &endpoint,
                     const QString &apiKey,
                     const QJsonObject &payload,
-                    int timeoutSec)
+                    int timeoutSec,
+                    std::stop_token stopToken)
 {
     if (endpoint.trimmed().isEmpty()) {
         HttpResult rejected;
@@ -301,7 +324,11 @@ HttpResult postJson(const QString &endpoint,
     HttpResult result;
     int attempt = 0;
     for (; attempt < kTransientHttpMaxAttempts; ++attempt) {
-        result = postJsonOnce(endpoint, apiKey, requestBody, timeoutSec);
+        if (stopToken.stop_requested()) {
+            result.errorMessage = QStringLiteral("请求已取消");
+            return result;
+        }
+        result = postJsonOnce(endpoint, apiKey, requestBody, timeoutSec, stopToken);
         if (result.success) {
             if (attempt > 0) {
                 Logger::info(QStringLiteral("视觉接口瞬时故障后恢复：attempt=%1/%2 elapsed_ms=%3 endpoint=%4")
@@ -324,7 +351,13 @@ HttpResult postJson(const QString &endpoint,
         if (!isTransientHttpFailure(result) || attempt + 1 >= kTransientHttpMaxAttempts) {
             break;
         }
-        QThread::msleep(kTransientHttpRetryDelayMs);
+        for (unsigned long elapsed = 0; elapsed < kTransientHttpRetryDelayMs; elapsed += 20) {
+            if (stopToken.stop_requested()) {
+                result.errorMessage = QStringLiteral("请求已取消");
+                return result;
+            }
+            QThread::msleep(20);
+        }
     }
 
     if (attempt > 0 && !result.errorMessage.isEmpty()) {
@@ -632,13 +665,14 @@ bool isResponseFormatRejected(const HttpResult &result)
 HttpResult postChatPayload(const QString &endpoint,
                            const QString &apiKey,
                            QJsonObject payload,
-                           int timeoutSec)
+                           int timeoutSec,
+                           std::stop_token stopToken = {})
 {
     const auto postWithFormatFallback = [&](QJsonObject *requestPayload) {
-        auto response = postJson(endpoint, apiKey, *requestPayload, timeoutSec);
+        auto response = postJson(endpoint, apiKey, *requestPayload, timeoutSec, stopToken);
         if (!response.success && isResponseFormatRejected(response)) {
             requestPayload->insert(QStringLiteral("response_format"), textResponseFormat());
-            response = postJson(endpoint, apiKey, *requestPayload, timeoutSec);
+            response = postJson(endpoint, apiKey, *requestPayload, timeoutSec, stopToken);
         }
         return response;
     };
@@ -1045,7 +1079,8 @@ std::optional<VisionFrameAnalysis> VisionApiClient::analyzeFrame(const QString &
                                                                  const QString &model,
                                                                  int timeoutSec,
                                                                  QString *errorMessage,
-                                                                 int *httpStatusCode) const
+                                                                 int *httpStatusCode,
+                                                                 std::stop_token stopToken) const
 {
     auto imageDataUrl = imageAsJpegDataUrl(imagePath, errorMessage);
     if (!imageDataUrl.has_value()) {
@@ -1076,7 +1111,8 @@ std::optional<VisionFrameAnalysis> VisionApiClient::analyzeFrame(const QString &
                                                          640,
                                                         QStringLiteral("vision_frame_analysis"),
                                                         frameAnalysisSchema()),
-                                        timeoutSec);
+                                        timeoutSec,
+                                        stopToken);
     if (httpStatusCode) {
         *httpStatusCode = result.statusCode;
     }
@@ -1152,7 +1188,8 @@ std::optional<QVector<MaterialDimensionAnalysis>> VisionApiClient::analyzeFrameD
                                                                                           const QString &model,
                                                                                           int timeoutSec,
                                                                                           QString *errorMessage,
-                                                                                          int *httpStatusCode) const
+                                                                                          int *httpStatusCode,
+                                                                                          std::stop_token stopToken) const
 {
     const auto requestedDimensions = normalizedDimensionNames(dimensions);
     if (requestedDimensions.isEmpty()) {
@@ -1197,7 +1234,8 @@ std::optional<QVector<MaterialDimensionAnalysis>> VisionApiClient::analyzeFrameD
                                                         maxTokens,
                                                         QStringLiteral("vision_dimension_analysis"),
                                                         dimensionAnalysisSchema()),
-                                        timeoutSec);
+                                        timeoutSec,
+                                        stopToken);
     if (httpStatusCode) {
         *httpStatusCode = result.statusCode;
     }
@@ -1256,7 +1294,8 @@ std::optional<VisionVideoSummary> VisionApiClient::analyzeImage(const QString &i
                                                                 const QString &model,
                                                                 int timeoutSec,
                                                                 QString *errorMessage,
-                                                                int *httpStatusCode) const
+                                                                int *httpStatusCode,
+                                                                std::stop_token stopToken) const
 {
     auto imageDataUrl = imageAsJpegDataUrl(imagePath, errorMessage);
     if (!imageDataUrl.has_value()) {
@@ -1287,7 +1326,8 @@ std::optional<VisionVideoSummary> VisionApiClient::analyzeImage(const QString &i
                                                         700,
                                                         QStringLiteral("vision_video_summary"),
                                                         videoSummarySchema()),
-                                        timeoutSec);
+                                        timeoutSec,
+                                        stopToken);
     if (httpStatusCode) {
         *httpStatusCode = result.statusCode;
     }
@@ -1356,7 +1396,8 @@ std::optional<VisionVideoSummary> VisionApiClient::summarizeText(const QString &
                                                                  const QString &model,
                                                                  int timeoutSec,
                                                                  QString *errorMessage,
-                                                                 int *httpStatusCode) const
+                                                                 int *httpStatusCode,
+                                                                 std::stop_token stopToken) const
 {
     const auto boundedText = text.trimmed().left(64000);
     if (boundedText.isEmpty()) {
@@ -1385,7 +1426,8 @@ std::optional<VisionVideoSummary> VisionApiClient::summarizeText(const QString &
                                                         800,
                                                         QStringLiteral("vision_video_summary"),
                                                         videoSummarySchema()),
-                                        timeoutSec);
+                                        timeoutSec,
+                                        stopToken);
     if (httpStatusCode) {
         *httpStatusCode = result.statusCode;
     }
@@ -1455,7 +1497,8 @@ std::optional<VisionVideoSummary> VisionApiClient::summarizeVideo(const QString 
                                                                   int timeoutSec,
                                                                   QString *errorMessage,
                                                                   int *attemptCount,
-                                                                  int *httpStatusCode) const
+                                                                  int *httpStatusCode,
+                                                                  std::stop_token stopToken) const
 {
     const auto endpoint = normalizeEndpoint(baseUrl, model);
     if (attemptCount) {
@@ -1528,7 +1571,8 @@ std::optional<VisionVideoSummary> VisionApiClient::summarizeVideo(const QString 
                                                             maxTokens,
                                                             QStringLiteral("vision_video_summary"),
                                                             videoSummarySchema()),
-                                            timeoutSec);
+                                            timeoutSec,
+                                            stopToken);
         if (attemptStatusCode) {
             *attemptStatusCode = result.statusCode;
         }
@@ -1647,7 +1691,8 @@ std::optional<QVector<MaterialDimensionAnalysis>> VisionApiClient::analyzeDimens
                                                                                      const QString &model,
                                                                                      int timeoutSec,
                                                                                      QString *errorMessage,
-                                                                                     int *httpStatusCode) const
+                                                                                     int *httpStatusCode,
+                                                                                     std::stop_token stopToken) const
 {
     const auto requestedDimensions = normalizedDimensionNames(dimensions);
     if (requestedDimensions.isEmpty()) {
@@ -1709,7 +1754,8 @@ std::optional<QVector<MaterialDimensionAnalysis>> VisionApiClient::analyzeDimens
                                                             maxTokens,
                                                             QStringLiteral("vision_dimension_analysis"),
                                                             dimensionAnalysisSchema()),
-                                            timeoutSec);
+                                            timeoutSec,
+                                            stopToken);
         if (attemptStatusCode) {
             *attemptStatusCode = result.statusCode;
         }

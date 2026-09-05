@@ -344,6 +344,8 @@ private:
     QTimer *m_searchRefreshTimer = nullptr;
     int m_selectedTotalFrameCount = 0;
     int m_selectedFrameCursor = 0;
+    qsizetype m_selectedFrameCacheBytes = 0;
+    bool m_selectedFrameCacheByteLimited = false;
     int m_detailRequestGeneration = 0;
     bool m_selectedFramesHasMore = false;
     bool m_selectedFramesLoading = false;
