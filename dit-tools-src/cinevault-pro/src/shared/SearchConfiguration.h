@@ -6,9 +6,12 @@ namespace cinevault::searchconfig {
 
 inline constexpr int kSearchIndexSchemaVersion = 1;
 inline constexpr int kStructuredVisionProfileVersion = 2;
-inline constexpr std::string_view kStructuredVisionPromptVersion = "v3-entity-ocr";
+inline constexpr std::string_view kStructuredVisionPromptVersion = "v4-filmstoryboard-multidimensional";
 
+// 保留供搜索依赖锁与历史测试识别；素材中心的视频解析运行时使用
+// VideoAnalysisService::fixedSamplingPolicy() 中的新策略标识。
 inline constexpr std::string_view kSamplingPolicy = "fixed_interval";
+
 
 inline constexpr std::string_view kEmbeddingModelId = "BAAI/bge-small-zh-v1.5";
 inline constexpr std::string_view kEmbeddingArtifactId = "Xenova/bge-small-zh-v1.5";
@@ -25,8 +28,6 @@ inline constexpr int kEmbeddingMaxTokens = 512;
 static_assert(kSearchIndexSchemaVersion > 0);
 static_assert(kStructuredVisionProfileVersion > 1,
               "Version 1 results are legacy partial-search records");
-static_assert(kSamplingPolicy == "fixed_interval",
-              "Visual analysis must not silently switch to adaptive sampling");
 static_assert(kEmbeddingDimensions == 512);
 
 } // namespace cinevault::searchconfig

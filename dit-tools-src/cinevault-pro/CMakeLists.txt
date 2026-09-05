@@ -1106,7 +1106,7 @@ if(BUILD_TESTING)
         src/shared/VisualAnalysisMetadata.cpp
     )
     target_include_directories(FFmpegAdapterFrameExtractionTest PRIVATE src)
-    target_link_libraries(FFmpegAdapterFrameExtractionTest PRIVATE Qt6::Core Qt6::Test)
+    target_link_libraries(FFmpegAdapterFrameExtractionTest PRIVATE Qt6::Core Qt6::Gui Qt6::Test)
     add_test(NAME FFmpegAdapterFrameExtractionTest COMMAND FFmpegAdapterFrameExtractionTest)
 
     qt_add_executable(NaturalLanguageQueryParserTest
@@ -1484,7 +1484,7 @@ if(BUILD_TESTING)
             src/shared/ThumbnailCacheQuota.cpp
         )
         target_include_directories(MediaTaskServiceRecoveryTest PRIVATE src)
-        target_link_libraries(MediaTaskServiceRecoveryTest PRIVATE Qt6::Core Qt6::Sql Qt6::Concurrent Qt6::Test)
+        target_link_libraries(MediaTaskServiceRecoveryTest PRIVATE Qt6::Core Qt6::Gui Qt6::Sql Qt6::Concurrent Qt6::Test)
         if(WIN32)
             target_link_libraries(MediaTaskServiceRecoveryTest PRIVATE Psapi)
         endif()

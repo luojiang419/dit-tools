@@ -12,6 +12,14 @@ QString entityFactsToJson(const QVector<VisionEntityFact> &facts);
 QVector<VisionEntityFact> entityFactsFromJson(const QString &json);
 QStringList entityFactSearchTerms(const QVector<VisionEntityFact> &facts);
 
+QString samplingPolicy(VideoFrameExtractionStrategy strategy,
+                       double intervalSeconds,
+                       double sceneThreshold,
+                       double minimumSharpness,
+                       int maxWidth,
+                       int maxHeight);
+bool isCurrentSamplingPolicy(const QString &policy);
+
 int fixedFrameInterval(AnalysisMode mode, int configuredInterval);
 QVector<int> contactSheetFrameNumbers(int sourceFrameCount, int contactSheetFrameCount);
 QVector<int> plannedFrameNumbers(int sourceFrameCount, int frameInterval);

@@ -483,7 +483,8 @@ private slots:
         }
 
         verifyOrdered(qml, {
-            QStringLiteral("root.draftVisionModel,"),
+            QStringLiteral("root.draftVisionApiConfigs,"),
+            QStringLiteral("root.draftActiveVisionApiConfigId,"),
             QStringLiteral("root.draftSearchAssistantEnabled,"),
             QStringLiteral("root.draftQuickSearchEnabled,"),
             QStringLiteral("root.draftQuickSearchShortcut,"),

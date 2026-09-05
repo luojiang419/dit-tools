@@ -49,21 +49,27 @@ QByteArray structuredFrameChatResponse()
 {
     const QJsonObject frame{
         {QStringLiteral("caption"), QStringLiteral("红色牛仔短裤旁有促销文字")},
-        {QStringLiteral("tags"), QJsonArray{QStringLiteral("服装"), QStringLiteral("促销")}},
-        {QStringLiteral("objects"), QJsonArray{QStringLiteral("短裤")}},
-        {QStringLiteral("actions"), QString()},
-        {QStringLiteral("setting"), QStringLiteral("商店")},
-        {QStringLiteral("entities"), QJsonArray{
-             QJsonObject{
-                 {QStringLiteral("category"), QStringLiteral("clothing")},
-                 {QStringLiteral("label"), QStringLiteral("短裤")},
-                 {QStringLiteral("colors"), QJsonArray{QStringLiteral("红色")}},
-                 {QStringLiteral("materials"), QJsonArray{QStringLiteral("牛仔")}},
-                 {QStringLiteral("attributes"), QJsonArray{}}
-             }
-         }},
-        {QStringLiteral("ocr_text"), QStringLiteral("SALE")},
-        {QStringLiteral("ocr_blocks"), QJsonArray{QStringLiteral("SALE")}}
+        {QStringLiteral("detail"), QStringLiteral("红色牛仔短裤居中展示，侧面有促销文字")},
+        {QStringLiteral("scene"), QStringLiteral("服装商店")},
+        {QStringLiteral("props"), QStringLiteral("红色牛仔短裤、促销牌")},
+        {QStringLiteral("people"), QStringLiteral("不适用")},
+        {QStringLiteral("expression"), QStringLiteral("不适用")},
+        {QStringLiteral("body_action"), QStringLiteral("静态展示")},
+        {QStringLiteral("movement_trend"), QStringLiteral("无明显运动")},
+        {QStringLiteral("camera_movement"), QStringLiteral("固定镜头")},
+        {QStringLiteral("shot_size"), QStringLiteral("近景")},
+        {QStringLiteral("composition"), QStringLiteral("居中构图")},
+        {QStringLiteral("subject_direction"), QStringLiteral("正面")},
+        {QStringLiteral("gaze_direction"), QStringLiteral("不适用")},
+        {QStringLiteral("action_stage"), QStringLiteral("静态")},
+        {QStringLiteral("spatial_relation"), QStringLiteral("促销牌位于短裤右侧")},
+        {QStringLiteral("chronology_cue"), QStringLiteral("不明显")},
+        {QStringLiteral("camera_angle"), QStringLiteral("平视")},
+        {QStringLiteral("visual_focus"), QStringLiteral("红色牛仔短裤")},
+        {QStringLiteral("lighting_mood"), QStringLiteral("明亮商业光")},
+        {QStringLiteral("color_palette"), QStringLiteral("红色、白色")},
+        {QStringLiteral("narrative_function"), QStringLiteral("广告产品记忆点")},
+        {QStringLiteral("transition_hint"), QStringLiteral("承接产品细节特写")}
     };
     const QJsonObject root{
         {QStringLiteral("choices"),
@@ -265,9 +271,10 @@ class VisionApiClientImageTest : public QObject {
 
 private slots:
     void analyzeImage_decodesWebpToJpegDataUrl();
-    void analyzeFrame_requestsBoundEntitiesAndOcr();
+    void analyzeFrame_requestsStoryboardSchema();
     void analyzeFrame_retriesOriginalRequestOnceAfterEmptyContent();
     void analyzeFrame_stopsAfterSingleEmptyContentRetry();
+    void analyzeFrame_doesNotRepairMiniMaxBusinessError();
     void analyzeFrameDimensions_postsSingleFrameImage();
     void analyzeDimensions_postsRequestedDimensions();
     void analyzeDimensions_retriesWithShorterContextOnContextLimit();
@@ -275,9 +282,10 @@ private slots:
     void testConnection_retriesTransientGatewayFailure();
     void testConnection_stopsAfterBoundedGatewayRetries();
     void endpointPolicy_defaultsRemoteToHttpsAndAllowsExplicitHttp();
+    void miniMaxM3_usesNativeEndpointAndFrameConcurrency();
 };
 
-void VisionApiClientImageTest::analyzeFrame_requestsBoundEntitiesAndOcr()
+void VisionApiClientImageTest::analyzeFrame_requestsStoryboardSchema()
 {
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
@@ -307,10 +315,9 @@ void VisionApiClientImageTest::analyzeFrame_requestsBoundEntitiesAndOcr()
     QVERIFY2(frame.has_value(), qPrintable(error));
     QCOMPARE(httpStatusCode, 200);
     QVERIFY(frame->factsComplete);
-    QCOMPARE(frame->entities.size(), 1);
-    QCOMPARE(frame->entities.first().colors, QStringList{QStringLiteral("红色")});
-    QCOMPARE(frame->entities.first().materials, QStringList{QStringLiteral("牛仔")});
-    QCOMPARE(frame->ocrText, QStringLiteral("SALE"));
+    QVERIFY(frame->tags.contains(QStringLiteral("景别：近景")));
+    QVERIFY(frame->objects.contains(QStringLiteral("红色牛仔短裤、促销牌")));
+    QVERIFY(frame->actions.contains(QStringLiteral("固定镜头")));
 
     const auto responseFormat = responseFormatFromRequestBody(capturedBody);
     QJsonParseError requestParseError;
@@ -323,12 +330,13 @@ void VisionApiClientImageTest::analyzeFrame_requestsBoundEntitiesAndOcr()
     const auto schema = responseFormat.value(QStringLiteral("json_schema")).toObject()
                             .value(QStringLiteral("schema")).toObject();
     const auto required = schema.value(QStringLiteral("required")).toArray();
-    QVERIFY(required.contains(QStringLiteral("entities")));
-    QVERIFY(required.contains(QStringLiteral("ocr_text")));
-    QVERIFY(required.contains(QStringLiteral("ocr_blocks")));
+    QCOMPARE(required.size(), 22);
+    QVERIFY(required.contains(QStringLiteral("detail")));
+    QVERIFY(required.contains(QStringLiteral("camera_movement")));
+    QVERIFY(required.contains(QStringLiteral("transition_hint")));
     const auto prompt = promptTextFromRequestBody(capturedBody);
-    QVERIFY(prompt.contains(QStringLiteral("同一个实体对象内")));
-    QVERIFY(prompt.contains(QStringLiteral("ocr_text")));
+    QVERIFY(prompt.contains(QStringLiteral("故事板")));
+    QVERIFY(prompt.contains(QStringLiteral("transition_hint")));
 }
 
 void VisionApiClientImageTest::analyzeFrame_retriesOriginalRequestOnceAfterEmptyContent()
@@ -419,6 +427,46 @@ void VisionApiClientImageTest::analyzeFrame_stopsAfterSingleEmptyContentRetry()
     QVERIFY(error.contains(QStringLiteral("仅返回推理内容")));
     QVERIFY(!error.contains(QStringLiteral("自动修复失败")));
     QVERIFY(!error.contains(QStringLiteral("纯文本兜底失败")));
+}
+
+void VisionApiClientImageTest::analyzeFrame_doesNotRepairMiniMaxBusinessError()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const auto imagePath = QDir(tempDir.path()).filePath(QStringLiteral("minimax-error-frame.webp"));
+    QFile imageFile(imagePath);
+    QVERIFY(imageFile.open(QIODevice::WriteOnly));
+    QCOMPARE(imageFile.write(sampleWebp()), sampleWebp().size());
+    imageFile.close();
+
+    const auto businessErrorResponse = QJsonDocument(QJsonObject{
+        {QStringLiteral("base_resp"), QJsonObject{
+            {QStringLiteral("status_code"), 1008},
+            {QStringLiteral("status_msg"), QStringLiteral("insufficient balance")}
+        }}
+    }).toJson(QJsonDocument::Compact);
+
+    QTcpServer server;
+    QVERIFY2(server.listen(QHostAddress::LocalHost), qPrintable(server.errorString()));
+    QVector<QByteArray> capturedBodies;
+    installSequentialChatCompletionResponder(&server, &capturedBodies, {{200, businessErrorResponse}});
+
+    VisionApiClient client;
+    QString error;
+    const auto frame = client.analyzeFrame(
+        imagePath,
+        QStringLiteral("minimax-error.mov"),
+        QStringLiteral("http://127.0.0.1:%1/v1").arg(server.serverPort()),
+        QStringLiteral("test-key"),
+        QStringLiteral("MiniMax-M3"),
+        5,
+        &error);
+
+    QVERIFY(!frame.has_value());
+    QCOMPARE(capturedBodies.size(), 1);
+    QVERIFY(error.contains(QStringLiteral("1008")));
+    QVERIFY(error.contains(QStringLiteral("余额不足")));
+    QVERIFY(!error.contains(QStringLiteral("自动修复失败")));
 }
 
 void VisionApiClientImageTest::analyzeImage_decodesWebpToJpegDataUrl()
@@ -709,6 +757,18 @@ void VisionApiClientImageTest::endpointPolicy_defaultsRemoteToHttpsAndAllowsExpl
     QCOMPARE(VisionApiClient::normalizedEndpoint(QStringLiteral("http://api.example.com/v1")),
              QStringLiteral("http://api.example.com/v1/chat/completions"));
     QVERIFY(VisionApiClient::normalizedEndpoint(QStringLiteral("ftp://api.example.com/v1")).isEmpty());
+}
+
+void VisionApiClientImageTest::miniMaxM3_usesNativeEndpointAndFrameConcurrency()
+{
+    QCOMPARE(VisionApiClient::normalizedEndpoint(QStringLiteral("https://api.minimaxi.com"),
+                                                  QStringLiteral("MiniMax-M3")),
+             QStringLiteral("https://api.minimaxi.com/v1/text/chatcompletion_v2"));
+    QCOMPARE(VisionApiClient::normalizedEndpoint(QStringLiteral("https://api.minimaxi.com/v1/chat/completions"),
+                                                  QStringLiteral("minimax-m3")),
+             QStringLiteral("https://api.minimaxi.com/v1/text/chatcompletion_v2"));
+    QCOMPARE(VisionApiClient::maxConcurrentFrameRequests(QStringLiteral("MiniMax-M3")), 200);
+    QCOMPARE(VisionApiClient::maxConcurrentFrameRequests(QStringLiteral("gpt-4.1-mini")), 1);
 }
 
 QTEST_MAIN(VisionApiClientImageTest)

@@ -163,7 +163,12 @@ bool isLoopbackHost(const QString &host)
     return address.setAddress(host) && address.isLoopback();
 }
 
-QString normalizeEndpoint(QString baseUrl)
+bool isMiniMaxM3Model(const QString &model)
+{
+    return model.trimmed().compare(QStringLiteral("MiniMax-M3"), Qt::CaseInsensitive) == 0;
+}
+
+QString normalizeEndpoint(QString baseUrl, const QString &model)
 {
     auto url = baseUrl.trimmed();
     if (url.isEmpty()) {
@@ -186,6 +191,21 @@ QString normalizeEndpoint(QString baseUrl)
     }
     if (url.endsWith(QLatin1Char('/'))) {
         url.chop(1);
+    }
+    if (isMiniMaxM3Model(model)) {
+        if (url.endsWith(QStringLiteral("/v1/text/chatcompletion_v2"))) {
+            return url;
+        }
+        if (url.endsWith(QStringLiteral("/v1/chat/completions"))) {
+            url.chop(QStringLiteral("/chat/completions").size());
+        }
+        if (url.endsWith(QStringLiteral("/v1"))) {
+            return url + QStringLiteral("/text/chatcompletion_v2");
+        }
+        if (parsedUrl.path().isEmpty() || parsedUrl.path() == QStringLiteral("/")) {
+            return url + QStringLiteral("/v1/text/chatcompletion_v2");
+        }
+        return url + QStringLiteral("/text/chatcompletion_v2");
     }
     if (url.endsWith(QStringLiteral("/chat/completions"))) {
         return url;
@@ -479,51 +499,26 @@ QJsonObject statusSchema()
 
 QJsonObject frameAnalysisSchema()
 {
-    const QJsonObject entitySchema{
-        {QStringLiteral("type"), QStringLiteral("object")},
-        {QStringLiteral("properties"),
-         QJsonObject{
-             {QStringLiteral("category"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}}},
-             {QStringLiteral("label"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}}},
-             {QStringLiteral("colors"), stringArraySchema()},
-             {QStringLiteral("materials"), stringArraySchema()},
-             {QStringLiteral("attributes"), stringArraySchema()}
-         }},
-        {QStringLiteral("required"),
-         QJsonArray{
-             QStringLiteral("category"), QStringLiteral("label"), QStringLiteral("colors"),
-             QStringLiteral("materials"), QStringLiteral("attributes")
-         }},
-        {QStringLiteral("additionalProperties"), false}
+    static const QStringList fields{
+        QStringLiteral("caption"), QStringLiteral("detail"), QStringLiteral("scene"),
+        QStringLiteral("props"), QStringLiteral("people"), QStringLiteral("expression"),
+        QStringLiteral("body_action"), QStringLiteral("movement_trend"), QStringLiteral("camera_movement"),
+        QStringLiteral("shot_size"), QStringLiteral("composition"), QStringLiteral("subject_direction"),
+        QStringLiteral("gaze_direction"), QStringLiteral("action_stage"), QStringLiteral("spatial_relation"),
+        QStringLiteral("chronology_cue"), QStringLiteral("camera_angle"), QStringLiteral("visual_focus"),
+        QStringLiteral("lighting_mood"), QStringLiteral("color_palette"), QStringLiteral("narrative_function"),
+        QStringLiteral("transition_hint")
     };
+    QJsonObject properties;
+    QJsonArray required;
+    for (const auto &field : fields) {
+        properties.insert(field, QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}});
+        required.append(field);
+    }
     return QJsonObject{
         {QStringLiteral("type"), QStringLiteral("object")},
-        {QStringLiteral("properties"),
-         QJsonObject{
-             {QStringLiteral("caption"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}}},
-             {QStringLiteral("tags"), stringArraySchema()},
-             {QStringLiteral("objects"), stringArraySchema()},
-             {QStringLiteral("actions"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}}},
-             {QStringLiteral("setting"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}}},
-             {QStringLiteral("entities"),
-              QJsonObject{
-                  {QStringLiteral("type"), QStringLiteral("array")},
-                  {QStringLiteral("items"), entitySchema}
-              }},
-             {QStringLiteral("ocr_text"), QJsonObject{{QStringLiteral("type"), QStringLiteral("string")}}},
-             {QStringLiteral("ocr_blocks"), stringArraySchema()}
-         }},
-        {QStringLiteral("required"),
-         QJsonArray{
-             QStringLiteral("caption"),
-             QStringLiteral("tags"),
-             QStringLiteral("objects"),
-             QStringLiteral("actions"),
-             QStringLiteral("setting"),
-             QStringLiteral("entities"),
-             QStringLiteral("ocr_text"),
-             QStringLiteral("ocr_blocks")
-         }},
+        {QStringLiteral("properties"), properties},
+        {QStringLiteral("required"), required},
         {QStringLiteral("additionalProperties"), false}
     };
 }
@@ -596,6 +591,19 @@ QJsonObject makeChatPayload(const QString &model,
                             const QString &schemaName,
                             const QJsonObject &schema)
 {
+    if (isMiniMaxM3Model(model)) {
+        return QJsonObject{
+            {QStringLiteral("model"), model},
+            {QStringLiteral("max_completion_tokens"), maxTokens},
+            {QStringLiteral("temperature"), 0.01},
+            {QStringLiteral("messages"), QJsonArray{
+                QJsonObject{
+                    {QStringLiteral("role"), QStringLiteral("user")},
+                    {QStringLiteral("content"), content}
+                }
+            }}
+        };
+    }
     return QJsonObject{
         {QStringLiteral("model"), model},
         {QStringLiteral("max_tokens"), maxTokens},
@@ -641,11 +649,16 @@ HttpResult postChatPayload(const QString &endpoint,
         ? VisionResponseParser::extractAssistantEnvelope(result.body, &envelopeError)
         : std::nullopt;
     if (envelope.has_value() && envelope->content.trimmed().isEmpty()) {
-        const auto originalMaxTokens = payload.value(QStringLiteral("max_tokens")).toInt();
+        const auto maxTokenKey = payload.contains(QStringLiteral("max_completion_tokens"))
+            ? QStringLiteral("max_completion_tokens")
+            : QStringLiteral("max_tokens");
+        const auto originalMaxTokens = payload.value(maxTokenKey).toInt();
         const auto retryMaxTokens = qBound(640, qMax(1, originalMaxTokens) * 2, 2048);
-        payload.insert(QStringLiteral("max_tokens"), retryMaxTokens);
-        payload.insert(QStringLiteral("chat_template_kwargs"),
-                       QJsonObject{{QStringLiteral("enable_thinking"), false}});
+        payload.insert(maxTokenKey, retryMaxTokens);
+        if (!isMiniMaxM3Model(payload.value(QStringLiteral("model")).toString())) {
+            payload.insert(QStringLiteral("chat_template_kwargs"),
+                           QJsonObject{{QStringLiteral("enable_thinking"), false}});
+        }
         Logger::warn(QStringLiteral(
             "vision_empty_content_retry finish_reason=%1 reasoning_chars=%2 "
             "prompt_tokens=%3 completion_tokens=%4 max_tokens=%5")
@@ -690,8 +703,9 @@ std::optional<QJsonObject> repairAssistantPayload(const QByteArray &responseBody
     const auto originalContent = VisionResponseParser::extractAssistantContent(responseBody, &contentError);
     if (!originalContent.has_value()) {
         if (errorMessage) {
-            *errorMessage = QStringLiteral("%1；自动修复失败：无法读取原始返回内容（%2）")
-                                .arg(failureReason, contentError);
+            // 没有 assistant 正文时，格式修复没有输入可用。保留原始服务错误，
+            // 避免将 MiniMax 的业务错误误报成“自动修复失败”。
+            *errorMessage = failureReason;
         }
         return std::nullopt;
     }
@@ -975,9 +989,14 @@ std::optional<QVector<MaterialDimensionAnalysis>> normalizeDimensionAnalyses(con
 }
 }
 
-QString VisionApiClient::normalizedEndpoint(const QString &baseUrl)
+QString VisionApiClient::normalizedEndpoint(const QString &baseUrl, const QString &model)
 {
-    return normalizeEndpoint(baseUrl);
+    return normalizeEndpoint(baseUrl, model);
+}
+
+int VisionApiClient::maxConcurrentFrameRequests(const QString &model)
+{
+    return isMiniMaxM3Model(model) ? 200 : 1;
 }
 
 bool VisionApiClient::testConnection(const QString &baseUrl,
@@ -986,7 +1005,7 @@ bool VisionApiClient::testConnection(const QString &baseUrl,
                                      int timeoutSec,
                                      QString *errorMessage) const
 {
-    const auto endpoint = normalizeEndpoint(baseUrl);
+    const auto endpoint = normalizeEndpoint(baseUrl, model);
     if (endpoint.trimmed().isEmpty() || apiKey.trimmed().isEmpty() || model.trimmed().isEmpty()) {
         if (errorMessage) {
             *errorMessage = !baseUrl.trimmed().isEmpty() && endpoint.isEmpty()
@@ -1033,20 +1052,17 @@ std::optional<VisionFrameAnalysis> VisionApiClient::analyzeFrame(const QString &
         return std::nullopt;
     }
 
-    const auto endpoint = normalizeEndpoint(baseUrl);
+    const auto endpoint = normalizeEndpoint(baseUrl, model);
     const auto fileName = fallbackFileName(sourceFileName, imagePath);
     const QJsonArray content = {
         QJsonObject{{QStringLiteral("type"), QStringLiteral("text")},
                     {QStringLiteral("text"),
-                     QStringLiteral("这是素材文件《%1》的一张视觉帧。请分析画面并只返回 JSON，格式为 "
-                                    "{\"caption\":\"\",\"tags\":[],\"objects\":[],\"actions\":\"\",\"setting\":\"\","
-                                    "\"entities\":[{\"category\":\"\",\"label\":\"\",\"colors\":[],\"materials\":[],\"attributes\":[]}],"
-                                    "\"ocr_text\":\"\",\"ocr_blocks\":[]}。"
-                                    "caption 用一句中文概括，tags/objects 为中文关键词数组。"
-                                    "entities 必须逐个记录画面中可见实体；颜色、材质和属性只能写在它们实际所属的同一个实体对象内，"
-                                    "不要把不同人物或物体的属性合并，也不要推断不可见关系。"
-                                    "ocr_text 必须按画面原文抄录全部清晰可见文字，ocr_blocks 按独立文本块排列；无可辨文字时均返回空值。"
-                                    "文件名只能作为辅助上下文，不得当作画面事实或 OCR 文字。")
+                     QStringLiteral("你正在为故事板自动生成画面描述。分析第 %1 张图片，只基于可见内容，不编造剧情。"
+                                    "成年女性称为女模特，成年男性称为男模特。只返回扁平 JSON，不要 Markdown；所有字段值必须是字符串。"
+                                    "必须输出 caption、detail、scene、props、people、expression、body_action、movement_trend、camera_movement、shot_size、composition、subject_direction、gaze_direction、action_stage、spatial_relation、chronology_cue、camera_angle、visual_focus、lighting_mood、color_palette、narrative_function、transition_hint。"
+                                    "caption 45 字以内，detail 说明主体、动作、构图、光线和情绪；景别只取全景/中景/近景/特写/大全景/远景/中近景/大特写之一；"
+                                    "动作阶段优先取建立/准备/进行/反应/结果/收束/静态；不可见信息写不明显或不适用。"
+                                    "镜头功能优先取建立、推进、揭示、证明、反应、转折、结果、收束、广告产品记忆点、静态展示；transition_hint 写剪辑承接建议。")
                          .arg(fileName)}},
         QJsonObject{{QStringLiteral("type"), QStringLiteral("image_url")},
                     {QStringLiteral("image_url"),
@@ -1072,9 +1088,11 @@ std::optional<VisionFrameAnalysis> VisionApiClient::analyzeFrame(const QString &
     }
 
     const auto schema = QStringLiteral(
-        "{\"caption\":\"\",\"tags\":[],\"objects\":[],\"actions\":\"\",\"setting\":\"\","
-        "\"entities\":[{\"category\":\"\",\"label\":\"\",\"colors\":[],\"materials\":[],\"attributes\":[]}],"
-        "\"ocr_text\":\"\",\"ocr_blocks\":[]}");
+        "{\"caption\":\"\",\"detail\":\"\",\"scene\":\"\",\"props\":\"\",\"people\":\"\","
+        "\"expression\":\"\",\"body_action\":\"\",\"movement_trend\":\"\",\"camera_movement\":\"\",\"shot_size\":\"\","
+        "\"composition\":\"\",\"subject_direction\":\"\",\"gaze_direction\":\"\",\"action_stage\":\"\",\"spatial_relation\":\"\","
+        "\"chronology_cue\":\"\",\"camera_angle\":\"\",\"visual_focus\":\"\",\"lighting_mood\":\"\",\"color_palette\":\"\","
+        "\"narrative_function\":\"\",\"transition_hint\":\"\"}");
     QString parseError;
     auto payload = VisionResponseParser::parseAssistantJson(result.body, &parseError);
     auto usedRepair = false;
@@ -1149,7 +1167,7 @@ std::optional<QVector<MaterialDimensionAnalysis>> VisionApiClient::analyzeFrameD
         return std::nullopt;
     }
 
-    const auto endpoint = normalizeEndpoint(baseUrl);
+    const auto endpoint = normalizeEndpoint(baseUrl, model);
     const auto displayName = fallbackFileName(sourceFileName, imagePath);
     const auto schema = QStringLiteral("{\"dimensions\":[{\"name\":\"\",\"detail\":\"\"}]}");
     const auto maxTokens = qBound(500, requestedDimensions.size() * 220 + 260, 1200);
@@ -1245,7 +1263,7 @@ std::optional<VisionVideoSummary> VisionApiClient::analyzeImage(const QString &i
         return std::nullopt;
     }
 
-    const auto endpoint = normalizeEndpoint(baseUrl);
+    const auto endpoint = normalizeEndpoint(baseUrl, model);
     const auto displayName = fallbackFileName(fileName, imagePath);
     const QJsonArray content = {
         QJsonObject{{QStringLiteral("type"), QStringLiteral("text")},
@@ -1348,7 +1366,7 @@ std::optional<VisionVideoSummary> VisionApiClient::summarizeText(const QString &
         return std::nullopt;
     }
 
-    const auto endpoint = normalizeEndpoint(baseUrl);
+    const auto endpoint = normalizeEndpoint(baseUrl, model);
     const QJsonArray content = {
         QJsonObject{{QStringLiteral("type"), QStringLiteral("text")},
                     {QStringLiteral("text"),
@@ -1439,7 +1457,7 @@ std::optional<VisionVideoSummary> VisionApiClient::summarizeVideo(const QString 
                                                                   int *attemptCount,
                                                                   int *httpStatusCode) const
 {
-    const auto endpoint = normalizeEndpoint(baseUrl);
+    const auto endpoint = normalizeEndpoint(baseUrl, model);
     if (attemptCount) {
         *attemptCount = 0;
     }
@@ -1647,7 +1665,7 @@ std::optional<QVector<MaterialDimensionAnalysis>> VisionApiClient::analyzeDimens
         return std::nullopt;
     }
 
-    const auto endpoint = normalizeEndpoint(baseUrl);
+    const auto endpoint = normalizeEndpoint(baseUrl, model);
     const auto schema = QStringLiteral("{\"dimensions\":[{\"name\":\"\",\"detail\":\"\"}]}");
 
     auto attemptDimensions = [&](int maxContextChars,

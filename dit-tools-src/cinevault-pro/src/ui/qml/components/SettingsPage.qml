@@ -7,9 +7,8 @@ Item {
     id: root
 
     property var viewModel
-    property string draftVisionBaseUrl: ""
-    property string draftVisionApiKey: ""
-    property string draftVisionModel: ""
+    property var draftVisionApiConfigs: []
+    property string draftActiveVisionApiConfigId: ""
     property bool draftSearchAssistantEnabled: true
     property int draftSearchAssistantAutoUnloadMinutes: 30
     property bool draftQuickSearchEnabled: true
@@ -18,6 +17,10 @@ Item {
     property int draftCloseButtonBehavior: 0
     property int draftAnalysisMode: 0
     property int draftFrameInterval: 10
+    property int draftVideoFrameExtractionStrategy: 1
+    property real draftVideoFrameIntervalSeconds: 1.0
+    property real draftVideoSceneThreshold: 0.3
+    property real draftVideoMinimumSharpness: 0.08
     property int draftThumbnailFrameIndex: 3
     property int draftContactSheetFrameCount: 24
     property int draftAnalysisTimeoutSec: 60
@@ -43,9 +46,8 @@ Item {
     function reloadDrafts() {
         if (viewModel) {
             viewModel.refresh()
-            draftVisionBaseUrl = viewModel.visionBaseUrl
-            draftVisionApiKey = viewModel.visionApiKey
-            draftVisionModel = viewModel.visionModel
+            draftVisionApiConfigs = copyVisionApiConfigs(viewModel.visionApiConfigs)
+            draftActiveVisionApiConfigId = viewModel.activeVisionApiConfigId
             draftSearchAssistantEnabled = viewModel.searchAssistantEnabled
             draftSearchAssistantAutoUnloadMinutes = viewModel.searchAssistantAutoUnloadMinutes
             draftQuickSearchEnabled = viewModel.quickSearchEnabled
@@ -54,6 +56,10 @@ Item {
             draftCloseButtonBehavior = viewModel.closeButtonBehavior
             draftAnalysisMode = viewModel.analysisMode
             draftFrameInterval = viewModel.frameInterval
+            draftVideoFrameExtractionStrategy = viewModel.videoFrameExtractionStrategy
+            draftVideoFrameIntervalSeconds = viewModel.videoFrameIntervalSeconds
+            draftVideoSceneThreshold = viewModel.videoSceneThreshold
+            draftVideoMinimumSharpness = viewModel.videoMinimumSharpness
             draftThumbnailFrameIndex = viewModel.thumbnailFrameIndex
             draftContactSheetFrameCount = viewModel.contactSheetFrameCount
             draftAnalysisTimeoutSec = viewModel.analysisTimeoutSec
@@ -64,6 +70,81 @@ Item {
             draftUpdateDownloadMode = viewModel.updateDownloadMode
             draftUpdateManualProxyUrl = viewModel.updateManualProxyUrl
         }
+    }
+
+    function copyVisionApiConfigs(configs) {
+        var copies = []
+        for (var index = 0; index < configs.length; ++index) {
+            var config = configs[index]
+            copies.push({
+                id: config.id,
+                name: config.name,
+                baseUrl: config.baseUrl,
+                apiKey: config.apiKey,
+                model: config.model
+            })
+        }
+        return copies
+    }
+
+    function activeVisionApiConfig() {
+        for (var index = 0; index < draftVisionApiConfigs.length; ++index) {
+            if (draftVisionApiConfigs[index].id === draftActiveVisionApiConfigId) {
+                return draftVisionApiConfigs[index]
+            }
+        }
+        return draftVisionApiConfigs.length > 0 ? draftVisionApiConfigs[0] : null
+    }
+
+    function selectVisionApiConfig(configId) {
+        draftActiveVisionApiConfigId = configId
+    }
+
+    function saveVisionApiConfig(config) {
+        var configs = copyVisionApiConfigs(draftVisionApiConfigs)
+        var updated = false
+        for (var index = 0; index < configs.length; ++index) {
+            if (configs[index].id === config.id) {
+                configs[index] = config
+                updated = true
+                break
+            }
+        }
+        if (!updated) {
+            configs.push(config)
+            draftActiveVisionApiConfigId = config.id
+        }
+        draftVisionApiConfigs = configs
+    }
+
+    function removeVisionApiConfig(configId) {
+        if (draftVisionApiConfigs.length <= 1) {
+            return
+        }
+        var configs = []
+        for (var index = 0; index < draftVisionApiConfigs.length; ++index) {
+            if (draftVisionApiConfigs[index].id !== configId) {
+                configs.push(draftVisionApiConfigs[index])
+            }
+        }
+        draftVisionApiConfigs = configs
+        if (draftActiveVisionApiConfigId === configId) {
+            draftActiveVisionApiConfigId = configs[0].id
+        }
+    }
+
+    function nextVisionApiConfigId() {
+        return "vision-" + Date.now() + "-" + Math.floor(Math.random() * 1000000)
+    }
+
+    function openVisionApiConfigDialog(config) {
+        visionConfigDialog.configId = config ? config.id : nextVisionApiConfigId()
+        visionConfigDialog.nameValue = config ? config.name : ""
+        visionConfigDialog.baseUrlValue = config ? config.baseUrl : ""
+        visionConfigDialog.apiKeyValue = config ? config.apiKey : ""
+        visionConfigDialog.modelValue = config ? config.model : "gpt-4.1-mini"
+        visionConfigDialog.editing = config !== null
+        visionConfigDialog.open()
     }
 
     function openPage() {
@@ -173,9 +254,8 @@ Item {
                     textPixelSize: root.bodyFontSize
                     onClicked: if (viewModel) {
                         viewModel.saveAndApply(
-                            root.draftVisionBaseUrl,
-                            root.draftVisionApiKey,
-                            root.draftVisionModel,
+                            root.draftVisionApiConfigs,
+                            root.draftActiveVisionApiConfigId,
                             root.draftSearchAssistantEnabled,
                             root.draftSearchAssistantAutoUnloadMinutes,
                             root.draftQuickSearchEnabled,
@@ -184,6 +264,10 @@ Item {
                             root.draftCloseButtonBehavior,
                             root.draftAnalysisMode,
                             root.draftFrameInterval,
+                            root.draftVideoFrameExtractionStrategy,
+                            root.draftVideoFrameIntervalSeconds,
+                            root.draftVideoSceneThreshold,
+                            root.draftVideoMinimumSharpness,
                             root.draftThumbnailFrameIndex,
                             root.draftContactSheetFrameCount,
                             root.draftAnalysisTimeoutSec,
@@ -574,6 +658,162 @@ Item {
                             font.weight: Font.DemiBold
                         }
 
+                        Text {
+                            Layout.fillWidth: true
+                            text: "点击卡片设为默认使用；编辑后点击“保存并应用”才会切换解析服务。"
+                            color: Theme.muted
+                            font.pixelSize: 12
+                            wrapMode: Text.Wrap
+                        }
+
+                        Flow {
+                            id: visionConfigFlow
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: childrenRect.height
+                            spacing: 12
+
+                            Repeater {
+                                model: root.draftVisionApiConfigs
+
+                                delegate: Rectangle {
+                                    id: visionConfigCard
+                                    property var config: modelData
+                                    property bool active: config.id === root.draftActiveVisionApiConfigId
+                                    width: Math.min(300, Math.max(220, (visionConfigFlow.width - visionConfigFlow.spacing) / 2))
+                                    height: 154
+                                    radius: 12
+                                    color: active ? Qt.rgba(0.22, 0.48, 0.92, 0.16) : Theme.panel
+                                    border.width: active ? 2 : 1
+                                    border.color: active ? Theme.blue : Theme.line
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        onClicked: root.selectVisionApiConfig(visionConfigCard.config.id)
+                                    }
+
+                                    ColumnLayout {
+                                        anchors.fill: parent
+                                        anchors.margins: 14
+                                        spacing: 6
+
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 8
+
+                                            Text {
+                                                Layout.fillWidth: true
+                                                text: visionConfigCard.config.name
+                                                color: Theme.text
+                                                font.pixelSize: 15
+                                                font.weight: Font.DemiBold
+                                                elide: Text.ElideRight
+                                            }
+
+                                            ActionButton {
+                                                Layout.preferredWidth: 54
+                                                Layout.preferredHeight: 30
+                                                text: "编辑"
+                                                textPixelSize: 12
+                                                onClicked: root.openVisionApiConfigDialog(visionConfigCard.config)
+                                            }
+
+                                            ActionButton {
+                                                visible: root.draftVisionApiConfigs.length > 1
+                                                Layout.preferredWidth: visible ? 54 : 0
+                                                Layout.preferredHeight: 30
+                                                text: "删除"
+                                                textPixelSize: 12
+                                                onClicked: root.removeVisionApiConfig(visionConfigCard.config.id)
+                                            }
+                                        }
+
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: visionConfigCard.config.model.length > 0
+                                                ? visionConfigCard.config.model : "未设置模型"
+                                            color: visionConfigCard.active ? Theme.blue : Theme.muted
+                                            font.pixelSize: 13
+                                            elide: Text.ElideRight
+                                        }
+
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: visionConfigCard.config.baseUrl.length > 0
+                                                ? visionConfigCard.config.baseUrl
+                                                      .replace("https://", "")
+                                                      .replace("http://", "")
+                                                : "未设置接口"
+                                            color: Theme.weak
+                                            font.pixelSize: 11
+                                            elide: Text.ElideRight
+                                        }
+
+                                        Item { Layout.fillHeight: true }
+
+                                        Rectangle {
+                                            visible: visionConfigCard.active
+                                            Layout.preferredWidth: currentVisionConfigLabel.implicitWidth + 14
+                                            Layout.preferredHeight: 24
+                                            radius: 12
+                                            color: Qt.rgba(0.25, 0.55, 1.0, 0.18)
+
+                                            Text {
+                                                id: currentVisionConfigLabel
+                                                anchors.centerIn: parent
+                                                text: "当前使用"
+                                                color: Theme.blue
+                                                font.pixelSize: 11
+                                                font.weight: Font.DemiBold
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                width: Math.min(300, Math.max(220, (visionConfigFlow.width - visionConfigFlow.spacing) / 2))
+                                height: 154
+                                radius: 12
+                                color: Qt.rgba(0, 0, 0, 0)
+                                border.width: 1
+                                border.color: Theme.line
+
+                                Column {
+                                    anchors.centerIn: parent
+                                    spacing: 8
+
+                                    Text {
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        text: "+"
+                                        color: Theme.blue
+                                        font.pixelSize: 30
+                                    }
+
+                                    Text {
+                                        text: "添加 API 配置"
+                                        color: Theme.blue
+                                        font.pixelSize: 13
+                                    }
+                                }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.openVisionApiConfigDialog(null)
+                                }
+                            }
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            visible: root.activeVisionApiConfig()
+                                && root.activeVisionApiConfig().model.trim().toLowerCase() === "minimax-m3"
+                            text: "MiniMax-M3 将自动使用 MiniMax 原生接口，并对视频帧解析启用最多 200 路并发请求；其他模型不受影响。"
+                            color: Theme.muted
+                            font.pixelSize: 12
+                            wrapMode: Text.Wrap
+                        }
+
                         GridLayout {
                             columns: 2
                             columnSpacing: 14
@@ -583,59 +823,7 @@ Item {
                             Text {
                                 Layout.preferredWidth: root.formLabelWidth
                                 Layout.alignment: Qt.AlignVCenter
-                                text: "Base URL"
-                                color: Theme.muted
-                                font.pixelSize: root.bodyFontSize
-                            }
-
-                            ThemedTextField {
-                                Layout.fillWidth: true
-                                Layout.preferredHeight: root.controlHeight
-                                font.pixelSize: root.bodyFontSize
-                                text: root.draftVisionBaseUrl
-                                placeholderText: "https://api.openai.com/v1"
-                                onTextEdited: root.draftVisionBaseUrl = text
-                            }
-
-                            Text {
-                                Layout.preferredWidth: root.formLabelWidth
-                                Layout.alignment: Qt.AlignVCenter
-                                text: "API Key"
-                                color: Theme.muted
-                                font.pixelSize: root.bodyFontSize
-                            }
-
-                            ThemedTextField {
-                                Layout.fillWidth: true
-                                Layout.preferredHeight: root.controlHeight
-                                font.pixelSize: root.bodyFontSize
-                                text: root.draftVisionApiKey
-                                echoMode: TextInput.Password
-                                placeholderText: "输入视觉接口密钥"
-                                onTextEdited: root.draftVisionApiKey = text
-                            }
-
-                            Text {
-                                Layout.preferredWidth: root.formLabelWidth
-                                Layout.alignment: Qt.AlignVCenter
-                                text: "模型名"
-                                color: Theme.muted
-                                font.pixelSize: root.bodyFontSize
-                            }
-
-                            ThemedTextField {
-                                Layout.fillWidth: true
-                                Layout.preferredHeight: root.controlHeight
-                                font.pixelSize: root.bodyFontSize
-                                text: root.draftVisionModel
-                                placeholderText: "gpt-4.1-mini"
-                                onTextEdited: root.draftVisionModel = text
-                            }
-
-                            Text {
-                                Layout.preferredWidth: root.formLabelWidth
-                                Layout.alignment: Qt.AlignVCenter
-                                text: "抽帧模式"
+                                text: "抽帧策略"
                                 color: Theme.muted
                                 font.pixelSize: root.bodyFontSize
                             }
@@ -645,33 +833,78 @@ Item {
                                 Layout.preferredHeight: root.controlHeight
                                 font.pixelSize: root.bodyFontSize
                                 model: [
-                                    { label: "每10帧抽1帧", value: 0 },
-                                    { label: "逐帧解析", value: 1 },
-                                    { label: "自定义间隔", value: 2 }
+                                    { label: "逐帧", value: 0 },
+                                    { label: "场景变化 + 间隔补帧", value: 1 },
+                                    { label: "固定间隔", value: 2 },
+                                    { label: "高保真采样", value: 3 }
                                 ]
                                 textRole: "label"
-                                currentIndex: root.draftAnalysisMode === 1 ? 1 : (root.draftAnalysisMode === 2 ? 2 : 0)
-                                onActivated: root.draftAnalysisMode = model[index].value
+                                currentIndex: root.draftVideoFrameExtractionStrategy
+                                onActivated: root.draftVideoFrameExtractionStrategy = model[index].value
                             }
 
                             Text {
-                                visible: root.draftAnalysisMode === 2
+                                visible: root.draftVideoFrameExtractionStrategy !== 0
                                 Layout.preferredWidth: root.formLabelWidth
                                 Layout.alignment: Qt.AlignVCenter
-                                text: "抽帧间隔"
+                                text: "抽帧间隔（秒）"
                                 color: Theme.muted
                                 font.pixelSize: root.bodyFontSize
                             }
 
                             ThemedSpinBox {
-                                visible: root.draftAnalysisMode === 2
+                                visible: root.draftVideoFrameExtractionStrategy !== 0
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: root.controlHeight
                                 font.pixelSize: root.bodyFontSize
                                 from: 1
-                                to: 240
-                                value: root.draftFrameInterval
-                                onValueModified: root.draftFrameInterval = value
+                                to: 2400
+                                value: Math.round(root.draftVideoFrameIntervalSeconds * 10)
+                                textFromValue: function(value, locale) { return (value / 10).toFixed(1) }
+                                valueFromText: function(text, locale) { return Math.round(Number.fromLocaleString(locale, text) * 10) }
+                                onValueModified: root.draftVideoFrameIntervalSeconds = value / 10
+                            }
+
+                            Text {
+                                visible: root.draftVideoFrameExtractionStrategy === 1
+                                Layout.preferredWidth: root.formLabelWidth
+                                Layout.alignment: Qt.AlignVCenter
+                                text: "场景阈值（0.05–0.95）"
+                                color: Theme.muted
+                                font.pixelSize: root.bodyFontSize
+                            }
+
+                            ThemedSpinBox {
+                                visible: root.draftVideoFrameExtractionStrategy === 1
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: root.controlHeight
+                                font.pixelSize: root.bodyFontSize
+                                from: 5
+                                to: 95
+                                value: Math.round(root.draftVideoSceneThreshold * 100)
+                                textFromValue: function(value, locale) { return (value / 100).toFixed(2) }
+                                valueFromText: function(text, locale) { return Math.round(Number.fromLocaleString(locale, text) * 100) }
+                                onValueModified: root.draftVideoSceneThreshold = value / 100
+                            }
+
+                            Text {
+                                Layout.preferredWidth: root.formLabelWidth
+                                Layout.alignment: Qt.AlignVCenter
+                                text: "最低清晰度（0–1）"
+                                color: Theme.muted
+                                font.pixelSize: root.bodyFontSize
+                            }
+
+                            ThemedSpinBox {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: root.controlHeight
+                                font.pixelSize: root.bodyFontSize
+                                from: 0
+                                to: 100
+                                value: Math.round(root.draftVideoMinimumSharpness * 100)
+                                textFromValue: function(value, locale) { return (value / 100).toFixed(2) }
+                                valueFromText: function(text, locale) { return Math.round(Number.fromLocaleString(locale, text) * 100) }
+                                onValueModified: root.draftVideoMinimumSharpness = value / 100
                             }
 
                             Text {
@@ -925,11 +1158,10 @@ Item {
                                 primary: true
                                 textPixelSize: root.bodyFontSize
                                 onClicked: if (viewModel) {
-                                    viewModel.testConnectionWith(
-                                        root.draftVisionBaseUrl,
-                                        root.draftVisionApiKey,
-                                        root.draftVisionModel,
-                                        root.draftAnalysisTimeoutSec)
+                                    var config = root.activeVisionApiConfig()
+                                    if (config) {
+                                        viewModel.testVisionApiConfig(config, root.draftAnalysisTimeoutSec)
+                                    }
                                 }
                             }
 
@@ -1062,6 +1294,169 @@ Item {
                                 onClicked: if (viewModel) viewModel.refreshCacheInfo()
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    Dialog {
+        id: visionConfigDialog
+        modal: true
+        width: Math.max(1, Math.min(560, root.width - 24))
+        x: Math.max(0, Math.round((root.width - width) / 2))
+        y: Math.max(0, Math.round((root.height - height) / 2))
+        padding: 22
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+        property bool editing: false
+        property bool apiKeyVisible: false
+        property string configId: ""
+        property string nameValue: ""
+        property string baseUrlValue: ""
+        property string apiKeyValue: ""
+        property string modelValue: "gpt-4.1-mini"
+
+        onOpened: {
+            apiKeyVisible = false
+            Qt.callLater(function() { visionConfigNameField.forceActiveFocus() })
+        }
+
+        background: Rectangle {
+            radius: 18
+            color: Theme.panel2
+            border.width: 1
+            border.color: Theme.line
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 12
+
+            Text {
+                Layout.fillWidth: true
+                text: visionConfigDialog.editing ? "编辑 API 配置" : "添加 API 配置"
+                color: Theme.text
+                font.pixelSize: 20
+                font.weight: Font.DemiBold
+            }
+
+            Text {
+                Layout.fillWidth: true
+                text: "每张卡片保存一组视觉解析接口。选择卡片后，保存并应用即可作为默认接口。"
+                color: Theme.muted
+                font.pixelSize: 12
+                wrapMode: Text.Wrap
+            }
+
+            Text {
+                text: "配置名称"
+                color: Theme.muted
+                font.pixelSize: 13
+            }
+
+            ThemedTextField {
+                id: visionConfigNameField
+                Layout.fillWidth: true
+                Layout.preferredHeight: root.controlHeight
+                text: visionConfigDialog.nameValue
+                placeholderText: "例如：主力 GPT-4.1"
+                onTextEdited: visionConfigDialog.nameValue = text
+            }
+
+            Text {
+                text: "Base URL"
+                color: Theme.muted
+                font.pixelSize: 13
+            }
+
+            ThemedTextField {
+                Layout.fillWidth: true
+                Layout.preferredHeight: root.controlHeight
+                text: visionConfigDialog.baseUrlValue
+                placeholderText: "https://api.openai.com/v1"
+                onTextEdited: visionConfigDialog.baseUrlValue = text
+            }
+
+            Text {
+                text: "API Key"
+                color: Theme.muted
+                font.pixelSize: 13
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 10
+
+                ThemedTextField {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: root.controlHeight
+                    text: visionConfigDialog.apiKeyValue
+                    echoMode: visionConfigDialog.apiKeyVisible ? TextInput.Normal : TextInput.Password
+                    placeholderText: "输入视觉接口密钥"
+                    onTextEdited: visionConfigDialog.apiKeyValue = text
+                }
+
+                ActionButton {
+                    Layout.preferredWidth: 72
+                    Layout.preferredHeight: root.controlHeight
+                    text: visionConfigDialog.apiKeyVisible ? "隐藏" : "显示"
+                    textPixelSize: 12
+                    onClicked: visionConfigDialog.apiKeyVisible = !visionConfigDialog.apiKeyVisible
+                }
+            }
+
+            Text {
+                text: "模型名"
+                color: Theme.muted
+                font.pixelSize: 13
+            }
+
+            ThemedTextField {
+                Layout.fillWidth: true
+                Layout.preferredHeight: root.controlHeight
+                text: visionConfigDialog.modelValue
+                placeholderText: "gpt-4.1-mini"
+                onTextEdited: visionConfigDialog.modelValue = text
+            }
+
+            Text {
+                Layout.fillWidth: true
+                visible: visionConfigDialog.modelValue.trim().toLowerCase() === "minimax-m3"
+                text: "MiniMax-M3 会自动使用 MiniMax 原生接口，并启用最多 200 路视频帧并发请求。"
+                color: Theme.muted
+                font.pixelSize: 12
+                wrapMode: Text.Wrap
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 10
+
+                Item { Layout.fillWidth: true }
+
+                ActionButton {
+                    Layout.preferredWidth: 78
+                    Layout.preferredHeight: root.controlHeight
+                    text: "取消"
+                    onClicked: visionConfigDialog.close()
+                }
+
+                ActionButton {
+                    Layout.preferredWidth: 104
+                    Layout.preferredHeight: root.controlHeight
+                    text: "保存卡片"
+                    primary: true
+                    onClicked: {
+                        root.saveVisionApiConfig({
+                            id: visionConfigDialog.configId,
+                            name: visionConfigDialog.nameValue.trim().length > 0
+                                ? visionConfigDialog.nameValue.trim() : "未命名配置",
+                            baseUrl: visionConfigDialog.baseUrlValue.trim(),
+                            apiKey: visionConfigDialog.apiKeyValue.trim(),
+                            model: visionConfigDialog.modelValue.trim().length > 0
+                                ? visionConfigDialog.modelValue.trim() : "gpt-4.1-mini"
+                        })
+                        visionConfigDialog.close()
                     }
                 }
             }

@@ -18,6 +18,17 @@ struct ReportProjectInfo {
     QString exportTime;
 };
 
+struct ReportSectionOptions {
+    bool cover = true;
+    bool summary = true;
+    bool sourceOverview = true;
+    bool formatDistribution = true;
+    bool thumbnailIndex = true;
+    bool videoMetadata = true;
+    bool audioMetadata = true;
+    bool folderTree = true;
+};
+
 struct ReportSourceSummary {
     qint64 id = 0;
     QString name;
@@ -72,6 +83,7 @@ struct ReportTreeLine {
 
 struct ReportDocument {
     ReportProjectInfo project;
+    ReportSectionOptions sections;
     QVector<ReportSourceSummary> sources;
     QVector<ReportAssetRow> assets;
     QVector<ReportTreeLine> treeLines;

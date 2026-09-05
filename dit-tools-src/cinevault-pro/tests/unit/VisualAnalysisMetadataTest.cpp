@@ -54,6 +54,29 @@ private slots:
         QCOMPARE(twentyFiveFpsSample.constLast(), 1462);
     }
 
+    void samplingPolicy_tracksEveryExtractionInput()
+    {
+        const auto baseline = VisualAnalysisMetadata::samplingPolicy(
+            VideoFrameExtractionStrategy::SceneAndInterval, 1.0, 0.3, 0.01, 1920, 1080);
+        QVERIFY(VisualAnalysisMetadata::isCurrentSamplingPolicy(baseline));
+        QVERIFY(!VisualAnalysisMetadata::isCurrentSamplingPolicy(
+            QStringLiteral("filmstoryboard_candidate_sampling_v1")));
+        QVERIFY(baseline != VisualAnalysisMetadata::samplingPolicy(
+            VideoFrameExtractionStrategy::IntervalOnly, 1.0, 0.3, 0.01, 1920, 1080));
+        QVERIFY(baseline != VisualAnalysisMetadata::samplingPolicy(
+            VideoFrameExtractionStrategy::SceneAndInterval, 2.0, 0.3, 0.01, 1920, 1080));
+        QVERIFY(baseline != VisualAnalysisMetadata::samplingPolicy(
+            VideoFrameExtractionStrategy::SceneAndInterval, 1.0, 0.4, 0.01, 1920, 1080));
+        QVERIFY(baseline != VisualAnalysisMetadata::samplingPolicy(
+            VideoFrameExtractionStrategy::SceneAndInterval, 1.0, 0.3, 0.02, 1920, 1080));
+        QVERIFY(baseline != VisualAnalysisMetadata::samplingPolicy(
+            VideoFrameExtractionStrategy::SceneAndInterval, 1.0, 0.3, 0.01, 1280, 720));
+        QCOMPARE(VisualAnalysisMetadata::samplingPolicy(
+                     VideoFrameExtractionStrategy::IntervalOnly, 1.0, 0.3, 0.01, 1920, 1080),
+                 VisualAnalysisMetadata::samplingPolicy(
+                     VideoFrameExtractionStrategy::IntervalOnly, 1.0, 0.9, 0.01, 1920, 1080));
+    }
+
     void plannedFrameNumbers_mergesContactSheetCoverageWithRuleFrames()
     {
         QCOMPARE(VisualAnalysisMetadata::contactSheetFrameNumbers(0, 24), QVector<int>());

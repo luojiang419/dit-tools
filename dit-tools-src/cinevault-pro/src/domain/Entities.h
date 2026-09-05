@@ -142,6 +142,10 @@ struct FrameExtractionRequest {
     int maxHeight = 1080;
     QVector<int> requestedFrameNumbers;
     bool preserveExistingFrames = false;
+    VideoFrameExtractionStrategy strategy = VideoFrameExtractionStrategy::SceneAndInterval;
+    double intervalSeconds = 1.0;
+    double sceneThreshold = 0.3;
+    double minimumSharpness = 0.01;
 };
 
 struct FrameExtractionResult {

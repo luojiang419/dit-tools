@@ -49,6 +49,63 @@ Rectangle {
         }
     }
 
+    component ReportSectionOption: CheckBox {
+        id: control
+
+        property string section
+
+        Layout.fillWidth: true
+        Layout.preferredHeight: 34
+        leftPadding: 8
+        rightPadding: 8
+        spacing: 10
+        checked: viewModel && viewModel.reportSectionEnabled(section)
+        enabled: viewModel && !viewModel.isPreviewing && !viewModel.isExporting
+
+        onToggled: if (viewModel) {
+            viewModel.setReportSectionEnabled(section, checked)
+            root.scheduleAutoPreview()
+        }
+
+        background: Rectangle {
+            radius: 6
+            color: control.checked ? Theme.selectedBg : Theme.inputBg
+            border.width: 1
+            border.color: control.checked ? Theme.selectedLine : Theme.line
+            opacity: control.enabled ? 1.0 : 0.52
+        }
+
+        indicator: Rectangle {
+            implicitWidth: 18
+            implicitHeight: 18
+            x: control.leftPadding
+            y: (control.height - height) / 2
+            radius: 4
+            color: control.checked ? Theme.primaryBg : Theme.panel2
+            border.width: 1
+            border.color: control.checked ? Theme.primaryHover : Theme.line
+
+            Text {
+                anchors.centerIn: parent
+                text: control.checked ? "✓" : ""
+                color: Theme.primaryText
+                font.pixelSize: 13
+                font.weight: Font.Black
+            }
+        }
+
+        contentItem: Text {
+            leftPadding: control.leftPadding + control.indicator.width + control.spacing
+            rightPadding: control.rightPadding
+            text: control.text
+            color: control.enabled ? Theme.text : Theme.weak
+            font.pixelSize: 13
+            font.weight: Font.DemiBold
+            verticalAlignment: Text.AlignVCenter
+            elide: Text.ElideRight
+        }
+    }
+
     Component.onCompleted: {
         if (viewModel) {
             timeField.text = viewModel.defaultShootTime
@@ -256,32 +313,65 @@ Rectangle {
 
                     Rectangle {
                         Layout.fillWidth: true
-                        Layout.preferredHeight: 120
+                        Layout.preferredHeight: reportOptionsColumn.implicitHeight + 28
                         radius: 8
                         color: Theme.panel
                         border.width: 1
                         border.color: Theme.line
 
                         ColumnLayout {
+                            id: reportOptionsColumn
                             anchors.fill: parent
                             anchors.margins: 12
-                            spacing: 8
+                            spacing: 4
 
                             Text {
                                 Layout.fillWidth: true
-                                text: "PDF 内容"
+                                text: "PDF 内容（勾选后导出）"
                                 color: Theme.text
                                 font.pixelSize: 15
                                 font.weight: Font.Black
                                 elide: Text.ElideRight
                             }
 
-                            Text {
-                                Layout.fillWidth: true
-                                text: "封面/摘要、项目信息表头、素材统计、视频帧缩略图、视频/音频元数据、文件夹树状图。"
-                                color: Theme.muted
-                                font.pixelSize: 12
-                                wrapMode: Text.Wrap
+                            ReportSectionOption {
+                                text: "封面与项目信息"
+                                section: "cover"
+                            }
+
+                            ReportSectionOption {
+                                text: "项目摘要"
+                                section: "summary"
+                            }
+
+                            ReportSectionOption {
+                                text: "素材源与扫描概览"
+                                section: "sourceOverview"
+                            }
+
+                            ReportSectionOption {
+                                text: "格式分布"
+                                section: "formatDistribution"
+                            }
+
+                            ReportSectionOption {
+                                text: "视频帧缩略图索引"
+                                section: "thumbnailIndex"
+                            }
+
+                            ReportSectionOption {
+                                text: "视频元数据明细"
+                                section: "videoMetadata"
+                            }
+
+                            ReportSectionOption {
+                                text: "音频元数据明细"
+                                section: "audioMetadata"
+                            }
+
+                            ReportSectionOption {
+                                text: "文件夹树状图"
+                                section: "folderTree"
                             }
                         }
                     }

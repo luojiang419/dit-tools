@@ -120,6 +120,33 @@ QStringList VisualAnalysisMetadata::entityFactSearchTerms(const QVector<VisionEn
     return terms;
 }
 
+QString VisualAnalysisMetadata::samplingPolicy(VideoFrameExtractionStrategy strategy,
+                                               double intervalSeconds,
+                                               double sceneThreshold,
+                                               double minimumSharpness,
+                                               int maxWidth,
+                                               int maxHeight)
+{
+    const auto effectiveInterval = strategy == VideoFrameExtractionStrategy::HighFidelity
+        ? qBound(0.1, intervalSeconds, 0.25)
+        : qBound(0.1, intervalSeconds, 240.0);
+    const auto sceneValue = strategy == VideoFrameExtractionStrategy::SceneAndInterval
+        ? QString::number(qBound(0.05, sceneThreshold, 0.95), 'f', 3)
+        : QStringLiteral("na");
+    return QStringLiteral("filmstoryboard_candidate_sampling_v2|strategy=%1|interval=%2|scene=%3|sharpness=%4|max=%5x%6")
+        .arg(static_cast<int>(strategy))
+        .arg(effectiveInterval, 0, 'f', 3)
+        .arg(sceneValue)
+        .arg(qBound(0.0, minimumSharpness, 1.0), 0, 'f', 4)
+        .arg(qMax(1, maxWidth))
+        .arg(qMax(1, maxHeight));
+}
+
+bool VisualAnalysisMetadata::isCurrentSamplingPolicy(const QString &policy)
+{
+    return policy.startsWith(QStringLiteral("filmstoryboard_candidate_sampling_v2|"));
+}
+
 int VisualAnalysisMetadata::fixedFrameInterval(AnalysisMode mode, int configuredInterval)
 {
     if (mode == AnalysisMode::EveryFrame) {

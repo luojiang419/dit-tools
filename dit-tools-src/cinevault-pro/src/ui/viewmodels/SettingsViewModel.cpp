@@ -64,6 +64,35 @@ bool containsDimension(const QStringList &dimensions, const QString &name)
     }
     return false;
 }
+
+QVariantList toVariantList(const QList<VisionApiConfig> &configs)
+{
+    QVariantList values;
+    values.reserve(configs.size());
+    for (const auto &config : configs) {
+        values.append(QVariantMap{{QStringLiteral("id"), config.id},
+                                  {QStringLiteral("name"), config.name},
+                                  {QStringLiteral("baseUrl"), config.baseUrl},
+                                  {QStringLiteral("apiKey"), config.apiKey},
+                                  {QStringLiteral("model"), config.model}});
+    }
+    return values;
+}
+
+QList<VisionApiConfig> toVisionApiConfigs(const QVariantList &values)
+{
+    QList<VisionApiConfig> configs;
+    configs.reserve(values.size());
+    for (const auto &value : values) {
+        const auto map = value.toMap();
+        configs.append({map.value(QStringLiteral("id")).toString(),
+                        map.value(QStringLiteral("name")).toString(),
+                        map.value(QStringLiteral("baseUrl")).toString(),
+                        map.value(QStringLiteral("apiKey")).toString(),
+                        map.value(QStringLiteral("model")).toString()});
+    }
+    return configs;
+}
 }
 
 SettingsViewModel::~SettingsViewModel()
@@ -366,6 +395,77 @@ void SettingsViewModel::setAnalysisTimeoutSec(int value)
     emit settingsChanged();
 }
 
+int SettingsViewModel::videoFrameExtractionStrategy() const
+{
+    return m_settings ? static_cast<int>(m_settings->videoFrameExtractionStrategy())
+                      : static_cast<int>(VideoFrameExtractionStrategy::SceneAndInterval);
+}
+
+void SettingsViewModel::setVideoFrameExtractionStrategy(int value)
+{
+    if (!m_settings || videoFrameExtractionStrategy() == value) {
+        return;
+    }
+    if (value < static_cast<int>(VideoFrameExtractionStrategy::PerFrame)
+        || value > static_cast<int>(VideoFrameExtractionStrategy::HighFidelity)) {
+        value = static_cast<int>(VideoFrameExtractionStrategy::SceneAndInterval);
+    }
+    m_settings->setVideoFrameExtractionStrategy(static_cast<VideoFrameExtractionStrategy>(value));
+    emit settingsChanged();
+}
+
+double SettingsViewModel::videoFrameIntervalSeconds() const
+{
+    return m_settings ? m_settings->videoFrameIntervalSeconds() : 1.0;
+}
+
+void SettingsViewModel::setVideoFrameIntervalSeconds(double value)
+{
+    if (!m_settings || qFuzzyCompare(videoFrameIntervalSeconds(), value)) {
+        return;
+    }
+    m_settings->setVideoFrameIntervalSeconds(value);
+    emit settingsChanged();
+}
+
+double SettingsViewModel::videoSceneThreshold() const
+{
+    return m_settings ? m_settings->videoSceneThreshold() : 0.3;
+}
+
+void SettingsViewModel::setVideoSceneThreshold(double value)
+{
+    if (!m_settings || qFuzzyCompare(videoSceneThreshold(), value)) {
+        return;
+    }
+    m_settings->setVideoSceneThreshold(value);
+    emit settingsChanged();
+}
+
+double SettingsViewModel::videoMinimumSharpness() const
+{
+    return m_settings ? m_settings->videoMinimumSharpness() : 0.01;
+}
+
+void SettingsViewModel::setVideoMinimumSharpness(double value)
+{
+    if (!m_settings || qFuzzyCompare(videoMinimumSharpness(), value)) {
+        return;
+    }
+    m_settings->setVideoMinimumSharpness(value);
+    emit settingsChanged();
+}
+
+QVariantList SettingsViewModel::visionApiConfigs() const
+{
+    return m_settings ? toVariantList(m_settings->visionApiConfigs()) : QVariantList{};
+}
+
+QString SettingsViewModel::activeVisionApiConfigId() const
+{
+    return m_settings ? m_settings->activeVisionApiConfigId() : QString();
+}
+
 bool SettingsViewModel::documentAutoAnalysisEnabled() const
 {
     return m_settings && m_settings->documentAutoAnalysisEnabled();
@@ -607,14 +707,22 @@ void SettingsViewModel::testConnectionWith(const QString &visionBaseUrl,
     m_futures.addFuture(future);
 }
 
+void SettingsViewModel::testVisionApiConfig(const QVariantMap &config,
+                                            int analysisTimeoutSec)
+{
+    testConnectionWith(config.value(QStringLiteral("baseUrl")).toString(),
+                       config.value(QStringLiteral("apiKey")).toString(),
+                       config.value(QStringLiteral("model")).toString(),
+                       analysisTimeoutSec);
+}
+
 QString SettingsViewModel::shortcutFromKeyEvent(int key, int modifiers) const
 {
     return QuickSearchController::shortcutFromKeyEvent(key, modifiers);
 }
 
-void SettingsViewModel::saveAndApply(const QString &visionBaseUrl,
-                                     const QString &visionApiKey,
-                                     const QString &visionModel,
+void SettingsViewModel::saveAndApply(const QVariantList &visionApiConfigs,
+                                     const QString &activeVisionApiConfigId,
                                      bool searchAssistantEnabled,
                                      int searchAssistantAutoUnloadMinutes,
                                      bool quickSearchEnabled,
@@ -623,6 +731,10 @@ void SettingsViewModel::saveAndApply(const QString &visionBaseUrl,
                                      int closeButtonBehavior,
                                      int analysisMode,
                                      int frameInterval,
+                                     int videoFrameExtractionStrategy,
+                                     double videoFrameIntervalSeconds,
+                                     double videoSceneThreshold,
+                                     double videoMinimumSharpness,
                                      int thumbnailFrameIndex,
                                      int contactSheetFrameCount,
                                      int analysisTimeoutSec,
@@ -663,9 +775,8 @@ void SettingsViewModel::saveAndApply(const QString &visionBaseUrl,
         return;
     }
 
-    m_settings->setVisionBaseUrl(visionBaseUrl);
-    m_settings->setVisionApiKey(visionApiKey);
-    m_settings->setVisionModel(visionModel);
+    m_settings->setVisionApiConfigs(toVisionApiConfigs(visionApiConfigs),
+                                    activeVisionApiConfigId);
     m_settings->setSearchAssistantEnabled(searchAssistantEnabled);
     m_settings->setSearchAssistantAutoUnloadMinutes(searchAssistantAutoUnloadMinutes);
     m_settings->setQuickSearchEnabled(quickSearchEnabled);
@@ -680,6 +791,14 @@ void SettingsViewModel::saveAndApply(const QString &visionBaseUrl,
     }
     m_settings->setAnalysisMode(resolvedMode);
     m_settings->setFrameInterval(resolvedMode == AnalysisMode::Every10Frames ? 10 : frameInterval);
+    const auto strategy = (videoFrameExtractionStrategy < static_cast<int>(VideoFrameExtractionStrategy::PerFrame)
+                           || videoFrameExtractionStrategy > static_cast<int>(VideoFrameExtractionStrategy::HighFidelity))
+        ? VideoFrameExtractionStrategy::SceneAndInterval
+        : static_cast<VideoFrameExtractionStrategy>(videoFrameExtractionStrategy);
+    m_settings->setVideoFrameExtractionStrategy(strategy);
+    m_settings->setVideoFrameIntervalSeconds(videoFrameIntervalSeconds);
+    m_settings->setVideoSceneThreshold(videoSceneThreshold);
+    m_settings->setVideoMinimumSharpness(videoMinimumSharpness);
     m_settings->setThumbnailFrameIndex(thumbnailFrameIndex);
     m_settings->setContactSheetFrameCount(contactSheetFrameCount);
     m_settings->setAnalysisTimeoutSec(analysisTimeoutSec);

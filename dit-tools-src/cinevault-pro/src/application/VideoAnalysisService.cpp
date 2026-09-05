@@ -26,19 +26,17 @@
 #include <QSqlQuery>
 #include <QSet>
 #include <QThread>
+#include <QThreadPool>
+#include <QUuid>
 
 namespace {
 constexpr int kMaxFrameRetryCount = 3;
+constexpr int kAnalysisFrameMaxWidth = 1920;
+constexpr int kAnalysisFrameMaxHeight = 1080;
 
 QString structuredPromptVersion()
 {
     const auto value = cinevault::searchconfig::kStructuredVisionPromptVersion;
-    return QString::fromLatin1(value.data(), static_cast<qsizetype>(value.size()));
-}
-
-QString fixedSamplingPolicy()
-{
-    const auto value = cinevault::searchconfig::kSamplingPolicy;
     return QString::fromLatin1(value.data(), static_cast<qsizetype>(value.size()));
 }
 
@@ -51,10 +49,31 @@ struct AnalysisConfig {
     QString baseUrl;
     QString apiKey;
     QString model;
-    AnalysisMode mode = AnalysisMode::Every10Frames;
-    int frameInterval = 10;
+    VideoFrameExtractionStrategy extractionStrategy = VideoFrameExtractionStrategy::SceneAndInterval;
+    double frameIntervalSeconds = 1.0;
+    double sceneThreshold = 0.3;
+    double minimumSharpness = 0.01;
     int contactSheetFrameCount = 24;
     int timeoutSec = 60;
+};
+
+QString samplingPolicy(const AnalysisConfig &config)
+{
+    return VisualAnalysisMetadata::samplingPolicy(config.extractionStrategy,
+                                                   config.frameIntervalSeconds,
+                                                   config.sceneThreshold,
+                                                   config.minimumSharpness,
+                                                   kAnalysisFrameMaxWidth,
+                                                   kAnalysisFrameMaxHeight);
+}
+
+struct FrameRequestResult {
+    int frameIndex = -1;
+    std::optional<VisionFrameAnalysis> analysis;
+    QString errorMessage;
+    int httpStatusCode = 0;
+    int attempt = 0;
+    bool wasAttempted = false;
 };
 
 struct DimensionFrameAnalysisRecord {
@@ -958,7 +977,7 @@ bool persistVisualAnalysisPlan(QSqlDatabase &db,
         "planned_frame_count = excluded.planned_frame_count, asset_size_bytes = excluded.asset_size_bytes, "
         "asset_modified_at = excluded.asset_modified_at, updated_at = excluded.updated_at"));
     query.addBindValue(plan.videoKey);
-    query.addBindValue(fixedSamplingPolicy());
+    query.addBindValue(plan.samplingPolicy);
     query.addBindValue(qMax(1, plan.frameInterval));
     query.addBindValue(plan.structuredProfileVersion);
     query.addBindValue(qMax(0, plan.sourceFrameCount));
@@ -1044,6 +1063,7 @@ bool hasIncompleteVisualFrames(QSqlDatabase &db,
                                int contactSheetFrameCount,
                                QString *errorMessage)
 {
+    Q_UNUSED(contactSheetFrameCount)
     if (errorMessage) {
         errorMessage->clear();
     }
@@ -1053,7 +1073,7 @@ bool hasIncompleteVisualFrames(QSqlDatabase &db,
         return true;
     }
     if (!found
-        || plan.samplingPolicy != fixedSamplingPolicy()
+        || !VisualAnalysisMetadata::isCurrentSamplingPolicy(plan.samplingPolicy)
         || plan.structuredProfileVersion < cinevault::searchconfig::kStructuredVisionProfileVersion
         || plan.sourceFrameCount <= 0) {
         return true;
@@ -1062,13 +1082,11 @@ bool hasIncompleteVisualFrames(QSqlDatabase &db,
     if (errorMessage && !errorMessage->trimmed().isEmpty()) {
         return true;
     }
-    return !VisualAnalysisMetadata::incompletePlannedFrameNumbers(
-                plan.sourceFrameCount,
-                plan.frameInterval,
-                contactSheetFrameCount,
-                frames,
-                cinevault::searchconfig::kStructuredVisionProfileVersion)
-                .isEmpty();
+    return std::any_of(frames.cbegin(), frames.cend(), [](const FrameAnalysisRecord &frame) {
+        return !VisualAnalysisMetadata::isFrameAnalysisComplete(
+            frame,
+            cinevault::searchconfig::kStructuredVisionProfileVersion);
+    });
 }
 
 QString skippedFramesWarning(int skippedFrames)
@@ -1399,8 +1417,10 @@ AnalysisConfig loadConfig(const AppSettings *settings)
     config.baseUrl = settings->visionBaseUrl();
     config.apiKey = settings->visionApiKey();
     config.model = settings->visionModel();
-    config.mode = settings->analysisMode();
-    config.frameInterval = settings->frameInterval();
+    config.extractionStrategy = settings->videoFrameExtractionStrategy();
+    config.frameIntervalSeconds = settings->videoFrameIntervalSeconds();
+    config.sceneThreshold = settings->videoSceneThreshold();
+    config.minimumSharpness = settings->videoMinimumSharpness();
     config.contactSheetFrameCount = settings->contactSheetFrameCount();
     config.timeoutSec = settings->analysisTimeoutSec();
     return config;
@@ -2461,6 +2481,13 @@ void VideoAnalysisService::startNextAnalysis()
         QString errorMessage;
         qint64 lastProgress = 0;
         QSqlDatabase db;
+        bool preserveActiveAnalysisOnFailure = false;
+        bool stagingFreshRun = false;
+        QString stagingCacheDirectory;
+        VideoAnalysisStatus previousAnalysisStatus = VideoAnalysisStatus::Pending;
+        ConfirmationStatus previousConfirmationStatus = ConfirmationStatus::Pending;
+        QString previousAnalysisError;
+        VisualAnalysisPlan stagedPlan;
         const auto connectionGuard = qScopeGuard([&]() {
             db.close();
             db = QSqlDatabase();
@@ -2471,13 +2498,25 @@ void VideoAnalysisService::startNextAnalysis()
             const auto normalizedMessage = message.trimmed().isEmpty()
                 ? QStringLiteral("解析失败。")
                 : message.trimmed();
-            if (updateAsset && db && db->isOpen()) {
-                updateAssetState(*db,
-                                 job.videoKey,
-                                 VideoAnalysisStatus::Failed,
-                                 ConfirmationStatus::Pending,
-                                 normalizedMessage,
-                                 nullptr);
+            if ((updateAsset || preserveActiveAnalysisOnFailure) && db && db->isOpen()) {
+                if (preserveActiveAnalysisOnFailure) {
+                    updateAssetState(*db,
+                                     job.videoKey,
+                                     previousAnalysisStatus,
+                                     previousConfirmationStatus,
+                                     previousAnalysisError,
+                                     nullptr);
+                } else {
+                    updateAssetState(*db,
+                                     job.videoKey,
+                                     VideoAnalysisStatus::Failed,
+                                     ConfirmationStatus::Pending,
+                                     normalizedMessage,
+                                     nullptr);
+                }
+            }
+            if (preserveActiveAnalysisOnFailure && !stagingCacheDirectory.isEmpty()) {
+                QDir(stagingCacheDirectory).removeRecursively();
             }
             failJob(jobProjectDatabasePath, jobId, normalizedMessage);
             reportAnalysisProgress(job.videoKey, lastProgress, normalizedMessage, JobState::Failed, normalizedMessage);
@@ -2513,6 +2552,9 @@ void VideoAnalysisService::startNextAnalysis()
             finishFailure(errorMessage, &db, false);
             return;
         }
+        previousAnalysisStatus = asset.analysisStatus;
+        previousConfirmationStatus = asset.confirmationStatus;
+        previousAnalysisError = asset.errorMessage;
         updateJobSubject(jobProjectDatabasePath, jobId, analysisSubjectForAsset(asset));
 
         if (!canAnalyzeAsset(asset.assetType, asset.extension)) {
@@ -2608,7 +2650,7 @@ void VideoAnalysisService::startNextAnalysis()
 
             VisualAnalysisPlan imagePlan;
             imagePlan.videoKey = job.videoKey;
-            imagePlan.samplingPolicy = fixedSamplingPolicy();
+            imagePlan.samplingPolicy = QStringLiteral("single_image_v1");
             imagePlan.frameInterval = 1;
             imagePlan.structuredProfileVersion = cinevault::searchconfig::kStructuredVisionProfileVersion;
             imagePlan.sourceFrameCount = 1;
@@ -2710,8 +2752,7 @@ void VideoAnalysisService::startNextAnalysis()
                                                                   &summaryError,
                                                                   &httpStatusCode);
             if (!summary.has_value()) {
-                updateAssetState(db, job.videoKey, VideoAnalysisStatus::Failed, ConfirmationStatus::Pending, summaryError, nullptr);
-                finishFailure(summaryError, &db, false);
+                finishFailure(summaryError, &db);
                 return;
             }
 
@@ -2762,20 +2803,11 @@ void VideoAnalysisService::startNextAnalysis()
 
         auto buildContactSheet = [&](const QVector<FrameAnalysisRecord> &frames,
                                      int sourceFrameCount = 0) {
-            QSet<int> contactSheetNumbers;
-            for (const auto frameNumber : VisualAnalysisMetadata::contactSheetFrameNumbers(
-                     sourceFrameCount,
-                     config.contactSheetFrameCount)) {
-                contactSheetNumbers.insert(frameNumber);
-            }
+            Q_UNUSED(sourceFrameCount)
 
             QStringList imagePaths;
             imagePaths.reserve(frames.size());
             for (const auto &frame : frames) {
-                if (!contactSheetNumbers.isEmpty()
-                    && !contactSheetNumbers.contains(frame.frameNumber)) {
-                    continue;
-                }
                 if (!frame.imagePath.trimmed().isEmpty()) {
                     imagePaths.append(frame.imagePath);
                 }
@@ -2819,14 +2851,41 @@ void VideoAnalysisService::startNextAnalysis()
                 task.lastErrorMessage = summaryError;
                 task.lastUpdatedAt = nowIso();
                 persistAnalysisTask(db, task, nullptr);
-                updateAssetState(db, job.videoKey, VideoAnalysisStatus::Failed, ConfirmationStatus::Pending, summaryError, nullptr);
-                finishFailure(summaryError, &db, false);
+                finishFailure(summaryError, &db);
                 return false;
             }
 
             if (!db.transaction()) {
                 finishFailure(db.lastError().text(), &db);
                 return false;
+            }
+            if (stagingFreshRun) {
+                if (!deleteAnalysisArtifacts(db,
+                                             job.videoKey,
+                                             m_globalDatabaseManager->hasFts5(),
+                                             &errorMessage)) {
+                    db.rollback();
+                    finishFailure(errorMessage, &db);
+                    return false;
+                }
+                for (const auto &frame : frames) {
+                    const ExtractedFrame extractedFrame{
+                        frame.frameNumber,
+                        frame.timestampMs,
+                        frame.imagePath
+                    };
+                    if (!insertFrameRow(db, job.videoKey, extractedFrame, &errorMessage)
+                        || !updateFrameAnalysis(db, job.videoKey, frame, &errorMessage)) {
+                        db.rollback();
+                        finishFailure(errorMessage, &db);
+                        return false;
+                    }
+                }
+                if (!persistVisualAnalysisPlan(db, stagedPlan, &errorMessage)) {
+                    db.rollback();
+                    finishFailure(errorMessage, &db);
+                    return false;
+                }
             }
             if (!persistSummary(db, asset, *summary, frames, asset.sourceText, m_globalDatabaseManager->hasFts5(), &errorMessage)) {
                 db.rollback();
@@ -2842,8 +2901,14 @@ void VideoAnalysisService::startNextAnalysis()
                 return false;
             }
             if (!db.commit()) {
+                db.rollback();
                 finishFailure(db.lastError().text(), &db);
                 return false;
+            }
+            if (stagingFreshRun) {
+                stagingFreshRun = false;
+                preserveActiveAnalysisOnFailure = false;
+                buildContactSheet(frames);
             }
 
             updateJob(jobProjectDatabasePath,
@@ -2972,26 +3037,37 @@ void VideoAnalysisService::startNextAnalysis()
                 finishFailure(errorMessage, &db, false);
                 return;
             }
-            const auto configuredInterval = VisualAnalysisMetadata::fixedFrameInterval(config.mode, config.frameInterval);
+            const auto configuredInterval = qRound((config.extractionStrategy == VideoFrameExtractionStrategy::HighFidelity
+                                                        ? qBound(0.1, config.frameIntervalSeconds, 0.25)
+                                                        : qBound(0.1, config.frameIntervalSeconds, 240.0))
+                                                   * 1000.0);
             const auto assetFingerprintChanged = hasPlan
                 && (plan.assetSizeBytes != asset.sizeBytes || plan.assetModifiedAt != asset.modifiedAt);
             bool needsFreshExtraction = job.mode == AnalysisRunMode::Initial
                 || job.mode == AnalysisRunMode::Rebuild
                 || assetFingerprintChanged
-                || (!hasPlan && frames.isEmpty());
+                || !hasPlan
+                || plan.samplingPolicy != samplingPolicy(config)
+                || plan.frameInterval != configuredInterval
+                || plan.structuredProfileVersion < cinevault::searchconfig::kStructuredVisionProfileVersion;
             if (needsFreshExtraction) {
-                if (!db.transaction()) {
-                    finishFailure(db.lastError().text(), &db);
-                    return;
-                }
-                if (!deleteAnalysisArtifacts(db, job.videoKey, m_globalDatabaseManager->hasFts5(), &errorMessage)) {
-                    db.rollback();
-                    finishFailure(errorMessage, &db, false);
-                    return;
-                }
-                if (!db.commit()) {
-                    finishFailure(db.lastError().text(), &db);
-                    return;
+                stagingFreshRun = hasPlan
+                    || asset.analysisStatus == VideoAnalysisStatus::Ready
+                    || !asset.summary.trimmed().isEmpty();
+                preserveActiveAnalysisOnFailure = stagingFreshRun;
+                if (stagingFreshRun) {
+                    if (!updateAssetState(db,
+                                          job.videoKey,
+                                          previousAnalysisStatus,
+                                          previousConfirmationStatus,
+                                          previousAnalysisError,
+                                          &errorMessage)) {
+                        finishFailure(errorMessage, &db, false);
+                        return;
+                    }
+                    stagingCacheDirectory = QDir(cacheDirectory).filePath(
+                        QStringLiteral("runs/pending-%1")
+                            .arg(QUuid::createUuid().toString(QUuid::WithoutBraces)));
                 }
 
                 task = {};
@@ -3008,28 +3084,26 @@ void VideoAnalysisService::startNextAnalysis()
                 FrameExtractionRequest request;
                 request.assetId = asset.assetId;
                 request.sourcePath = asset.absolutePath;
-                request.outputDirectory = cacheDirectory;
-                request.mode = config.mode;
-                request.frameInterval = config.frameInterval;
-                request.contactSheetFrameCount = config.contactSheetFrameCount;
+                request.outputDirectory = stagingFreshRun ? stagingCacheDirectory : cacheDirectory;
+                request.strategy = config.extractionStrategy;
+                request.intervalSeconds = config.frameIntervalSeconds;
+                request.sceneThreshold = config.sceneThreshold;
+                request.minimumSharpness = config.minimumSharpness;
+                request.maxWidth = kAnalysisFrameMaxWidth;
+                request.maxHeight = kAnalysisFrameMaxHeight;
 
                 const auto extraction = m_ffmpegAdapter->extractFrames(request);
                 if (!extraction.success || extraction.frames.isEmpty()) {
                     task.lastErrorMessage = extraction.errorMessage;
                     task.lastUpdatedAt = nowIso();
                     persistAnalysisTask(db, task, nullptr);
-                    updateAssetState(db, job.videoKey, VideoAnalysisStatus::Failed, ConfirmationStatus::Pending, extraction.errorMessage, nullptr);
-                    finishFailure(extraction.errorMessage, &db, false);
+                    finishFailure(extraction.errorMessage, &db);
                     return;
                 }
 
-                if (!db.transaction()) {
-                    finishFailure(db.lastError().text(), &db);
-                    return;
-                }
                 plan = {};
                 plan.videoKey = job.videoKey;
-                plan.samplingPolicy = fixedSamplingPolicy();
+                plan.samplingPolicy = samplingPolicy(config);
                 plan.frameInterval = extraction.frameInterval;
                 plan.structuredProfileVersion = cinevault::searchconfig::kStructuredVisionProfileVersion;
                 plan.sourceFrameCount = extraction.sourceFrameCount;
@@ -3037,66 +3111,29 @@ void VideoAnalysisService::startNextAnalysis()
                 plan.assetSizeBytes = asset.sizeBytes;
                 plan.assetModifiedAt = asset.modifiedAt;
                 plan.createdAt = nowIso();
-                if (!syncFramePlanRows(db, job.videoKey, extraction.frames, true, &errorMessage)
-                    || !persistVisualAnalysisPlan(db, plan, &errorMessage)) {
-                    db.rollback();
-                    finishFailure(errorMessage, &db, false);
-                    return;
-                }
-                if (!db.commit()) {
-                    finishFailure(db.lastError().text(), &db);
-                    return;
-                }
-
-                frames = reloadFrames();
-                if (!errorMessage.trimmed().isEmpty()) {
-                    finishFailure(errorMessage, &db, false);
-                    return;
-                }
-                recalculateTaskCounts(frames, &task);
-                if (!saveTask(VideoAnalysisTaskStage::AnalyzingFrames)) {
-                    finishFailure(errorMessage, &db, false);
-                    return;
-                }
-                buildContactSheet(frames, plan.sourceFrameCount);
-                updateRunning(10,
-                              QStringLiteral("已抽取 %1 帧，开始视觉解析").arg(frames.size()),
-                              analysisProgressContext(2, 4, QStringLiteral("解析视频帧"), 0, frames.size(), QStringLiteral("帧")));
-            } else {
-                const auto needsFullPlanRefresh = !hasPlan
-                    || plan.samplingPolicy != fixedSamplingPolicy()
-                    || plan.frameInterval != configuredInterval
-                    || plan.sourceFrameCount <= 0;
-                if (needsFullPlanRefresh) {
-                    updateRunning(8,
-                                  QStringLiteral("正在校验固定间隔采样计划：%1").arg(asset.fileName),
-                                  analysisProgressContext(1, 4, QStringLiteral("校验采样计划")));
-                    FrameExtractionRequest request;
-                    request.assetId = asset.assetId;
-                    request.sourcePath = asset.absolutePath;
-                    request.outputDirectory = cacheDirectory;
-                    request.mode = config.mode;
-                    request.frameInterval = config.frameInterval;
-                    request.contactSheetFrameCount = config.contactSheetFrameCount;
-                    request.preserveExistingFrames = !hasPlan || plan.frameInterval == configuredInterval;
-                    const auto extraction = m_ffmpegAdapter->extractFrames(request);
-                    if (!extraction.success || extraction.frames.isEmpty()) {
-                        finishFailure(extraction.errorMessage, &db);
-                        return;
+                if (stagingFreshRun) {
+                    stagedPlan = plan;
+                    frames.clear();
+                    frames.reserve(extraction.frames.size());
+                    for (const auto &extracted : extraction.frames) {
+                        FrameAnalysisRecord frame;
+                        frame.videoKey = job.videoKey;
+                        frame.frameNumber = extracted.frameNumber;
+                        frame.timestampMs = extracted.timestampMs;
+                        frame.imagePath = extracted.imagePath;
+                        frame.analysisState = FrameAnalysisState::Pending;
+                        frames.append(frame);
                     }
+                } else {
                     if (!db.transaction()) {
                         finishFailure(db.lastError().text(), &db);
                         return;
                     }
-                    plan.videoKey = job.videoKey;
-                    plan.samplingPolicy = fixedSamplingPolicy();
-                    plan.frameInterval = extraction.frameInterval;
-                    plan.structuredProfileVersion = cinevault::searchconfig::kStructuredVisionProfileVersion;
-                    plan.sourceFrameCount = extraction.sourceFrameCount;
-                    plan.plannedFrameCount = extraction.frames.size();
-                    plan.assetSizeBytes = asset.sizeBytes;
-                    plan.assetModifiedAt = asset.modifiedAt;
-                    if (!syncFramePlanRows(db, job.videoKey, extraction.frames, true, &errorMessage)
+                    if (!deleteAnalysisArtifacts(db,
+                                                 job.videoKey,
+                                                 m_globalDatabaseManager->hasFts5(),
+                                                 &errorMessage)
+                        || !syncFramePlanRows(db, job.videoKey, extraction.frames, false, &errorMessage)
                         || !persistVisualAnalysisPlan(db, plan, &errorMessage)) {
                         db.rollback();
                         finishFailure(errorMessage, &db, false);
@@ -3111,85 +3148,19 @@ void VideoAnalysisService::startNextAnalysis()
                         finishFailure(errorMessage, &db, false);
                         return;
                     }
-                } else {
-                    QHash<int, FrameAnalysisRecord> existingFrames;
-                    for (const auto &frame : frames) {
-                        existingFrames.insert(frame.frameNumber, frame);
-                    }
-                    QVector<int> missingCacheFrames;
-                    const auto expectedNumbers = VisualAnalysisMetadata::plannedFrameNumbers(
-                        plan.sourceFrameCount,
-                        plan.frameInterval,
-                        config.contactSheetFrameCount);
-                    for (const auto frameNumber : expectedNumbers) {
-                        if (!existingFrames.contains(frameNumber)) {
-                            missingCacheFrames.append(frameNumber);
-                            continue;
-                        }
-                        const QFileInfo imageInfo(existingFrames.value(frameNumber).imagePath);
-                        if (!imageInfo.isFile() || imageInfo.size() <= 0) {
-                            missingCacheFrames.append(frameNumber);
-                        }
-                    }
-
-                    QVector<ExtractedFrame> repairedFrames;
-                    if (!missingCacheFrames.isEmpty()) {
-                        updateRunning(8,
-                                      QStringLiteral("正在补齐 %1 个缺失采样帧").arg(missingCacheFrames.size()),
-                                      analysisProgressContext(1,
-                                                              4,
-                                                              QStringLiteral("补齐缺失采样帧"),
-                                                              0,
-                                                              missingCacheFrames.size(),
-                                                              QStringLiteral("帧")));
-                        FrameExtractionRequest request;
-                        request.assetId = asset.assetId;
-                        request.sourcePath = asset.absolutePath;
-                        request.outputDirectory = cacheDirectory;
-                        request.mode = config.mode;
-                        request.frameInterval = config.frameInterval;
-                        request.contactSheetFrameCount = config.contactSheetFrameCount;
-                        request.requestedFrameNumbers = missingCacheFrames;
-                        request.preserveExistingFrames = true;
-                        const auto extraction = m_ffmpegAdapter->extractFrames(request);
-                        if (!extraction.success || extraction.frames.size() != missingCacheFrames.size()) {
-                            finishFailure(extraction.errorMessage.trimmed().isEmpty()
-                                              ? QStringLiteral("缺失采样帧未能完整补齐")
-                                              : extraction.errorMessage,
-                                          &db);
-                            return;
-                        }
-                        repairedFrames = extraction.frames;
-                    }
-
-                    if (!db.transaction()) {
-                        finishFailure(db.lastError().text(), &db);
-                        return;
-                    }
-                    plan.structuredProfileVersion = cinevault::searchconfig::kStructuredVisionProfileVersion;
-                    plan.plannedFrameCount = expectedNumbers.size();
-                    plan.assetSizeBytes = asset.sizeBytes;
-                    plan.assetModifiedAt = asset.modifiedAt;
-                    if ((!repairedFrames.isEmpty()
-                         && !syncFramePlanRows(db, job.videoKey, repairedFrames, false, &errorMessage))
-                        || !persistVisualAnalysisPlan(db, plan, &errorMessage)) {
-                        db.rollback();
-                        finishFailure(errorMessage, &db, false);
-                        return;
-                    }
-                    if (!db.commit()) {
-                        finishFailure(db.lastError().text(), &db);
-                        return;
-                    }
-                    if (!repairedFrames.isEmpty()) {
-                        frames = reloadFrames();
-                        if (!errorMessage.trimmed().isEmpty()) {
-                            finishFailure(errorMessage, &db, false);
-                            return;
-                        }
-                    }
                 }
-
+                recalculateTaskCounts(frames, &task);
+                if (!saveTask(VideoAnalysisTaskStage::AnalyzingFrames)) {
+                    finishFailure(errorMessage, &db, false);
+                    return;
+                }
+                if (!stagingFreshRun) {
+                    buildContactSheet(frames);
+                }
+                updateRunning(10,
+                              QStringLiteral("已抽取 %1 帧，开始视觉解析").arg(frames.size()),
+                              analysisProgressContext(2, 4, QStringLiteral("解析视频帧"), 0, frames.size(), QStringLiteral("帧")));
+            } else {
                 recalculateTaskCounts(frames, &task);
                 if (task.stage == VideoAnalysisTaskStage::Pending || task.stage == VideoAnalysisTaskStage::ExtractingFrames) {
                     if (!saveTask(VideoAnalysisTaskStage::AnalyzingFrames)) {
@@ -3197,7 +3168,7 @@ void VideoAnalysisService::startNextAnalysis()
                         return;
                     }
                 }
-                buildContactSheet(frames, plan.sourceFrameCount);
+                buildContactSheet(frames);
                 updateRunning(10,
                               QStringLiteral("继续解析视频帧，已完成 %1/%2，跳过 %3 帧")
                                   .arg(task.completedFrames)
@@ -3213,6 +3184,109 @@ void VideoAnalysisService::startNextAnalysis()
                                                       QStringLiteral("跳过 %1 帧").arg(task.skippedFrames)));
             }
 
+            const auto maxFrameRequests = VisionApiClient::maxConcurrentFrameRequests(config.model);
+            if (maxFrameRequests > 1) {
+                QThreadPool requestPool;
+                requestPool.setMaxThreadCount(maxFrameRequests);
+
+                while (true) {
+                    QVector<int> frameIndexes;
+                    frameIndexes.reserve(maxFrameRequests);
+                    for (int index = 0; index < frames.size() && frameIndexes.size() < maxFrameRequests; ++index) {
+                        if (!VisualAnalysisMetadata::isFrameAnalysisComplete(
+                                frames.at(index),
+                                cinevault::searchconfig::kStructuredVisionProfileVersion)) {
+                            frameIndexes.append(index);
+                        }
+                    }
+                    if (frameIndexes.isEmpty()) {
+                        break;
+                    }
+
+                    QVector<QFuture<FrameRequestResult>> pendingRequests;
+                    pendingRequests.reserve(frameIndexes.size());
+                    for (const auto frameIndex : frameIndexes) {
+                        const auto sourceFrame = frames.at(frameIndex);
+                        const auto initialAttempt = job.mode == AnalysisRunMode::Resume
+                            ? 0
+                            : qBound(0, sourceFrame.retryCount, kMaxFrameRetryCount);
+                        pendingRequests.append(QtConcurrent::run(&requestPool,
+                                                                 [this, frameIndex, sourceFrame, initialAttempt, asset, config]() {
+                            FrameRequestResult result;
+                            result.frameIndex = frameIndex;
+                            result.attempt = initialAttempt;
+                            while (result.attempt < kMaxFrameRetryCount) {
+                                ++result.attempt;
+                                result.wasAttempted = true;
+                                result.analysis = m_visionApiClient->analyzeFrame(sourceFrame.imagePath,
+                                                                                   asset.fileName,
+                                                                                   config.baseUrl,
+                                                                                   config.apiKey,
+                                                                                   config.model,
+                                                                                   config.timeoutSec,
+                                                                                   &result.errorMessage,
+                                                                                   &result.httpStatusCode);
+                                if (result.analysis.has_value()) {
+                                    break;
+                                }
+                            }
+                            return result;
+                        }));
+                    }
+
+                    for (auto &pendingRequest : pendingRequests) {
+                        const auto result = pendingRequest.result();
+                        auto &frame = frames[result.frameIndex];
+                        if (result.wasAttempted) {
+                            frame.retryCount = result.attempt;
+                            frame.lastHttpStatus = result.httpStatusCode;
+                            frame.lastAttemptAt = nowIso();
+                            if (result.analysis.has_value()) {
+                                applyFrameAnalysis(&frame, *result.analysis, config.model);
+                                frame.errorMessage.clear();
+                                frame.analysisState = FrameAnalysisState::Success;
+                            } else {
+                                frame.errorMessage = result.errorMessage;
+                                frame.analysisState = result.attempt >= kMaxFrameRetryCount
+                                    ? FrameAnalysisState::Skipped
+                                    : FrameAnalysisState::Failed;
+                            }
+                        }
+                        if (!stagingFreshRun
+                            && !updateFrameAnalysis(db, job.videoKey, frame, &errorMessage)) {
+                            finishFailure(errorMessage, &db, false);
+                            return;
+                        }
+                        recalculateTaskCounts(frames, &task);
+                        if (!saveTask(VideoAnalysisTaskStage::AnalyzingFrames,
+                                      frame.analysisState == FrameAnalysisState::Skipped ? frame.errorMessage : QString())) {
+                            finishFailure(errorMessage, &db, false);
+                            return;
+                        }
+
+                        const auto progress = task.totalFrames > 0
+                            ? 10 + ((static_cast<qint64>(task.completedFrames) * 75) / task.totalFrames)
+                            : 10;
+                        updateRunning(progress,
+                                      QStringLiteral("正在解析视频帧（MiniMax-M3，最多 %1 并发），已完成 %2/%3，成功 %4 帧，跳过 %5 帧")
+                                          .arg(maxFrameRequests)
+                                          .arg(task.completedFrames)
+                                          .arg(task.totalFrames)
+                                          .arg(task.successfulFrames)
+                                          .arg(task.skippedFrames),
+                                      analysisProgressContext(2,
+                                                              4,
+                                                              QStringLiteral("解析视频帧"),
+                                                              task.completedFrames,
+                                                              task.totalFrames,
+                                                              QStringLiteral("帧"),
+                                                              frame.frameNumber,
+                                                              QStringLiteral("成功 %1 · 跳过 %2")
+                                                                  .arg(task.successfulFrames)
+                                                                  .arg(task.skippedFrames)));
+                    }
+                }
+            } else {
             for (int index = 0; index < frames.size(); ++index) {
                 auto &frame = frames[index];
                 if (VisualAnalysisMetadata::isFrameAnalysisComplete(
@@ -3251,13 +3325,15 @@ void VideoAnalysisService::startNextAnalysis()
                     frame.analysisState = attempt >= kMaxFrameRetryCount
                         ? FrameAnalysisState::Skipped
                         : FrameAnalysisState::Failed;
-                    if (!updateFrameAnalysis(db, job.videoKey, frame, &errorMessage)) {
+                    if (!stagingFreshRun
+                        && !updateFrameAnalysis(db, job.videoKey, frame, &errorMessage)) {
                         finishFailure(errorMessage, &db, false);
                         return;
                     }
                 }
 
-                if (!updateFrameAnalysis(db, job.videoKey, frame, &errorMessage)) {
+                if (!stagingFreshRun
+                    && !updateFrameAnalysis(db, job.videoKey, frame, &errorMessage)) {
                     finishFailure(errorMessage, &db, false);
                     return;
                 }
@@ -3287,6 +3363,7 @@ void VideoAnalysisService::startNextAnalysis()
                                                       frame.frameNumber,
                                                       QStringLiteral("成功 %1 · 跳过 %2").arg(task.successfulFrames).arg(task.skippedFrames)));
             }
+            }
 
             const auto succeededFrames = successfulFrames(frames);
             if (succeededFrames.isEmpty()) {
@@ -3294,22 +3371,21 @@ void VideoAnalysisService::startNextAnalysis()
                 task.lastErrorMessage = failMessage;
                 task.lastUpdatedAt = nowIso();
                 persistAnalysisTask(db, task, nullptr);
-                updateAssetState(db, job.videoKey, VideoAnalysisStatus::Failed, ConfirmationStatus::Pending, failMessage, nullptr);
-                finishFailure(failMessage, &db, false);
+                finishFailure(failMessage, &db);
                 return;
             }
 
             QString successMessage = task.skippedFrames > 0
                 ? QStringLiteral("视频解析完成，成功 %1 帧，跳过 %2 帧，结果已自动生效").arg(task.successfulFrames).arg(task.skippedFrames)
                 : QStringLiteral("视频解析完成，结果已自动生效");
-            const auto remainingStructuredGaps = VisualAnalysisMetadata::incompletePlannedFrameNumbers(
-                plan.sourceFrameCount,
-                plan.frameInterval,
-                config.contactSheetFrameCount,
-                frames,
-                cinevault::searchconfig::kStructuredVisionProfileVersion);
-            if (!remainingStructuredGaps.isEmpty()) {
-                successMessage += QStringLiteral("；仍有 %1 帧结构化事实待补齐").arg(remainingStructuredGaps.size());
+            const auto remainingStructuredGaps = std::count_if(
+                frames.cbegin(), frames.cend(), [](const FrameAnalysisRecord &frame) {
+                    return !VisualAnalysisMetadata::isFrameAnalysisComplete(
+                        frame,
+                        cinevault::searchconfig::kStructuredVisionProfileVersion);
+                });
+            if (remainingStructuredGaps > 0) {
+                successMessage += QStringLiteral("；仍有 %1 帧结构化事实待补齐").arg(remainingStructuredGaps);
             }
             if (!persistSummaryAndTask(frames, 0, successMessage)) {
                 return;

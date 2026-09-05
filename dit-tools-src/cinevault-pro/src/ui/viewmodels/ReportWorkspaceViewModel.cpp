@@ -3,6 +3,7 @@
 #include "application/LibraryQueryService.h"
 #include "application/ProjectService.h"
 #include "application/ReportExportService.h"
+#include "infrastructure/config/AppSettings.h"
 
 #include <QApplication>
 #include <QDateTime>
@@ -33,11 +34,13 @@ void showWarning(const QString &title, const QString &message)
 ReportWorkspaceViewModel::ReportWorkspaceViewModel(ProjectService *projectService,
                                                    LibraryQueryService *libraryQueryService,
                                                    ReportExportService *reportExportService,
+                                                   AppSettings *settings,
                                                    QObject *parent)
     : QObject(parent)
     , m_projectService(projectService)
     , m_libraryQueryService(libraryQueryService)
     , m_reportExportService(reportExportService)
+    , m_settings(settings)
     , m_statusText(QStringLiteral("请先在左侧选择素材目录。"))
 {
     connect(m_projectService, &ProjectService::projectChanged, this, &ReportWorkspaceViewModel::resetForProject);
@@ -218,13 +221,7 @@ void ReportWorkspaceViewModel::exportPdf(const QString &shootTime,
         return;
     }
 
-    ReportExportRequest request;
-    request.sourceRootId = m_selectedSourceId;
-    request.shootTime = shootTime;
-    request.location = location;
-    request.director = director;
-    request.cinematographer = cinematographer;
-    request.ditName = ditName;
+    auto request = buildRequest(shootTime, location, director, cinematographer, ditName);
     request.outputPath = selectedPath;
 
     m_isExporting = true;
@@ -267,13 +264,7 @@ void ReportWorkspaceViewModel::refreshPreview(const QString &shootTime,
         return;
     }
 
-    ReportExportRequest request;
-    request.sourceRootId = m_selectedSourceId;
-    request.shootTime = shootTime;
-    request.location = location;
-    request.director = director;
-    request.cinematographer = cinematographer;
-    request.ditName = ditName;
+    const auto request = buildRequest(shootTime, location, director, cinematographer, ditName);
 
     m_isPreviewing = true;
     m_statusText = QStringLiteral("正在生成报表预览...");
@@ -367,4 +358,51 @@ void ReportWorkspaceViewModel::openLastExportFolder()
     }
     const QFileInfo info(m_lastExportPath);
     QDesktopServices::openUrl(QUrl::fromLocalFile(info.absolutePath()));
+}
+
+bool ReportWorkspaceViewModel::reportSectionEnabled(const QString &section) const
+{
+    return m_settings && m_settings->reportEnabledSections().contains(section);
+}
+
+void ReportWorkspaceViewModel::setReportSectionEnabled(const QString &section, bool enabled)
+{
+    if (!m_settings) {
+        return;
+    }
+
+    auto sections = m_settings->reportEnabledSections();
+    if (enabled) {
+        if (!sections.contains(section)) {
+            sections.append(section);
+        }
+    } else {
+        sections.removeAll(section);
+    }
+    m_settings->setReportEnabledSections(sections);
+    emit stateChanged();
+}
+
+ReportExportRequest ReportWorkspaceViewModel::buildRequest(const QString &shootTime,
+                                                           const QString &location,
+                                                           const QString &director,
+                                                           const QString &cinematographer,
+                                                           const QString &ditName) const
+{
+    ReportExportRequest request;
+    request.sourceRootId = m_selectedSourceId;
+    request.shootTime = shootTime;
+    request.location = location;
+    request.director = director;
+    request.cinematographer = cinematographer;
+    request.ditName = ditName;
+    request.sections.cover = reportSectionEnabled(QStringLiteral("cover"));
+    request.sections.summary = reportSectionEnabled(QStringLiteral("summary"));
+    request.sections.sourceOverview = reportSectionEnabled(QStringLiteral("sourceOverview"));
+    request.sections.formatDistribution = reportSectionEnabled(QStringLiteral("formatDistribution"));
+    request.sections.thumbnailIndex = reportSectionEnabled(QStringLiteral("thumbnailIndex"));
+    request.sections.videoMetadata = reportSectionEnabled(QStringLiteral("videoMetadata"));
+    request.sections.audioMetadata = reportSectionEnabled(QStringLiteral("audioMetadata"));
+    request.sections.folderTree = reportSectionEnabled(QStringLiteral("folderTree"));
+    return request;
 }

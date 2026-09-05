@@ -152,6 +152,27 @@ private slots:
         QCOMPARE(error, QStringLiteral("视觉服务返回 HTTP 200，但最终正文为空"));
     }
 
+    void parseAssistantJson_reportsMiniMaxBusinessError()
+    {
+        const QJsonObject root{
+            {QStringLiteral("base_resp"), QJsonObject{
+                {QStringLiteral("status_code"), 1008},
+                {QStringLiteral("status_msg"), QStringLiteral("insufficient balance")}
+            }}
+        };
+
+        QString error;
+        const auto payload = parseAssistantJson(
+            QJsonDocument(root).toJson(QJsonDocument::Compact), &error);
+
+        QVERIFY(!payload.has_value());
+        QVERIFY(error.contains(QStringLiteral("MiniMax")));
+        QVERIFY(error.contains(QStringLiteral("1008")));
+        QVERIFY(error.contains(QStringLiteral("余额不足")));
+        QVERIFY(error.contains(QStringLiteral("insufficient balance")));
+        QVERIFY(!error.contains(QStringLiteral("没有返回可解析结果")));
+    }
+
     void parseAssistantJson_acceptsTextContentArray()
     {
         const QJsonArray content{

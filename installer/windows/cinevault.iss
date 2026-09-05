@@ -20,10 +20,14 @@ AppName=影资管家
 AppVersion={#AppVersion}
 AppVerName=影资管家 {#VersionTag}
 AppPublisher=DIT Tools
+UninstallDisplayName=影资管家
 SetupIconFile=..\..\dit-tools-src\cinevault-pro\resources\icons\app.ico
 DefaultDirName={autopf}\影资管家
 DefaultGroupName=影资管家
 DisableProgramGroupPage=yes
+UsePreviousAppDir=yes
+UsePreviousGroup=yes
+CreateUninstallRegKey=yes
 OutputDir={#OutputDir}
 OutputBaseFilename=CineVault-Setup-{#VersionTag}
 Compression=lzma2
@@ -130,6 +134,39 @@ begin
   Result := UpdateProgressFilePath = '';
 end;
 
+procedure EnsureApplicationEntries();
+var
+  ProgramGroup: String;
+  ApplicationPath: String;
+  UninstallPath: String;
+  UninstallKey: String;
+begin
+  ProgramGroup := ExpandConstant('{group}');
+  ApplicationPath := ExpandConstant('{app}\CineVault.exe');
+  UninstallPath := ExpandConstant('{uninstallexe}');
+  UninstallKey := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{F3C5C6D6-8B77-4F6A-9F6B-9EA5B6D6AA21}_is1';
+
+  if not ForceDirectories(ProgramGroup) then
+    Log('Unable to create Start menu program group: ' + ProgramGroup)
+  else
+    CreateShellLink(ProgramGroup + '\影资管家.lnk', '影资管家', ApplicationPath,
+      '', ExpandConstant('{app}'), ApplicationPath, 0, SW_SHOWNORMAL);
+
+  CreateShellLink(ProgramGroup + '\卸载影资管家.lnk', '卸载影资管家', UninstallPath,
+    '', ExpandConstant('{app}'), UninstallPath, 0, SW_SHOWNORMAL);
+
+  { Inno Setup owns this key. These values are written again after every
+    silent upgrade so the Windows Apps list remains present even if an older
+    updater or a damaged prior registration removed its display fields. }
+  RegWriteStringValue(HKLM64, UninstallKey, 'DisplayName', '影资管家');
+  RegWriteStringValue(HKLM64, UninstallKey, 'DisplayVersion', '{#AppVersion}');
+  RegWriteStringValue(HKLM64, UninstallKey, 'InstallLocation', ExpandConstant('{app}\'));
+  RegWriteStringValue(HKLM64, UninstallKey, 'DisplayIcon', ApplicationPath);
+  RegWriteStringValue(HKLM64, UninstallKey, 'UninstallString', '"' + UninstallPath + '"');
+  RegWriteStringValue(HKLM64, UninstallKey, 'QuietUninstallString', '"' + UninstallPath + '" /SILENT');
+  Log('Verified Start menu shortcuts and Windows Apps registration.');
+end;
+
 function InitializeSetup(): Boolean;
 begin
   UpdateProgressFilePath := ExpandConstant('{param:UPDATEPROGRESSFILE|}');
@@ -140,6 +177,12 @@ begin
     still running; PrepareToInstall is the authoritative elevated cleanup
     point immediately before files are replaced. }
   Result := True;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    EnsureApplicationEntries();
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;

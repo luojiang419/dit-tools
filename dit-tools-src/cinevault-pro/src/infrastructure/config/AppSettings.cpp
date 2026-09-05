@@ -3,9 +3,15 @@
 #include "infrastructure/security/WindowsCredentialStore.h"
 
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QSettings>
+#include <QSet>
 #include <QUrl>
+#include <QUuid>
 
+#include <algorithm>
 #include <utility>
 
 namespace {
@@ -15,16 +21,24 @@ constexpr auto kVisionBaseUrlKey = "materialCenter/visionBaseUrl";
 constexpr auto kVisionApiKeyKey = "materialCenter/visionApiKey";
 constexpr auto kVisionApiCredentialTarget = "CineVaultPro/material-center/vision-api-key";
 constexpr auto kVisionModelKey = "materialCenter/visionModel";
+constexpr auto kVisionApiConfigsKey = "materialCenter/visionApiConfigs";
+constexpr auto kActiveVisionApiConfigIdKey = "materialCenter/activeVisionApiConfigId";
+constexpr auto kVisionApiConfigCredentialPrefix = "CineVaultPro/material-center/vision-api-config/";
 constexpr auto kCustomAnalysisDimensionsKey = "materialCenter/customAnalysisDimensions";
 constexpr auto kSearchAssistantEnabledKey = "materialCenter/searchAssistantEnabled";
 constexpr auto kSearchAssistantAutoUnloadMinutesKey = "materialCenter/searchAssistantAutoUnloadMinutes";
 constexpr auto kQuickSearchEnabledKey = "quickSearch/enabled";
 constexpr auto kQuickSearchShortcutKey = "quickSearch/shortcut";
+constexpr auto kReportEnabledSectionsKey = "report/enabledSections";
 constexpr auto kQuickSearchWindowXKey = "quickSearch/windowX";
 constexpr auto kQuickSearchWindowYKey = "quickSearch/windowY";
 constexpr auto kStartAtLoginKey = "quickSearch/startAtLogin";
 constexpr auto kAnalysisModeKey = "materialCenter/analysisMode";
 constexpr auto kFrameIntervalKey = "materialCenter/frameInterval";
+constexpr auto kVideoFrameExtractionStrategyKey = "materialCenter/videoFrameExtractionStrategy";
+constexpr auto kVideoFrameIntervalSecondsKey = "materialCenter/videoFrameIntervalSeconds";
+constexpr auto kVideoSceneThresholdKey = "materialCenter/videoSceneThreshold";
+constexpr auto kVideoMinimumSharpnessKey = "materialCenter/videoMinimumSharpness";
 constexpr auto kThumbnailFrameIndexKey = "materialCenter/thumbnailFrameIndex";
 constexpr auto kContactSheetFrameCountKey = "materialCenter/contactSheetFrameCount";
 constexpr auto kAnalysisTimeoutSecKey = "materialCenter/analysisTimeoutSec";
@@ -43,6 +57,8 @@ constexpr auto kUpdatePolicyKey = "updates/policy";
 constexpr auto kUpdateDownloadModeKey = "updates/downloadMode";
 constexpr auto kUpdateManualProxyUrlKey = "updates/manualProxyUrl";
 constexpr auto kFeedbackSessionKey = "feedback/sessionJson";
+constexpr double kDefaultVideoMinimumSharpness = 0.01;
+constexpr double kLegacyVideoMinimumSharpness = 0.08;
 
 int normalizedThemeMode(int value)
 {
@@ -103,6 +119,51 @@ QStringList normalizedCustomAnalysisDimensions(const QStringList &values)
     return normalized;
 }
 
+VideoFrameExtractionStrategy normalizedVideoFrameExtractionStrategy(int value)
+{
+    if (value == static_cast<int>(VideoFrameExtractionStrategy::PerFrame)) {
+        return VideoFrameExtractionStrategy::PerFrame;
+    }
+    if (value == static_cast<int>(VideoFrameExtractionStrategy::IntervalOnly)) {
+        return VideoFrameExtractionStrategy::IntervalOnly;
+    }
+    if (value == static_cast<int>(VideoFrameExtractionStrategy::HighFidelity)) {
+        return VideoFrameExtractionStrategy::HighFidelity;
+    }
+    return VideoFrameExtractionStrategy::SceneAndInterval;
+}
+
+double boundedVideoFrameIntervalSeconds(double value)
+{
+    return qBound(0.1, value, 240.0);
+}
+
+double boundedVideoSceneThreshold(double value)
+{
+    return qBound(0.05, value, 0.95);
+}
+
+double boundedVideoMinimumSharpness(double value)
+{
+    return qBound(0.0, value, 1.0);
+}
+
+QStringList normalizedReportEnabledSections(const QStringList &sections)
+{
+    static const QStringList allowed = {
+        QStringLiteral("cover"), QStringLiteral("summary"), QStringLiteral("sourceOverview"),
+        QStringLiteral("formatDistribution"), QStringLiteral("thumbnailIndex"), QStringLiteral("videoMetadata"),
+        QStringLiteral("audioMetadata"), QStringLiteral("folderTree")
+    };
+    QStringList normalized;
+    for (const auto &section : allowed) {
+        if (sections.contains(section)) {
+            normalized.append(section);
+        }
+    }
+    return normalized;
+}
+
 QStringList replacedProjectList(const QStringList &projects, const QString &oldProjectPath, const QString &newProjectPath)
 {
     QStringList replaced;
@@ -116,11 +177,100 @@ QStringList replacedProjectList(const QStringList &projects, const QString &oldP
     return replaced;
 }
 
+QString visionApiConfigCredentialTarget(const QString &id)
+{
+    return QString::fromLatin1(kVisionApiConfigCredentialPrefix) + id;
+}
+
+QString normalizedVisionApiConfigId(const QString &value)
+{
+    const auto normalized = value.trimmed();
+    return normalized.isEmpty()
+        ? QUuid::createUuid().toString(QUuid::WithoutBraces)
+        : normalized;
+}
+
+QList<VisionApiConfig> normalizedVisionApiConfigs(const QList<VisionApiConfig> &configs)
+{
+    constexpr qsizetype kMaximumConfigCount = 20;
+    QList<VisionApiConfig> normalized;
+    QSet<QString> seenIds;
+    for (auto config : configs) {
+        config.id = normalizedVisionApiConfigId(config.id);
+        if (seenIds.contains(config.id)) {
+            config.id = normalizedVisionApiConfigId(QString());
+        }
+        seenIds.insert(config.id);
+        config.name = config.name.trimmed();
+        if (config.name.isEmpty()) {
+            config.name = QStringLiteral("未命名配置");
+        }
+        config.baseUrl = config.baseUrl.trimmed();
+        config.apiKey = config.apiKey.trimmed();
+        config.model = config.model.trimmed();
+        if (config.model.isEmpty()) {
+            config.model = QStringLiteral("gpt-4.1-mini");
+        }
+        normalized.append(config);
+        if (normalized.size() >= kMaximumConfigCount) {
+            break;
+        }
+    }
+    return normalized;
+}
+
+QList<VisionApiConfig> storedVisionApiConfigs(QSettings *settings)
+{
+    const auto payload = settings->value(QLatin1String(kVisionApiConfigsKey)).toByteArray();
+    const auto document = QJsonDocument::fromJson(payload);
+    if (!document.isArray()) {
+        return {};
+    }
+
+    QList<VisionApiConfig> configs;
+    for (const auto &value : document.array()) {
+        if (!value.isObject()) {
+            continue;
+        }
+        const auto object = value.toObject();
+        configs.append({object.value(QStringLiteral("id")).toString(),
+                        object.value(QStringLiteral("name")).toString(),
+                        object.value(QStringLiteral("baseUrl")).toString(),
+                        {},
+                        object.value(QStringLiteral("model")).toString()});
+    }
+    return normalizedVisionApiConfigs(configs);
+}
+
+VisionApiConfig legacyVisionApiConfig(QSettings *settings)
+{
+    VisionApiConfig config;
+    config.id = QStringLiteral("default");
+    config.name = QStringLiteral("默认配置");
+    config.baseUrl = settings->value(QLatin1String(kVisionBaseUrlKey)).toString().trimmed();
+    config.model = settings->value(QLatin1String(kVisionModelKey), QStringLiteral("gpt-4.1-mini"))
+                       .toString().trimmed();
+    const auto credentialTarget = QString::fromLatin1(kVisionApiCredentialTarget);
+    config.apiKey = WindowsCredentialStore::read(credentialTarget).trimmed();
+    if (config.apiKey.isEmpty()) {
+        config.apiKey = settings->value(QLatin1String(kVisionApiKeyKey)).toString().trimmed();
+    }
+    return normalizedVisionApiConfigs({config}).first();
+}
+
 }
 
 AppSettings::AppSettings()
     : m_settings(new QSettings)
 {
+    // v0.1.202 stored this value as the default, but it is too high for the
+    // normalized adjacent-pixel gradient used by frame-quality inspection.
+    if (m_settings->contains(QLatin1String(kVideoMinimumSharpnessKey))
+        && qFuzzyCompare(m_settings->value(QLatin1String(kVideoMinimumSharpnessKey)).toDouble() + 1.0,
+                         kLegacyVideoMinimumSharpness + 1.0)) {
+        m_settings->setValue(QLatin1String(kVideoMinimumSharpnessKey), kDefaultVideoMinimumSharpness);
+        m_settings->sync();
+    }
 }
 
 AppSettings::~AppSettings()
@@ -197,51 +347,163 @@ void AppSettings::replaceProjectPath(const QString &oldProjectPath, const QStrin
 
 QString AppSettings::visionBaseUrl() const
 {
-    return m_settings->value(QLatin1String(kVisionBaseUrlKey)).toString().trimmed();
+    const auto configs = visionApiConfigs();
+    const auto activeId = activeVisionApiConfigId();
+    for (const auto &config : configs) {
+        if (config.id == activeId) {
+            return config.baseUrl;
+        }
+    }
+    return configs.isEmpty() ? QString() : configs.first().baseUrl;
 }
 
 void AppSettings::setVisionBaseUrl(const QString &value)
 {
-    m_settings->setValue(QLatin1String(kVisionBaseUrlKey), value.trimmed());
+    auto configs = visionApiConfigs();
+    if (configs.isEmpty()) {
+        return;
+    }
+    const auto activeId = activeVisionApiConfigId();
+    for (auto &config : configs) {
+        if (config.id == activeId) {
+            config.baseUrl = value;
+            break;
+        }
+    }
+    setVisionApiConfigs(configs, activeId);
 }
 
 QString AppSettings::visionApiKey() const
 {
-    const auto credentialTarget = QString::fromLatin1(kVisionApiCredentialTarget);
-    const auto storedSecret = WindowsCredentialStore::read(credentialTarget).trimmed();
-    if (!storedSecret.isEmpty()) {
-        return storedSecret;
+    const auto configs = visionApiConfigs();
+    const auto activeId = activeVisionApiConfigId();
+    for (const auto &config : configs) {
+        if (config.id == activeId) {
+            return config.apiKey;
+        }
     }
-
-    const auto legacySecret = m_settings->value(QLatin1String(kVisionApiKeyKey)).toString().trimmed();
-    if (!legacySecret.isEmpty() && WindowsCredentialStore::write(credentialTarget, legacySecret)) {
-        m_settings->remove(QLatin1String(kVisionApiKeyKey));
-        m_settings->sync();
-    }
-    return legacySecret;
+    return configs.isEmpty() ? QString() : configs.first().apiKey;
 }
 
 void AppSettings::setVisionApiKey(const QString &value)
 {
-    const auto normalized = value.trimmed();
-    const auto credentialTarget = QString::fromLatin1(kVisionApiCredentialTarget);
-    if (normalized.isEmpty()) {
-        WindowsCredentialStore::remove(credentialTarget);
-    } else {
-        WindowsCredentialStore::write(credentialTarget, normalized);
+    auto configs = visionApiConfigs();
+    if (configs.isEmpty()) {
+        return;
     }
-    m_settings->remove(QLatin1String(kVisionApiKeyKey));
+    const auto activeId = activeVisionApiConfigId();
+    for (auto &config : configs) {
+        if (config.id == activeId) {
+            config.apiKey = value;
+            break;
+        }
+    }
+    setVisionApiConfigs(configs, activeId);
 }
 
 QString AppSettings::visionModel() const
 {
-    return m_settings->value(QLatin1String(kVisionModelKey), QStringLiteral("gpt-4.1-mini")).toString().trimmed();
+    const auto configs = visionApiConfigs();
+    const auto activeId = activeVisionApiConfigId();
+    for (const auto &config : configs) {
+        if (config.id == activeId) {
+            return config.model;
+        }
+    }
+    return configs.isEmpty() ? QStringLiteral("gpt-4.1-mini") : configs.first().model;
 }
 
 void AppSettings::setVisionModel(const QString &value)
 {
-    const auto normalized = value.trimmed();
-    m_settings->setValue(QLatin1String(kVisionModelKey), normalized.isEmpty() ? QStringLiteral("gpt-4.1-mini") : normalized);
+    auto configs = visionApiConfigs();
+    if (configs.isEmpty()) {
+        return;
+    }
+    const auto activeId = activeVisionApiConfigId();
+    for (auto &config : configs) {
+        if (config.id == activeId) {
+            config.model = value;
+            break;
+        }
+    }
+    setVisionApiConfigs(configs, activeId);
+}
+
+QList<VisionApiConfig> AppSettings::visionApiConfigs() const
+{
+    auto configs = storedVisionApiConfigs(m_settings);
+    if (configs.isEmpty()) {
+        return {legacyVisionApiConfig(m_settings)};
+    }
+
+    for (auto &config : configs) {
+        config.apiKey = WindowsCredentialStore::read(visionApiConfigCredentialTarget(config.id)).trimmed();
+        if (config.apiKey.isEmpty() && config.id == QStringLiteral("default")) {
+            config.apiKey = legacyVisionApiConfig(m_settings).apiKey;
+        }
+    }
+    return configs;
+}
+
+QString AppSettings::activeVisionApiConfigId() const
+{
+    const auto configs = visionApiConfigs();
+    if (configs.isEmpty()) {
+        return {};
+    }
+    const auto activeId = m_settings->value(QLatin1String(kActiveVisionApiConfigIdKey)).toString().trimmed();
+    for (const auto &config : configs) {
+        if (config.id == activeId) {
+            return activeId;
+        }
+    }
+    return configs.first().id;
+}
+
+void AppSettings::setVisionApiConfigs(const QList<VisionApiConfig> &configs,
+                                      const QString &activeConfigId)
+{
+    auto normalized = normalizedVisionApiConfigs(configs);
+    if (normalized.isEmpty()) {
+        normalized.append(legacyVisionApiConfig(m_settings));
+    }
+
+    QString resolvedActiveId = activeConfigId.trimmed();
+    const auto activeExists = std::any_of(normalized.cbegin(), normalized.cend(), [&resolvedActiveId](const auto &config) {
+        return config.id == resolvedActiveId;
+    });
+    if (!activeExists) {
+        resolvedActiveId = normalized.first().id;
+    }
+
+    QSet<QString> previousIds;
+    for (const auto &config : storedVisionApiConfigs(m_settings)) {
+        previousIds.insert(config.id);
+    }
+    QJsonArray serialized;
+    for (const auto &config : normalized) {
+        serialized.append(QJsonObject{{QStringLiteral("id"), config.id},
+                                      {QStringLiteral("name"), config.name},
+                                      {QStringLiteral("baseUrl"), config.baseUrl},
+                                      {QStringLiteral("model"), config.model}});
+        if (config.apiKey.isEmpty()) {
+            WindowsCredentialStore::remove(visionApiConfigCredentialTarget(config.id));
+        } else {
+            WindowsCredentialStore::write(visionApiConfigCredentialTarget(config.id), config.apiKey);
+        }
+        previousIds.remove(config.id);
+    }
+    for (const auto &id : previousIds) {
+        WindowsCredentialStore::remove(visionApiConfigCredentialTarget(id));
+    }
+
+    m_settings->setValue(QLatin1String(kVisionApiConfigsKey),
+                         QJsonDocument(serialized).toJson(QJsonDocument::Compact));
+    m_settings->setValue(QLatin1String(kActiveVisionApiConfigIdKey), resolvedActiveId);
+    m_settings->remove(QLatin1String(kVisionBaseUrlKey));
+    m_settings->remove(QLatin1String(kVisionApiKeyKey));
+    m_settings->remove(QLatin1String(kVisionModelKey));
+    WindowsCredentialStore::remove(QString::fromLatin1(kVisionApiCredentialTarget));
 }
 
 QStringList AppSettings::customAnalysisDimensions() const
@@ -306,6 +568,25 @@ void AppSettings::setQuickSearchShortcut(const QString &shortcut)
     const auto normalized = shortcut.trimmed();
     m_settings->setValue(QLatin1String(kQuickSearchShortcutKey),
                          normalized.isEmpty() ? QStringLiteral("Alt+Space") : normalized);
+}
+
+QStringList AppSettings::reportEnabledSections() const
+{
+    if (!m_settings->contains(QLatin1String(kReportEnabledSectionsKey))) {
+        return normalizedReportEnabledSections({
+            QStringLiteral("cover"), QStringLiteral("summary"), QStringLiteral("sourceOverview"),
+            QStringLiteral("formatDistribution"), QStringLiteral("thumbnailIndex"), QStringLiteral("videoMetadata"),
+            QStringLiteral("audioMetadata"), QStringLiteral("folderTree")
+        });
+    }
+    return normalizedReportEnabledSections(
+        m_settings->value(QLatin1String(kReportEnabledSectionsKey)).toStringList());
+}
+
+void AppSettings::setReportEnabledSections(const QStringList &sections)
+{
+    m_settings->setValue(QLatin1String(kReportEnabledSectionsKey), normalizedReportEnabledSections(sections));
+    m_settings->sync();
 }
 
 bool AppSettings::hasQuickSearchWindowPosition() const
@@ -396,6 +677,51 @@ int AppSettings::analysisTimeoutSec() const
 void AppSettings::setAnalysisTimeoutSec(int value)
 {
     m_settings->setValue(QLatin1String(kAnalysisTimeoutSecKey), qMax(5, value));
+}
+
+VideoFrameExtractionStrategy AppSettings::videoFrameExtractionStrategy() const
+{
+    return normalizedVideoFrameExtractionStrategy(
+        m_settings->value(QLatin1String(kVideoFrameExtractionStrategyKey),
+                          static_cast<int>(VideoFrameExtractionStrategy::SceneAndInterval)).toInt());
+}
+
+void AppSettings::setVideoFrameExtractionStrategy(VideoFrameExtractionStrategy value)
+{
+    m_settings->setValue(QLatin1String(kVideoFrameExtractionStrategyKey), static_cast<int>(value));
+}
+
+double AppSettings::videoFrameIntervalSeconds() const
+{
+    return boundedVideoFrameIntervalSeconds(
+        m_settings->value(QLatin1String(kVideoFrameIntervalSecondsKey), 1.0).toDouble());
+}
+
+void AppSettings::setVideoFrameIntervalSeconds(double value)
+{
+    m_settings->setValue(QLatin1String(kVideoFrameIntervalSecondsKey), boundedVideoFrameIntervalSeconds(value));
+}
+
+double AppSettings::videoSceneThreshold() const
+{
+    return boundedVideoSceneThreshold(
+        m_settings->value(QLatin1String(kVideoSceneThresholdKey), 0.3).toDouble());
+}
+
+void AppSettings::setVideoSceneThreshold(double value)
+{
+    m_settings->setValue(QLatin1String(kVideoSceneThresholdKey), boundedVideoSceneThreshold(value));
+}
+
+double AppSettings::videoMinimumSharpness() const
+{
+    return boundedVideoMinimumSharpness(
+        m_settings->value(QLatin1String(kVideoMinimumSharpnessKey), kDefaultVideoMinimumSharpness).toDouble());
+}
+
+void AppSettings::setVideoMinimumSharpness(double value)
+{
+    m_settings->setValue(QLatin1String(kVideoMinimumSharpnessKey), boundedVideoMinimumSharpness(value));
 }
 
 bool AppSettings::documentAutoAnalysisEnabled() const

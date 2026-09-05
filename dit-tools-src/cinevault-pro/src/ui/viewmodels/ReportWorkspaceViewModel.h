@@ -7,6 +7,8 @@
 class ProjectService;
 class LibraryQueryService;
 class ReportExportService;
+class AppSettings;
+struct ReportExportRequest;
 
 class ReportWorkspaceViewModel : public QObject {
     Q_OBJECT
@@ -32,6 +34,7 @@ public:
     explicit ReportWorkspaceViewModel(ProjectService *projectService,
                                       LibraryQueryService *libraryQueryService,
                                       ReportExportService *reportExportService,
+                                      AppSettings *settings,
                                       QObject *parent = nullptr);
 
     QString projectName() const;
@@ -71,6 +74,8 @@ public:
     Q_INVOKABLE void zoomPreviewOut();
     Q_INVOKABLE void resetPreviewZoom();
     Q_INVOKABLE void openLastExportFolder();
+    Q_INVOKABLE bool reportSectionEnabled(const QString &section) const;
+    Q_INVOKABLE void setReportSectionEnabled(const QString &section, bool enabled);
 
 signals:
     void stateChanged();
@@ -78,10 +83,16 @@ signals:
 private:
     void clearPreview();
     void updateSelectedSourceDetails();
+    ReportExportRequest buildRequest(const QString &shootTime,
+                                     const QString &location,
+                                     const QString &director,
+                                     const QString &cinematographer,
+                                     const QString &ditName) const;
 
     ProjectService *m_projectService = nullptr;
     LibraryQueryService *m_libraryQueryService = nullptr;
     ReportExportService *m_reportExportService = nullptr;
+    AppSettings *m_settings = nullptr;
     QString m_statusText;
     QString m_lastExportPath;
     QStringList m_previewPagePaths;

@@ -78,6 +78,15 @@ enum class AnalysisMode : qint32 {
     CustomInterval = 2
 };
 
+// 与 filmstoryboard 保持一致的候选帧提取策略。AnalysisMode 仅保留用于
+// 读取旧版本设置，素材中心的新解析不再使用它。
+enum class VideoFrameExtractionStrategy : qint32 {
+    PerFrame = 0,
+    SceneAndInterval = 1,
+    IntervalOnly = 2,
+    HighFidelity = 3
+};
+
 enum class VideoAnalysisStatus : qint32 {
     Pending = 0,
     Running,

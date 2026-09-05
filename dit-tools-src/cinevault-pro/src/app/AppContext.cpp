@@ -187,7 +187,7 @@ AppContext::AppContext(QObject *parent)
     , m_materialCenterViewModel(new MaterialCenterViewModel(m_materialCenterQueryService, m_materialCatalogSyncService, m_searchDocumentSyncService, m_videoAnalysisService, m_projectService, &m_settings, m_localSearchAssistantRuntime, m_searchAssistantClient, this))
     , m_inspectorViewModel(new InspectorViewModel(m_libraryQueryService, this))
     , m_jobTimelineViewModel(new JobTimelineViewModel(m_jobService, m_videoAnalysisService, this))
-    , m_reportWorkspaceViewModel(new ReportWorkspaceViewModel(m_projectService, m_libraryQueryService, m_reportExportService, this))
+    , m_reportWorkspaceViewModel(new ReportWorkspaceViewModel(m_projectService, m_libraryQueryService, m_reportExportService, &m_settings, this))
     , m_settingsViewModel(new SettingsViewModel(&m_settings,
                                                 m_visionApiClient,
                                                 m_videoAnalysisService,

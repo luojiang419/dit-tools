@@ -90,12 +90,34 @@ if (-not (Test-Path -LiteralPath $preservedModelPath -PathType Leaf) -or
 }
 
 $applicationPath = Join-Path $resolvedInstallRoot "CineVault.exe"
+$uninstallerPath = Join-Path $resolvedInstallRoot "unins000.exe"
 & (Join-Path $PSScriptRoot "test_cinevault_startup.ps1") -ApplicationPath $applicationPath
 
-$uninstallerPath = Join-Path $resolvedInstallRoot "unins000.exe"
 if (-not (Test-Path -LiteralPath $uninstallerPath -PathType Leaf)) {
     throw "Installer probe did not create the expected uninstaller: $uninstallerPath"
 }
+
+$programGroupPath = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonPrograms)) "影资管家"
+$applicationShortcutPath = Join-Path $programGroupPath "影资管家.lnk"
+$uninstallShortcutPath = Join-Path $programGroupPath "卸载影资管家.lnk"
+if (-not (Test-Path -LiteralPath $applicationShortcutPath -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $uninstallShortcutPath -PathType Leaf)) {
+    throw "Silent upgrade did not restore the required Start menu shortcuts."
+}
+$shell = New-Object -ComObject WScript.Shell
+$applicationShortcut = $shell.CreateShortcut($applicationShortcutPath)
+if ([System.IO.Path]::GetFullPath($applicationShortcut.TargetPath) -ine [System.IO.Path]::GetFullPath($applicationPath)) {
+    throw "Start menu application shortcut points to an unexpected target: $($applicationShortcut.TargetPath)"
+}
+
+$uninstallRegistryPath = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{F3C5C6D6-8B77-4F6A-9F6B-9EA5B6D6AA21}_is1"
+$uninstallRegistration = Get-ItemProperty -LiteralPath $uninstallRegistryPath -ErrorAction Stop
+if ($uninstallRegistration.DisplayName -cne "影资管家" -or
+    [System.IO.Path]::GetFullPath($uninstallRegistration.InstallLocation) -ine ($resolvedInstallRoot + '\') -or
+    $uninstallRegistration.UninstallString -notmatch [regex]::Escape($uninstallerPath)) {
+    throw "Silent upgrade did not preserve the Windows Apps registration."
+}
+
 $uninstaller = Start-Process `
     -FilePath $uninstallerPath `
     -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") `

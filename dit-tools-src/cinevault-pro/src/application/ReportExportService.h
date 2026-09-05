@@ -18,6 +18,7 @@ struct ReportExportRequest {
     QString cinematographer;
     QString ditName;
     QString outputPath;
+    ReportSectionOptions sections;
 };
 
 class ReportExportService : public QObject {

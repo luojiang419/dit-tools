@@ -213,17 +213,49 @@ public:
             return false;
         }
 
-        drawCover();
-        m_currentTitle = QStringLiteral("项目摘要");
-        drawSummary();
-        nextPage(QStringLiteral("视频缩略图索引"));
-        drawThumbnailIndex();
-        nextPage(QStringLiteral("视频元数据明细"));
-        drawVideoMetadata();
-        nextPage(QStringLiteral("音频元数据明细"));
-        drawAudioMetadata();
-        nextPage(QStringLiteral("项目文件夹结构树状图"));
-        drawFolderTree();
+        bool hasContent = false;
+        if (m_document.sections.cover) {
+            drawCover();
+            hasContent = true;
+        }
+
+        const auto drawSection = [this, &hasContent](const QString &title, const auto &draw) {
+            if (hasContent) {
+                nextPage(title);
+            } else {
+                m_currentTitle = title;
+                drawHeader(title);
+            }
+            draw();
+            hasContent = true;
+        };
+
+        if (m_document.sections.summary) {
+            drawSection(QStringLiteral("项目摘要"), [this]() { drawSummary(); });
+        }
+        if (m_document.sections.sourceOverview) {
+            drawSection(QStringLiteral("素材源与扫描概览"), [this]() { drawSourceTable(); });
+        }
+        if (m_document.sections.formatDistribution) {
+            drawSection(QStringLiteral("格式分布"), [this]() { drawExtensionDistribution(); });
+        }
+        if (m_document.sections.thumbnailIndex) {
+            drawSection(QStringLiteral("视频缩略图索引"), [this]() { drawThumbnailIndex(); });
+        }
+        if (m_document.sections.videoMetadata) {
+            drawSection(QStringLiteral("视频元数据明细"), [this]() { drawVideoMetadata(); });
+        }
+        if (m_document.sections.audioMetadata) {
+            drawSection(QStringLiteral("音频元数据明细"), [this]() { drawAudioMetadata(); });
+        }
+        if (m_document.sections.folderTree) {
+            drawSection(QStringLiteral("项目文件夹结构树状图"), [this]() { drawFolderTree(); });
+        }
+        if (!hasContent) {
+            m_currentTitle = QStringLiteral("报表内容");
+            drawHeader(m_currentTitle);
+            drawEmptyBlock(QStringLiteral("未选择任何报表项，请返回报表页面勾选需要导出的内容。"));
+        }
         drawFooter();
         if (!finishPage() || m_failed) {
             if (errorMessage) {
@@ -569,8 +601,6 @@ private:
                  QColor("#F59E0B"));
         m_y += 96;
 
-        drawSourceTable();
-        drawExtensionDistribution();
     }
 
     void drawSourceTable()

@@ -3,6 +3,8 @@
 #include <QFutureSynchronizer>
 #include <QObject>
 #include <QStringList>
+#include <QVariantList>
+#include <QVariantMap>
 
 class AppSettings;
 class QuickSearchController;
@@ -17,6 +19,8 @@ class SettingsViewModel : public QObject {
     Q_PROPERTY(QString visionBaseUrl READ visionBaseUrl WRITE setVisionBaseUrl NOTIFY settingsChanged)
     Q_PROPERTY(QString visionApiKey READ visionApiKey WRITE setVisionApiKey NOTIFY settingsChanged)
     Q_PROPERTY(QString visionModel READ visionModel WRITE setVisionModel NOTIFY settingsChanged)
+    Q_PROPERTY(QVariantList visionApiConfigs READ visionApiConfigs NOTIFY settingsChanged)
+    Q_PROPERTY(QString activeVisionApiConfigId READ activeVisionApiConfigId NOTIFY settingsChanged)
     Q_PROPERTY(QStringList customAnalysisDimensions READ customAnalysisDimensions NOTIFY settingsChanged)
     Q_PROPERTY(bool searchAssistantEnabled READ searchAssistantEnabled WRITE setSearchAssistantEnabled NOTIFY settingsChanged)
     Q_PROPERTY(int searchAssistantAutoUnloadMinutes READ searchAssistantAutoUnloadMinutes WRITE setSearchAssistantAutoUnloadMinutes NOTIFY settingsChanged)
@@ -27,6 +31,10 @@ class SettingsViewModel : public QObject {
     Q_PROPERTY(QString quickSearchStatusText READ quickSearchStatusText NOTIFY settingsChanged)
     Q_PROPERTY(int analysisMode READ analysisMode WRITE setAnalysisMode NOTIFY settingsChanged)
     Q_PROPERTY(int frameInterval READ frameInterval WRITE setFrameInterval NOTIFY settingsChanged)
+    Q_PROPERTY(int videoFrameExtractionStrategy READ videoFrameExtractionStrategy WRITE setVideoFrameExtractionStrategy NOTIFY settingsChanged)
+    Q_PROPERTY(double videoFrameIntervalSeconds READ videoFrameIntervalSeconds WRITE setVideoFrameIntervalSeconds NOTIFY settingsChanged)
+    Q_PROPERTY(double videoSceneThreshold READ videoSceneThreshold WRITE setVideoSceneThreshold NOTIFY settingsChanged)
+    Q_PROPERTY(double videoMinimumSharpness READ videoMinimumSharpness WRITE setVideoMinimumSharpness NOTIFY settingsChanged)
     Q_PROPERTY(int thumbnailFrameIndex READ thumbnailFrameIndex WRITE setThumbnailFrameIndex NOTIFY settingsChanged)
     Q_PROPERTY(int contactSheetFrameCount READ contactSheetFrameCount WRITE setContactSheetFrameCount NOTIFY settingsChanged)
     Q_PROPERTY(int analysisTimeoutSec READ analysisTimeoutSec WRITE setAnalysisTimeoutSec NOTIFY settingsChanged)
@@ -61,6 +69,8 @@ public:
     void setVisionApiKey(const QString &value);
     QString visionModel() const;
     void setVisionModel(const QString &value);
+    QVariantList visionApiConfigs() const;
+    QString activeVisionApiConfigId() const;
     QStringList customAnalysisDimensions() const;
     bool searchAssistantEnabled() const;
     void setSearchAssistantEnabled(bool enabled);
@@ -75,6 +85,14 @@ public:
     void setAnalysisMode(int value);
     int frameInterval() const;
     void setFrameInterval(int value);
+    int videoFrameExtractionStrategy() const;
+    void setVideoFrameExtractionStrategy(int value);
+    double videoFrameIntervalSeconds() const;
+    void setVideoFrameIntervalSeconds(double value);
+    double videoSceneThreshold() const;
+    void setVideoSceneThreshold(double value);
+    double videoMinimumSharpness() const;
+    void setVideoMinimumSharpness(double value);
     int thumbnailFrameIndex() const;
     void setThumbnailFrameIndex(int value);
     int contactSheetFrameCount() const;
@@ -111,12 +129,13 @@ public:
                                         const QString &visionApiKey,
                                         const QString &visionModel,
                                         int analysisTimeoutSec);
+    Q_INVOKABLE void testVisionApiConfig(const QVariantMap &config,
+                                         int analysisTimeoutSec);
     Q_INVOKABLE bool addCustomAnalysisDimension(const QString &name);
     Q_INVOKABLE bool removeCustomAnalysisDimension(const QString &name);
     Q_INVOKABLE QString shortcutFromKeyEvent(int key, int modifiers) const;
-    Q_INVOKABLE void saveAndApply(const QString &visionBaseUrl,
-                                  const QString &visionApiKey,
-                                  const QString &visionModel,
+    Q_INVOKABLE void saveAndApply(const QVariantList &visionApiConfigs,
+                                  const QString &activeVisionApiConfigId,
                                   bool searchAssistantEnabled,
                                   int searchAssistantAutoUnloadMinutes,
                                   bool quickSearchEnabled,
@@ -125,6 +144,10 @@ public:
                                   int closeButtonBehavior,
                                   int analysisMode,
                                   int frameInterval,
+                                  int videoFrameExtractionStrategy,
+                                  double videoFrameIntervalSeconds,
+                                  double videoSceneThreshold,
+                                  double videoMinimumSharpness,
                                   int thumbnailFrameIndex,
                                    int contactSheetFrameCount,
                                    int analysisTimeoutSec,

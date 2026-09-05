@@ -329,6 +329,41 @@ QString emptyContentError(const VisionResponseParser::AssistantResponseEnvelope 
     }
     return QStringLiteral("视觉服务返回 HTTP 200，但最终正文为空");
 }
+
+QString miniMaxBusinessError(const QJsonObject &root)
+{
+    const auto baseResponse = root.value(QStringLiteral("base_resp"));
+    if (!baseResponse.isObject()) {
+        return {};
+    }
+
+    const auto baseResponseObject = baseResponse.toObject();
+    const auto statusCode = baseResponseObject.value(QStringLiteral("status_code"));
+    if (!statusCode.isDouble() || statusCode.toInt() == 0) {
+        return {};
+    }
+
+    const auto code = statusCode.toInt();
+    QString description;
+    switch (code) {
+    case 1001: description = QStringLiteral("请求超时"); break;
+    case 1002: description = QStringLiteral("触发 RPM 限流"); break;
+    case 1004: description = QStringLiteral("鉴权失败"); break;
+    case 1008: description = QStringLiteral("余额不足"); break;
+    case 1013: description = QStringLiteral("服务内部错误"); break;
+    case 1027: description = QStringLiteral("输出内容被服务拒绝"); break;
+    case 1039: description = QStringLiteral("Token 限制"); break;
+    default: description = QStringLiteral("服务业务错误"); break;
+    }
+
+    const auto detail = baseResponseObject.value(QStringLiteral("status_msg")).toString().trimmed();
+    return detail.isEmpty()
+        ? QStringLiteral("MiniMax 视觉服务请求失败（%1，%2）").arg(code).arg(description)
+        : QStringLiteral("MiniMax 视觉服务请求失败（%1，%2）：%3")
+              .arg(code)
+              .arg(description)
+              .arg(detail);
+}
 }
 
 std::optional<VisionResponseParser::AssistantResponseEnvelope>
@@ -345,6 +380,13 @@ VisionResponseParser::extractAssistantEnvelope(const QByteArray &responseBody,
     }
 
     const auto root = responseDocument.object();
+    const auto businessError = miniMaxBusinessError(root);
+    if (!businessError.isEmpty()) {
+        if (errorMessage) {
+            *errorMessage = businessError;
+        }
+        return std::nullopt;
+    }
     const auto choices = root.value(QStringLiteral("choices")).toArray();
     if (choices.isEmpty()) {
         if (errorMessage) {
@@ -422,6 +464,63 @@ std::optional<VisionFrameAnalysis> VisionResponseParser::normalizeFrameAnalysis(
                                                                                 QString *errorMessage)
 {
     VisionFrameAnalysis analysis;
+    if (payload.contains(QStringLiteral("detail"))) {
+        const auto field = [&payload](const QString &key) {
+            return firstText(payload, {key});
+        };
+        analysis.caption = field(QStringLiteral("caption"));
+        const auto detail = field(QStringLiteral("detail"));
+        const auto scene = field(QStringLiteral("scene"));
+        const auto props = field(QStringLiteral("props"));
+        const auto people = field(QStringLiteral("people"));
+        const auto expression = field(QStringLiteral("expression"));
+        const auto bodyAction = field(QStringLiteral("body_action"));
+        const auto movementTrend = field(QStringLiteral("movement_trend"));
+        const auto cameraMovement = field(QStringLiteral("camera_movement"));
+        const auto shotSize = field(QStringLiteral("shot_size"));
+        const auto composition = field(QStringLiteral("composition"));
+        const auto subjectDirection = field(QStringLiteral("subject_direction"));
+        const auto gazeDirection = field(QStringLiteral("gaze_direction"));
+        const auto actionStage = field(QStringLiteral("action_stage"));
+        const auto spatialRelation = field(QStringLiteral("spatial_relation"));
+        const auto chronologyCue = field(QStringLiteral("chronology_cue"));
+        const auto cameraAngle = field(QStringLiteral("camera_angle"));
+        const auto visualFocus = field(QStringLiteral("visual_focus"));
+        const auto lightingMood = field(QStringLiteral("lighting_mood"));
+        const auto colorPalette = field(QStringLiteral("color_palette"));
+        const auto narrativeFunction = field(QStringLiteral("narrative_function"));
+        const auto transitionHint = field(QStringLiteral("transition_hint"));
+        analysis.tags = {
+            QStringLiteral("细节：%1").arg(detail),
+            QStringLiteral("神态：%1").arg(expression),
+            QStringLiteral("景别：%1").arg(shotSize),
+            QStringLiteral("构图：%1").arg(composition),
+            QStringLiteral("主体朝向：%1").arg(subjectDirection),
+            QStringLiteral("视线方向：%1").arg(gazeDirection),
+            QStringLiteral("动作阶段：%1").arg(actionStage),
+            QStringLiteral("空间关系：%1").arg(spatialRelation),
+            QStringLiteral("时间线索：%1").arg(chronologyCue),
+            QStringLiteral("机位角度：%1").arg(cameraAngle),
+            QStringLiteral("视觉焦点：%1").arg(visualFocus),
+            QStringLiteral("叙事功能：%1").arg(narrativeFunction),
+            QStringLiteral("剪辑承接：%1").arg(transitionHint)
+        };
+        analysis.tags.removeAll(QStringLiteral("细节："));
+        analysis.objects = {props, people, visualFocus};
+        analysis.objects.removeAll(QString());
+        analysis.actions = QStringLiteral("姿态动作：%1；运动趋势：%2；运镜：%3")
+                               .arg(bodyAction, movementTrend, cameraMovement);
+        analysis.setting = QStringLiteral("场景：%1；光线情绪：%2；色彩调性：%3")
+                               .arg(scene, lightingMood, colorPalette);
+        analysis.factsComplete = !analysis.caption.isEmpty() && !detail.isEmpty();
+        analysis.structuredProfileVersion = analysis.factsComplete
+            ? cinevault::searchconfig::kStructuredVisionProfileVersion
+            : 1;
+        if (!analysis.factsComplete && errorMessage) {
+            *errorMessage = QStringLiteral("故事板解析缺少 caption 或 detail");
+        }
+        return analysis.factsComplete ? std::optional<VisionFrameAnalysis>(analysis) : std::nullopt;
+    }
     analysis.caption = firstText(payload, {
         QStringLiteral("caption"),
         QStringLiteral("description"),

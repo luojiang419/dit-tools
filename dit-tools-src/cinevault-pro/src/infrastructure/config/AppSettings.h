@@ -3,9 +3,18 @@
 #include "domain/Enums.h"
 
 #include <QPoint>
+#include <QList>
 #include <QStringList>
 
 class QSettings;
+
+struct VisionApiConfig {
+    QString id;
+    QString name;
+    QString baseUrl;
+    QString apiKey;
+    QString model;
+};
 
 class AppSettings {
 public:
@@ -28,6 +37,11 @@ public:
     QString visionModel() const;
     void setVisionModel(const QString &value);
 
+    QList<VisionApiConfig> visionApiConfigs() const;
+    QString activeVisionApiConfigId() const;
+    void setVisionApiConfigs(const QList<VisionApiConfig> &configs,
+                             const QString &activeConfigId);
+
     QStringList customAnalysisDimensions() const;
     void setCustomAnalysisDimensions(const QStringList &values);
 
@@ -43,6 +57,9 @@ public:
     QString quickSearchShortcut() const;
     void setQuickSearchShortcut(const QString &shortcut);
 
+    QStringList reportEnabledSections() const;
+    void setReportEnabledSections(const QStringList &sections);
+
     bool hasQuickSearchWindowPosition() const;
     QPoint quickSearchWindowPosition() const;
     void setQuickSearchWindowPosition(const QPoint &position);
@@ -55,6 +72,18 @@ public:
 
     int frameInterval() const;
     void setFrameInterval(int value);
+
+    VideoFrameExtractionStrategy videoFrameExtractionStrategy() const;
+    void setVideoFrameExtractionStrategy(VideoFrameExtractionStrategy value);
+
+    double videoFrameIntervalSeconds() const;
+    void setVideoFrameIntervalSeconds(double value);
+
+    double videoSceneThreshold() const;
+    void setVideoSceneThreshold(double value);
+
+    double videoMinimumSharpness() const;
+    void setVideoMinimumSharpness(double value);
 
     int thumbnailFrameIndex() const;
     void setThumbnailFrameIndex(int value);

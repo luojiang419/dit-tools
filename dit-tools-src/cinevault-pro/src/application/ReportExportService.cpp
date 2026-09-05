@@ -166,6 +166,7 @@ bool ReportExportService::buildDocument(const ReportExportRequest &request, Repo
     document->project.cinematographer = request.cinematographer;
     document->project.ditName = request.ditName;
     document->project.exportTime = QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+    document->sections = request.sections;
 
     auto db = m_databaseManager->database();
     if (!db.isOpen()) {

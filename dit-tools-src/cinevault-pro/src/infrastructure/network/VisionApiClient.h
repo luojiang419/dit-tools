@@ -6,7 +6,8 @@
 
 class VisionApiClient {
 public:
-    static QString normalizedEndpoint(const QString &baseUrl);
+    static QString normalizedEndpoint(const QString &baseUrl, const QString &model = QString());
+    static int maxConcurrentFrameRequests(const QString &model);
 
     bool testConnection(const QString &baseUrl,
                         const QString &apiKey,
