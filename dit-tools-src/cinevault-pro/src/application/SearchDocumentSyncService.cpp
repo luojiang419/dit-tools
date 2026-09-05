@@ -731,10 +731,20 @@ SearchDocumentSyncService::~SearchDocumentSyncService()
 bool SearchDocumentSyncService::synchronizeNow(SemanticIndexUpdateResult *result,
                                                QString *errorMessage)
 {
-    return synchronizeDatabase(m_globalDatabaseManager,
-                               m_semanticSearchIndexService,
-                               result,
-                               errorMessage);
+    if (!m_semanticSearchIndexService
+        || !m_semanticSearchIndexService->beginBulkUpdate(errorMessage)) {
+        return false;
+    }
+    const auto success = synchronizeDatabase(m_globalDatabaseManager,
+                                             m_semanticSearchIndexService,
+                                             result,
+                                             errorMessage);
+    if (!success) {
+        m_semanticSearchIndexService->abortBulkUpdate(
+            errorMessage ? *errorMessage : QStringLiteral("搜索文档同步失败"));
+        return false;
+    }
+    return m_semanticSearchIndexService->publishBulkUpdate(errorMessage);
 }
 
 bool SearchDocumentSyncService::synchronizeChangesNow(const CatalogChangeSet &changeSet,
@@ -744,12 +754,22 @@ bool SearchDocumentSyncService::synchronizeChangesNow(const CatalogChangeSet &ch
     if (changeSet.fullRebuild) {
         return synchronizeNow(result, errorMessage);
     }
-    return synchronizeIncrementalDatabase(m_globalDatabaseManager,
-                                          m_semanticSearchIndexService,
-                                          {changeSet},
-                                          {},
-                                          result,
-                                          errorMessage);
+    if (!m_semanticSearchIndexService
+        || !m_semanticSearchIndexService->beginBulkUpdate(errorMessage)) {
+        return false;
+    }
+    const auto success = synchronizeIncrementalDatabase(m_globalDatabaseManager,
+                                                        m_semanticSearchIndexService,
+                                                        {changeSet},
+                                                        {},
+                                                        result,
+                                                        errorMessage);
+    if (!success) {
+        m_semanticSearchIndexService->abortBulkUpdate(
+            errorMessage ? *errorMessage : QStringLiteral("搜索文档增量同步失败"));
+        return false;
+    }
+    return m_semanticSearchIndexService->publishBulkUpdate(errorMessage);
 }
 
 void SearchDocumentSyncService::setWorkCoordinator(IndexingWorkCoordinator *workCoordinator)
@@ -783,6 +803,7 @@ void SearchDocumentSyncService::scheduleImmediateFullSync()
     }
     m_pendingFullSync = true;
     m_pendingImmediateFullSync = true;
+    m_consecutiveFailures = 0;
     m_pendingCatalogChanges.clear();
     m_pendingAnalysisVideoKeys.clear();
     schedulePendingWork();
@@ -884,6 +905,11 @@ void SearchDocumentSyncService::schedulePendingWork()
     if (m_pendingImmediateFullSync) {
         m_debounceWindow.invalidate();
         m_debounceTimer->start(0);
+        return;
+    }
+    if (m_consecutiveFailures > 0) {
+        const auto exponent = qMin(4, m_consecutiveFailures - 1);
+        m_debounceTimer->start(qMin(60000, 2500 * (1 << exponent)));
         return;
     }
     if (!m_debounceWindow.isValid()) {
@@ -1001,19 +1027,26 @@ void SearchDocumentSyncService::startScheduledSync()
                                     detail);
                             }, Qt::QueuedConnection);
                         };
-                    success = fullSync
-                        ? synchronizeDatabase(&workerDatabaseManager,
-                                              &workerIndexService,
-                                              &updateResult,
-                                              &errorMessage,
-                                              progressCallback)
-                        : synchronizeIncrementalDatabase(&workerDatabaseManager,
-                                                         &workerIndexService,
-                                                         changeSets,
-                                                         analysisVideoKeys,
-                                                         &updateResult,
-                                                         &errorMessage,
-                                                         progressCallback);
+                    if (workerIndexService.beginBulkUpdate(&errorMessage)) {
+                        success = fullSync
+                            ? synchronizeDatabase(&workerDatabaseManager,
+                                                  &workerIndexService,
+                                                  &updateResult,
+                                                  &errorMessage,
+                                                  progressCallback)
+                            : synchronizeIncrementalDatabase(&workerDatabaseManager,
+                                                             &workerIndexService,
+                                                             changeSets,
+                                                             analysisVideoKeys,
+                                                             &updateResult,
+                                                             &errorMessage,
+                                                             progressCallback);
+                        if (success) {
+                            success = workerIndexService.publishBulkUpdate(&errorMessage);
+                        } else {
+                            workerIndexService.abortBulkUpdate(errorMessage);
+                        }
+                    }
                 }
                 workerDatabaseManager.closeDatabase();
             }
@@ -1021,7 +1054,13 @@ void SearchDocumentSyncService::startScheduledSync()
         if (!guard) {
             return;
         }
-        QMetaObject::invokeMethod(guard, [guard, success, updateResult, errorMessage]() {
+        QMetaObject::invokeMethod(guard, [guard,
+                                          success,
+                                          updateResult,
+                                          errorMessage,
+                                          fullSync,
+                                          changeSets,
+                                          analysisVideoKeys]() {
             if (!guard) {
                 return;
             }
@@ -1030,6 +1069,24 @@ void SearchDocumentSyncService::startScheduledSync()
             }
             guard->m_running = false;
             guard->m_runningFullSync = false;
+            if (success) {
+                guard->m_consecutiveFailures = 0;
+            } else {
+                ++guard->m_consecutiveFailures;
+                if (fullSync) {
+                    guard->m_pendingFullSync = true;
+                    guard->m_pendingImmediateFullSync = false;
+                    guard->m_pendingCatalogChanges.clear();
+                    guard->m_pendingAnalysisVideoKeys.clear();
+                } else {
+                    for (const auto &changeSet : changeSets) {
+                        guard->scheduleCatalogChanges(changeSet);
+                    }
+                    for (const auto &videoKey : analysisVideoKeys) {
+                        guard->scheduleAssetSync(videoKey);
+                    }
+                }
+            }
             const auto message = success
                 ? QStringLiteral("搜索文档同步完成")
                 : errorMessage;

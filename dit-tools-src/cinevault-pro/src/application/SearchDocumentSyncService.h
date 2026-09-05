@@ -70,4 +70,5 @@ private:
     bool m_pendingImmediateFullSync = false;
     bool m_running = false;
     bool m_runningFullSync = false;
+    int m_consecutiveFailures = 0;
 };

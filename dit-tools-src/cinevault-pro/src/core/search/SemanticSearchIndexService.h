@@ -31,6 +31,9 @@ public:
                       SemanticIndexUpdateResult *result,
                       QString *errorMessage,
                       const SemanticIndexProgressCallback &progressCallback = {});
+    bool beginBulkUpdate(QString *errorMessage);
+    bool publishBulkUpdate(QString *errorMessage);
+    void abortBulkUpdate(const QString &reason);
     void discardLoadedIndex();
     QVector<SemanticSearchHit> search(const QString &queryText,
                                       qsizetype limit,
@@ -55,4 +58,6 @@ private:
     mutable QMutex m_mutex;
     bool m_ready = false;
     bool m_lastEnsureRebuilt = false;
+    bool m_bulkUpdateActive = false;
+    bool m_bulkUpdateDirty = false;
 };

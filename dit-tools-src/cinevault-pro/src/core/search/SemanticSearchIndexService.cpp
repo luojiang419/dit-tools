@@ -695,8 +695,81 @@ bool SemanticSearchIndexService::applyChanges(const QVector<SearchDocumentInput>
         }
     }
 
+    if (m_bulkUpdateActive) {
+        m_bulkUpdateDirty = true;
+    } else {
+        if (!m_index.save(m_indexFilePath, &indexError)) {
+            return rollbackFailure(QStringLiteral("保存增量 USearch 索引失败：%1").arg(indexError));
+        }
+        QSqlQuery readyState(db);
+        readyState.prepare(QStringLiteral(
+            "UPDATE search_index_state SET schema_version = ?, model_id = ?, dimensions = ?, "
+            "generation = generation + 1, status = 'ready', "
+            "document_count = (SELECT COUNT(*) FROM search_document), updated_at = ?, last_error = '' "
+            "WHERE singleton = 1"));
+        readyState.addBindValue(cinevault::searchconfig::kSearchIndexSchemaVersion);
+        readyState.addBindValue(currentModelId());
+        readyState.addBindValue(cinevault::searchconfig::kEmbeddingDimensions);
+        readyState.addBindValue(timestamp);
+        if (!readyState.exec()) {
+            return rollbackFailure(QStringLiteral("更新增量语义索引状态失败：%1")
+                                       .arg(readyState.lastError().text()));
+        }
+    }
+    if (!db.commit()) {
+        return rollbackFailure(QStringLiteral("提交语义索引增量事务失败：%1")
+                                   .arg(db.lastError().text()));
+    }
+    m_ready = true;
+    if (result) *result = localResult;
+    return true;
+}
+
+bool SemanticSearchIndexService::beginBulkUpdate(QString *errorMessage)
+{
+    QMutexLocker updateLocker(&processSemanticUpdateMutex);
+    QMutexLocker processLocker(&processSemanticIndexMutex);
+    QMutexLocker locker(&m_mutex);
+    if (!ensureReadyLocked(errorMessage, true)) {
+        return false;
+    }
+    m_bulkUpdateActive = true;
+    m_bulkUpdateDirty = false;
+    return true;
+}
+
+bool SemanticSearchIndexService::publishBulkUpdate(QString *errorMessage)
+{
+    QMutexLocker updateLocker(&processSemanticUpdateMutex);
+    QMutexLocker processLocker(&processSemanticIndexMutex);
+    QMutexLocker locker(&m_mutex);
+    if (!m_bulkUpdateActive) {
+        return true;
+    }
+    if (!m_bulkUpdateDirty) {
+        m_bulkUpdateActive = false;
+        return true;
+    }
+
+    QString indexError;
     if (!m_index.save(m_indexFilePath, &indexError)) {
-        return rollbackFailure(QStringLiteral("保存增量 USearch 索引失败：%1").arg(indexError));
+        m_bulkUpdateActive = false;
+        m_bulkUpdateDirty = false;
+        const auto message = QStringLiteral("发布批量语义索引失败：%1").arg(indexError);
+        recordFailureLocked(message);
+        if (errorMessage) *errorMessage = message;
+        return false;
+    }
+
+    auto db = m_globalDatabaseManager->database();
+    if (!db.transaction()) {
+        m_bulkUpdateActive = false;
+        m_bulkUpdateDirty = false;
+        const auto message = QStringLiteral("无法开始批量语义索引发布事务：%1")
+                                 .arg(db.lastError().text());
+        recordFailureLocked(message);
+        if (errorMessage) *errorMessage = message;
+        return false;
     }
     QSqlQuery readyState(db);
     readyState.prepare(QStringLiteral(
@@ -707,18 +780,39 @@ bool SemanticSearchIndexService::applyChanges(const QVector<SearchDocumentInput>
     readyState.addBindValue(cinevault::searchconfig::kSearchIndexSchemaVersion);
     readyState.addBindValue(currentModelId());
     readyState.addBindValue(cinevault::searchconfig::kEmbeddingDimensions);
-    readyState.addBindValue(timestamp);
-    if (!readyState.exec()) {
-        return rollbackFailure(QStringLiteral("更新增量语义索引状态失败：%1")
-                                   .arg(readyState.lastError().text()));
+    readyState.addBindValue(currentTimestamp());
+    if (!readyState.exec() || !db.commit()) {
+        const auto message = QStringLiteral("提交批量语义索引发布失败：%1")
+                                 .arg(readyState.lastError().text().isEmpty()
+                                          ? db.lastError().text()
+                                          : readyState.lastError().text());
+        db.rollback();
+        m_bulkUpdateActive = false;
+        m_bulkUpdateDirty = false;
+        recordFailureLocked(message);
+        if (errorMessage) *errorMessage = message;
+        return false;
     }
-    if (!db.commit()) {
-        return rollbackFailure(QStringLiteral("提交语义索引增量事务失败：%1")
-                                   .arg(db.lastError().text()));
-    }
+    m_bulkUpdateActive = false;
+    m_bulkUpdateDirty = false;
     m_ready = true;
-    if (result) *result = localResult;
+    if (errorMessage) errorMessage->clear();
     return true;
+}
+
+void SemanticSearchIndexService::abortBulkUpdate(const QString &reason)
+{
+    QMutexLocker updateLocker(&processSemanticUpdateMutex);
+    QMutexLocker processLocker(&processSemanticIndexMutex);
+    QMutexLocker locker(&m_mutex);
+    const auto wasDirty = m_bulkUpdateDirty;
+    m_bulkUpdateActive = false;
+    m_bulkUpdateDirty = false;
+    if (wasDirty) {
+        recordFailureLocked(reason.trimmed().isEmpty()
+                                ? QStringLiteral("批量语义索引更新已中止")
+                                : reason);
+    }
 }
 
 void SemanticSearchIndexService::discardLoadedIndex()

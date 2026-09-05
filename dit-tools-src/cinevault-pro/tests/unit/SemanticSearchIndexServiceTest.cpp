@@ -8,6 +8,7 @@
 #include <QtTest>
 
 #include <QDir>
+#include <QCryptographicHash>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
@@ -41,6 +42,14 @@ qint64 scalarValue(QSqlDatabase db, const QString &sql)
         return -1;
     }
     return query.value(0).toLongLong();
+}
+
+QByteArray fileHash(const QString &path)
+{
+    QFile file(path);
+    return file.open(QIODevice::ReadOnly)
+        ? QCryptographicHash::hash(file.readAll(), QCryptographicHash::Sha256)
+        : QByteArray{};
 }
 
 SearchDocumentInput document(const QString &key,
@@ -285,6 +294,59 @@ private slots:
             return hit.documentKey == QStringLiteral("asset:stable");
         }));
         QVERIFY2(updateOutcome.first, qPrintable(updateOutcome.second));
+        manager.closeDatabase();
+    }
+
+    void bulkUpdatePublishesIndexOnlyOnce()
+    {
+        removeGlobalDatabaseFiles();
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        const auto indexPath = QDir(temp.path()).filePath(QStringLiteral("bulk.usearch"));
+        GlobalDatabaseManager manager;
+        QString errorMessage;
+        QVERIFY2(manager.openDatabase(&errorMessage), qPrintable(errorMessage));
+        SemanticSearchIndexService service(&manager, indexPath);
+
+        QVERIFY2(service.beginBulkUpdate(&errorMessage), qPrintable(errorMessage));
+        const auto initialHash = fileHash(indexPath);
+        const auto initialGeneration = scalarValue(
+            manager.database(),
+            QStringLiteral("SELECT generation FROM search_index_state WHERE singleton = 1"));
+        QVERIFY(!initialHash.isEmpty());
+
+        SemanticIndexUpdateResult first;
+        QVERIFY2(service.applyChanges(
+                     {document(QStringLiteral("asset:bulk-1"),
+                               SearchDocumentType::Asset,
+                               QStringLiteral("bulk-1"),
+                               QStringLiteral("第一批 城市夜景"),
+                               QStringLiteral("2026-09-05T10:00:00Z"))},
+                     {}, &first, &errorMessage),
+                 qPrintable(errorMessage));
+        QCOMPARE(fileHash(indexPath), initialHash);
+        QCOMPARE(scalarValue(manager.database(),
+                             QStringLiteral("SELECT generation FROM search_index_state WHERE singleton = 1")),
+                 initialGeneration);
+
+        SemanticIndexUpdateResult second;
+        QVERIFY2(service.applyChanges(
+                     {document(QStringLiteral("asset:bulk-2"),
+                               SearchDocumentType::Asset,
+                               QStringLiteral("bulk-2"),
+                               QStringLiteral("第二批 雪山日出"),
+                               QStringLiteral("2026-09-05T10:01:00Z"))},
+                     {}, &second, &errorMessage),
+                 qPrintable(errorMessage));
+        QCOMPARE(fileHash(indexPath), initialHash);
+
+        QVERIFY2(service.publishBulkUpdate(&errorMessage), qPrintable(errorMessage));
+        QVERIFY(fileHash(indexPath) != initialHash);
+        QCOMPARE(scalarValue(manager.database(),
+                             QStringLiteral("SELECT generation FROM search_index_state WHERE singleton = 1")),
+                 initialGeneration + 1);
+        QCOMPARE(scalarValue(manager.database(), QStringLiteral("SELECT COUNT(*) FROM search_document")),
+                 qint64{2});
         manager.closeDatabase();
     }
 

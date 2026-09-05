@@ -544,6 +544,33 @@ private slots:
                          "'folder:project-search|1|2026-07-14/山谷'")),
                  qint64{1});
     }
+
+    void failedScheduledSyncRestoresWorkAndRetriesWithBackoff()
+    {
+        Fixture fixture;
+        QVERIFY2(fixture.valid, qPrintable(fixture.errorMessage));
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        const auto indexPath = QDir(temp.path()).filePath(QStringLiteral("retry.usearch"));
+        QVERIFY(QDir().mkpath(indexPath));
+        SemanticSearchIndexService semanticIndex(&fixture.manager, indexPath);
+        SearchDocumentSyncService syncService(&fixture.manager, &semanticIndex);
+        QSignalSpy completion(&syncService,
+                              &SearchDocumentSyncService::synchronizationFinished);
+
+        syncService.scheduleImmediateFullSync();
+        QVERIFY2(completion.wait(10000), "故障同步未返回失败结果");
+        QVERIFY(!completion.constFirst().at(0).toBool());
+
+        QVERIFY(QDir(indexPath).removeRecursively());
+        QVERIFY2(completion.wait(10000), "修复输出路径后，失败工作未自动重放");
+        QCOMPARE(completion.size(), 2);
+        QVERIFY(completion.at(1).at(0).toBool());
+        QCOMPARE(scalarCount(fixture.manager.database(),
+                             QStringLiteral("SELECT COUNT(*) FROM search_document")),
+                 qint64{4});
+        QVERIFY(QFileInfo(indexPath).isFile());
+    }
 };
 
 QTEST_GUILESS_MAIN(SearchDocumentSyncServiceTest)
