@@ -380,6 +380,9 @@ AppContext::~AppContext()
     if (m_videoAnalysisService) {
         m_videoAnalysisService->waitForIdle();
     }
+    if (m_jobEngine) {
+        m_jobEngine->waitForPersistence();
+    }
     if (m_searchDocumentSyncService) {
         m_searchDocumentSyncService->waitForIdle();
     }

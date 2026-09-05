@@ -6,6 +6,7 @@
 #include <QDebug>
 #include <QDir>
 #include <QFileInfo>
+#include <QFutureWatcher>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSet>
@@ -13,7 +14,9 @@
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QStringList>
+#include <QThread>
 #include <QUuid>
+#include <QtConcurrent/QtConcurrentRun>
 
 #include <functional>
 
@@ -132,7 +135,8 @@ bool executeForProject(DatabaseManager *databaseManager,
         return false;
     }
 
-    if (databaseManager->hasOpenProject()
+    if (QThread::currentThread() == databaseManager->thread()
+        && databaseManager->hasOpenProject()
         && normalizedDatabasePath(databaseManager->databaseFilePath())
             == normalizedDatabasePath(projectDatabasePath)) {
         auto db = databaseManager->database();
@@ -201,6 +205,14 @@ JobEngine::JobEngine(DatabaseManager *databaseManager, QObject *parent)
     : QObject(parent)
     , m_databaseManager(databaseManager)
 {
+    m_persistenceTimer.setSingleShot(true);
+    m_persistenceTimer.setInterval(200);
+    m_persistencePool.setMaxThreadCount(1);
+    m_persistencePool.setExpiryTimeout(-1);
+    connect(&m_persistenceTimer,
+            &QTimer::timeout,
+            this,
+            &JobEngine::flushPendingPersistence);
 }
 
 qint64 JobEngine::createJob(JobType type,
@@ -262,43 +274,36 @@ void JobEngine::updateJobForProject(const QString &projectDatabasePath,
                                     const QString &detail,
                                     const JobProgressContext &progressContext)
 {
+    const auto hasContext = hasProgressContext(progressContext);
+    const auto updatedAt = QDateTime::currentDateTime();
     if (isCurrentProject(projectDatabasePath)) {
         auto *job = findJob(jobId);
         if (!job) {
             return;
         }
-        const auto previous = *job;
         job->progress = progress;
         job->detail = detail;
-        if (hasProgressContext(progressContext)) {
+        if (hasContext) {
             job->progressContext = progressContext;
         }
-        job->updatedAt = QDateTime::currentDateTime();
-        if (!persistJob(*job)) {
-            *job = previous;
-            return;
-        }
+        job->updatedAt = updatedAt;
         emit jobsChanged();
-        return;
     }
 
-    QString persistenceError;
-    const auto hasContext = hasProgressContext(progressContext);
     const auto statement = hasContext
         ? QStringLiteral("UPDATE job SET progress = ?, detail = ?, progress_context_json = ?, updated_at = ? WHERE id = ?")
         : QStringLiteral("UPDATE job SET progress = ?, detail = ?, updated_at = ? WHERE id = ?");
     const auto values = hasContext
         ? QVariantList{progress, detail, progressContextJson(progressContext),
-                       QDateTime::currentDateTime().toString(Qt::ISODate), jobId}
+                       updatedAt.toString(Qt::ISODate), jobId}
         : QVariantList{progress, detail,
-                       QDateTime::currentDateTime().toString(Qt::ISODate), jobId};
-    if (!executeJobUpdate(m_databaseManager,
-                          projectDatabasePath,
-                          statement,
-                          values,
-                          &persistenceError)) {
-        reportPersistenceError(persistenceError);
-    }
+                       updatedAt.toString(Qt::ISODate), jobId};
+    enqueuePersistence(QStringLiteral("%1|%2|progress")
+                           .arg(normalizedDatabasePath(projectDatabasePath))
+                           .arg(jobId),
+                       projectDatabasePath,
+                       statement,
+                       values);
 }
 
 void JobEngine::updateJobSubject(qint64 jobId, const JobSubject &subject)
@@ -310,30 +315,21 @@ void JobEngine::updateJobSubjectForProject(const QString &projectDatabasePath,
                                            qint64 jobId,
                                            const JobSubject &subject)
 {
+    const auto updatedAt = QDateTime::currentDateTime();
     if (isCurrentProject(projectDatabasePath)) {
         if (auto *job = findJob(jobId)) {
-            const auto previous = *job;
             job->subject = subject;
-            job->updatedAt = QDateTime::currentDateTime();
-            if (!persistJob(*job)) {
-                *job = previous;
-                return;
-            }
+            job->updatedAt = updatedAt;
             emit jobsChanged();
         }
-        return;
     }
 
-    QString persistenceError;
-    if (!executeJobUpdate(m_databaseManager,
-                          projectDatabasePath,
-                          QStringLiteral("UPDATE job SET subject_json = ?, updated_at = ? WHERE id = ?"),
-                          {subjectJson(subject),
-                           QDateTime::currentDateTime().toString(Qt::ISODate),
-                           jobId},
-                          &persistenceError)) {
-        reportPersistenceError(persistenceError);
-    }
+    enqueuePersistence(QStringLiteral("%1|%2|subject")
+                           .arg(normalizedDatabasePath(projectDatabasePath))
+                           .arg(jobId),
+                       projectDatabasePath,
+                       QStringLiteral("UPDATE job SET subject_json = ?, updated_at = ? WHERE id = ?"),
+                       {subjectJson(subject), updatedAt.toString(Qt::ISODate), jobId});
 }
 
 void JobEngine::completeJob(qint64 jobId, const QString &detail)
@@ -343,34 +339,30 @@ void JobEngine::completeJob(qint64 jobId, const QString &detail)
 
 void JobEngine::completeJobForProject(const QString &projectDatabasePath, qint64 jobId, const QString &detail)
 {
+    const auto updatedAt = QDateTime::currentDateTime();
     if (isCurrentProject(projectDatabasePath)) {
         auto *job = findJob(jobId);
         if (!job) {
             return;
         }
-        const auto previous = *job;
         job->state = JobState::Completed;
         job->progress = 100;
         job->detail = detail;
         job->errorMessage.clear();
-        job->updatedAt = QDateTime::currentDateTime();
-        if (!persistJob(*job)) {
-            *job = previous;
-            return;
-        }
+        job->updatedAt = updatedAt;
         emit jobsChanged();
-        return;
     }
 
-    QString persistenceError;
-    if (!executeJobUpdate(m_databaseManager,
-                          projectDatabasePath,
-                          QStringLiteral("UPDATE job SET state = ?, progress = 100, detail = ?, error_message = '', updated_at = ? WHERE id = ?"),
-                          {static_cast<int>(JobState::Completed), detail,
-                           QDateTime::currentDateTime().toString(Qt::ISODate), jobId},
-                          &persistenceError)) {
-        reportPersistenceError(persistenceError);
-    }
+    const auto keyPrefix = QStringLiteral("%1|%2|")
+                               .arg(normalizedDatabasePath(projectDatabasePath))
+                               .arg(jobId);
+    m_pendingPersistence.remove(keyPrefix + QStringLiteral("progress"));
+    enqueuePersistence(keyPrefix + QStringLiteral("terminal"),
+                       projectDatabasePath,
+                       QStringLiteral("UPDATE job SET state = ?, progress = 100, detail = ?, error_message = '', updated_at = ? WHERE id = ?"),
+                       {static_cast<int>(JobState::Completed), detail,
+                        updatedAt.toString(Qt::ISODate), jobId},
+                       true);
 }
 
 void JobEngine::failJob(qint64 jobId, const QString &errorMessage)
@@ -380,33 +372,29 @@ void JobEngine::failJob(qint64 jobId, const QString &errorMessage)
 
 void JobEngine::failJobForProject(const QString &projectDatabasePath, qint64 jobId, const QString &errorMessage)
 {
+    const auto updatedAt = QDateTime::currentDateTime();
     if (isCurrentProject(projectDatabasePath)) {
         auto *job = findJob(jobId);
         if (!job) {
             return;
         }
-        const auto previous = *job;
         job->state = JobState::Failed;
         job->errorMessage = errorMessage;
         job->detail = errorMessage;
-        job->updatedAt = QDateTime::currentDateTime();
-        if (!persistJob(*job)) {
-            *job = previous;
-            return;
-        }
+        job->updatedAt = updatedAt;
         emit jobsChanged();
-        return;
     }
 
-    QString persistenceError;
-    if (!executeJobUpdate(m_databaseManager,
-                          projectDatabasePath,
-                          QStringLiteral("UPDATE job SET state = ?, detail = ?, error_message = ?, updated_at = ? WHERE id = ?"),
-                          {static_cast<int>(JobState::Failed), errorMessage, errorMessage,
-                           QDateTime::currentDateTime().toString(Qt::ISODate), jobId},
-                          &persistenceError)) {
-        reportPersistenceError(persistenceError);
-    }
+    const auto keyPrefix = QStringLiteral("%1|%2|")
+                               .arg(normalizedDatabasePath(projectDatabasePath))
+                               .arg(jobId);
+    m_pendingPersistence.remove(keyPrefix + QStringLiteral("progress"));
+    enqueuePersistence(keyPrefix + QStringLiteral("terminal"),
+                       projectDatabasePath,
+                       QStringLiteral("UPDATE job SET state = ?, detail = ?, error_message = ?, updated_at = ? WHERE id = ?"),
+                       {static_cast<int>(JobState::Failed), errorMessage, errorMessage,
+                        updatedAt.toString(Qt::ISODate), jobId},
+                       true);
 }
 
 QString JobEngine::currentProjectDatabasePath() const
@@ -624,6 +612,109 @@ void JobEngine::clearFailedJobsForRetry(qint64 sourceRootId,
 QVector<Job> JobEngine::jobs() const
 {
     return m_jobs;
+}
+
+void JobEngine::enqueuePersistence(const QString &key,
+                                   const QString &projectDatabasePath,
+                                   const QString &statement,
+                                   const QVariantList &values,
+                                   bool flushImmediately)
+{
+    if (!m_databaseManager || projectDatabasePath.trimmed().isEmpty()) {
+        return;
+    }
+    PendingPersistence pending;
+    pending.key = key;
+    pending.projectDatabasePath = projectDatabasePath;
+    pending.statement = statement;
+    pending.values = values;
+    m_pendingPersistence.insert(key, std::move(pending));
+    if (flushImmediately && !m_persistenceRunning) {
+        m_persistenceTimer.stop();
+        flushPendingPersistence();
+    } else {
+        m_persistenceTimer.start();
+    }
+}
+
+void JobEngine::flushPendingPersistence()
+{
+    if (m_persistenceRunning || m_pendingPersistence.isEmpty()) {
+        return;
+    }
+    QVector<PendingPersistence> batch;
+    batch.reserve(m_pendingPersistence.size());
+    for (auto &pending : m_pendingPersistence) {
+        batch.append(std::move(pending));
+    }
+    m_pendingPersistence.clear();
+    startPersistenceBatch(std::move(batch), true);
+}
+
+void JobEngine::startPersistenceBatch(QVector<PendingPersistence> batch,
+                                      bool observeCompletion)
+{
+    if (batch.isEmpty()) {
+        return;
+    }
+    if (observeCompletion) {
+        m_persistenceRunning = true;
+    }
+    auto *databaseManager = m_databaseManager;
+    auto future = QtConcurrent::run(&m_persistencePool, [databaseManager, batch = std::move(batch)]() mutable {
+        PersistenceBatchResult result;
+        for (auto &pending : batch) {
+            QString errorMessage;
+            if (!executeJobUpdate(databaseManager,
+                                  pending.projectDatabasePath,
+                                  pending.statement,
+                                  pending.values,
+                                  &errorMessage)) {
+                ++pending.attempt;
+                result.failed.append(std::move(pending));
+                if (result.errorMessage.isEmpty()) {
+                    result.errorMessage = errorMessage;
+                }
+            }
+        }
+        return result;
+    });
+    if (!observeCompletion) {
+        return;
+    }
+    auto *watcher = new QFutureWatcher<PersistenceBatchResult>(this);
+    connect(watcher, &QFutureWatcher<PersistenceBatchResult>::finished, this, [this, watcher]() {
+        const auto result = watcher->result();
+        watcher->deleteLater();
+        m_persistenceRunning = false;
+        for (const auto &failed : result.failed) {
+            if (failed.attempt < 3 && !m_pendingPersistence.contains(failed.key)) {
+                m_pendingPersistence.insert(failed.key, failed);
+            }
+        }
+        if (!result.errorMessage.isEmpty()) {
+            reportPersistenceError(result.errorMessage);
+        }
+        if (!m_pendingPersistence.isEmpty()) {
+            m_persistenceTimer.start(result.failed.isEmpty() ? 0 : 500);
+        }
+    });
+    watcher->setFuture(future);
+}
+
+void JobEngine::waitForPersistence()
+{
+    m_persistenceTimer.stop();
+    if (!m_pendingPersistence.isEmpty()) {
+        QVector<PendingPersistence> batch;
+        batch.reserve(m_pendingPersistence.size());
+        for (auto &pending : m_pendingPersistence) {
+            batch.append(std::move(pending));
+        }
+        m_pendingPersistence.clear();
+        startPersistenceBatch(std::move(batch), false);
+    }
+    m_persistencePool.waitForDone();
 }
 
 bool JobEngine::persistJob(const Job &job)

@@ -343,6 +343,41 @@ private slots:
         QCOMPARE(folders.value(6).toString(), QStringLiteral("2026-07-14"));
         QVERIFY(!folders.next());
 
+        QSqlQuery assets(manager.database());
+        QVERIFY2(assets.exec(QStringLiteral(
+                     "SELECT relative_path, parent_relative_path FROM asset_file ORDER BY relative_path")),
+                 qPrintable(assets.lastError().text()));
+        QVERIFY(assets.next());
+        QCOMPARE(assets.value(0).toString(), QStringLiteral("2026-07-14/CameraA/cam.mov"));
+        QCOMPARE(assets.value(1).toString(), QStringLiteral("2026-07-14/CameraA"));
+        QVERIFY(assets.next());
+        QCOMPARE(assets.value(0).toString(), QStringLiteral("2026-07-14/day.mov"));
+        QCOMPARE(assets.value(1).toString(), QStringLiteral("2026-07-14"));
+        QVERIFY(assets.next());
+        QCOMPARE(assets.value(0).toString(), QStringLiteral("root.mov"));
+        QCOMPARE(assets.value(1).toString(), QString());
+        QVERIFY(!assets.next());
+
+        QSqlQuery parentIndex(manager.database());
+        QVERIFY2(parentIndex.exec(QStringLiteral(
+                     "SELECT 1 FROM sqlite_master WHERE type = 'index' "
+                     "AND name = 'idx_asset_file_source_parent'")),
+                 qPrintable(parentIndex.lastError().text()));
+        QVERIFY(parentIndex.next());
+
+        QSqlQuery parentPlan(manager.database());
+        QVERIFY2(parentPlan.exec(QStringLiteral(
+                     "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM asset_file "
+                     "WHERE source_root_id = 1 AND parent_relative_path = '2026-07-14'")),
+                 qPrintable(parentPlan.lastError().text()));
+        QStringList planDetails;
+        while (parentPlan.next()) {
+            planDetails.append(parentPlan.value(3).toString());
+        }
+        QVERIFY2(planDetails.join(QLatin1Char(' ')).contains(
+                     QStringLiteral("idx_asset_file_source_parent")),
+                 qPrintable(planDetails.join(QStringLiteral(" | "))));
+
         manager.closeProjectDatabase();
     }
 

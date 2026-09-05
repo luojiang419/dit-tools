@@ -2,6 +2,7 @@
 #include "infrastructure/db/DatabaseManager.h"
 
 #include <QDir>
+#include <QElapsedTimer>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QTemporaryDir>
@@ -30,6 +31,7 @@ private slots:
     void projectScopedUpdatesDoNotMutateSameIdInCurrentProject();
     void reloadJobsCapsLoadedHistory();
     void persistenceFailureDoesNotPublishInMemoryJob();
+    void progressPersistenceDoesNotBlockUiOnWriterLock();
 };
 
 void JobEngineTest::clearFinishedJobsKeepsOnlyActiveJobs()
@@ -73,6 +75,7 @@ void JobEngineTest::removeFinishedJobPersistsAndRejectsActiveJob()
     const auto runningId = engine.createJob(
         JobType::Thumbnail, QStringLiteral("进行中"), QStringLiteral("处理中"));
     engine.completeJob(finishedId, QStringLiteral("完成"));
+    engine.waitForPersistence();
 
     QVERIFY(engine.removeFinishedJob(finishedId));
     QVERIFY(!engine.removeFinishedJob(runningId));
@@ -153,6 +156,7 @@ void JobEngineTest::reloadJobsRestoresHistoryAndAdvancesIds()
                                               QStringLiteral("处理中"),
                                               0);
         initialEngine.completeJob(completedId, QStringLiteral("完成"));
+        initialEngine.waitForPersistence();
     }
 
     JobEngine restoredEngine(&databaseManager);
@@ -224,6 +228,7 @@ void JobEngineTest::projectScopedUpdatesDoNotMutateSameIdInCurrentProject()
     QCOMPARE(firstId, secondId);
 
     engine.completeJobForProject(firstPath, firstId, QStringLiteral("项目一已完成"));
+    engine.waitForPersistence();
 
     const auto currentJobs = engine.jobs();
     QCOMPARE(currentJobs.size(), 1);
@@ -316,6 +321,52 @@ void JobEngineTest::persistenceFailureDoesNotPublishInMemoryJob()
     QCOMPARE(errorSpy.count(), 1);
 }
 
-QTEST_APPLESS_MAIN(JobEngineTest)
+void JobEngineTest::progressPersistenceDoesNotBlockUiOnWriterLock()
+{
+    QTemporaryDir temp;
+    QVERIFY(temp.isValid());
+    DatabaseManager databaseManager;
+    QString errorMessage;
+    const auto databasePath = QDir(temp.path()).filePath(QStringLiteral("async-progress.cvdb"));
+    QVERIFY2(databaseManager.openProjectDatabase(databasePath, &errorMessage), qPrintable(errorMessage));
+
+    JobEngine engine(&databaseManager);
+    const auto jobId = engine.createJob(
+        JobType::Scan, QStringLiteral("异步进度"), QStringLiteral("准备中"));
+    QVERIFY(jobId > 0);
+
+    const auto lockConnectionName = QStringLiteral("job_engine_writer_lock_test");
+    auto lockDatabase = databaseManager.openThreadConnectionForPath(
+        databasePath, lockConnectionName, &errorMessage);
+    QVERIFY2(lockDatabase.isOpen(), qPrintable(errorMessage));
+    QVERIFY(lockDatabase.transaction());
+    QSqlQuery lockQuery(lockDatabase);
+    lockQuery.prepare(QStringLiteral("UPDATE job SET detail = 'locked' WHERE id = ?"));
+    lockQuery.addBindValue(jobId);
+    QVERIFY(lockQuery.exec());
+
+    QElapsedTimer elapsed;
+    elapsed.start();
+    engine.updateJob(jobId, 42, QStringLiteral("后台写入"));
+    QVERIFY2(elapsed.elapsed() < 100,
+             qPrintable(QStringLiteral("UI 更新被数据库锁阻塞 %1ms").arg(elapsed.elapsed())));
+
+    lockDatabase.rollback();
+    lockQuery = QSqlQuery();
+    lockDatabase.close();
+    lockDatabase = QSqlDatabase();
+    databaseManager.closeThreadConnection(lockConnectionName);
+    engine.waitForPersistence();
+
+    QSqlQuery query(databaseManager.database());
+    query.prepare(QStringLiteral("SELECT progress, detail FROM job WHERE id = ?"));
+    query.addBindValue(jobId);
+    QVERIFY2(query.exec(), qPrintable(query.lastError().text()));
+    QVERIFY(query.next());
+    QCOMPARE(query.value(0).toInt(), 42);
+    QCOMPARE(query.value(1).toString(), QStringLiteral("后台写入"));
+}
+
+QTEST_GUILESS_MAIN(JobEngineTest)
 
 #include "JobEngineTest.moc"

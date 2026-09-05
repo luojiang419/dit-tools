@@ -11,7 +11,7 @@ class DatabaseManager : public QObject {
 public:
     explicit DatabaseManager(QObject *parent = nullptr);
 
-    static constexpr int CurrentSchemaVersion = 10;
+    static constexpr int CurrentSchemaVersion = 11;
 
     bool openProjectDatabase(const QString &databaseFilePath, QString *errorMessage);
     void closeProjectDatabase();
@@ -48,6 +48,8 @@ private:
     bool migrateToVersion9(QSqlDatabase &db, QString *errorMessage) const;
     bool ensureMetadataRetrySchemaCompatibility(QSqlDatabase &db, QString *errorMessage) const;
     bool migrateToVersion10(QSqlDatabase &db, QString *errorMessage) const;
+    bool ensureAssetParentPathSchemaCompatibility(QSqlDatabase &db, QString *errorMessage) const;
+    bool migrateToVersion11(QSqlDatabase &db, QString *errorMessage) const;
     int currentSchemaVersion(QSqlDatabase &db) const;
     bool setSchemaVersion(QSqlDatabase &db, int version, QString *errorMessage) const;
 

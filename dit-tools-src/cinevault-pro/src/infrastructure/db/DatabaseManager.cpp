@@ -359,6 +359,15 @@ bool DatabaseManager::initializeSchema(QSqlDatabase &db, bool databaseExistedBef
         return rollback();
     }
 
+    if (version < 11) {
+        if (!migrateToVersion11(db, errorMessage)) {
+            return rollback();
+        }
+        version = 11;
+    } else if (!ensureAssetParentPathSchemaCompatibility(db, errorMessage)) {
+        return rollback();
+    }
+
     if (!db.commit()) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("提交项目数据库迁移失败：%1").arg(db.lastError().text());
@@ -418,6 +427,7 @@ bool DatabaseManager::createBaseSchema(QSqlDatabase &db, QString *errorMessage) 
                        "extension TEXT,"
                        "absolute_path TEXT NOT NULL,"
                        "relative_path TEXT NOT NULL,"
+                       "parent_relative_path TEXT NOT NULL DEFAULT '',"
                        "parent_path TEXT NOT NULL,"
                        "path_key TEXT NOT NULL DEFAULT '',"
                        "asset_type INTEGER NOT NULL,"
@@ -508,6 +518,7 @@ bool DatabaseManager::ensureBaseSchemaCompatibility(QSqlDatabase &db, QString *e
                              {QStringLiteral("extension"), QStringLiteral("extension TEXT")},
                              {QStringLiteral("absolute_path"), QStringLiteral("absolute_path TEXT NOT NULL DEFAULT ''")},
                              {QStringLiteral("relative_path"), QStringLiteral("relative_path TEXT NOT NULL DEFAULT ''")},
+                             {QStringLiteral("parent_relative_path"), QStringLiteral("parent_relative_path TEXT NOT NULL DEFAULT ''")},
                               {QStringLiteral("parent_path"), QStringLiteral("parent_path TEXT NOT NULL DEFAULT ''")},
                               {QStringLiteral("path_key"), QStringLiteral("path_key TEXT NOT NULL DEFAULT ''")},
                               {QStringLiteral("asset_type"), QStringLiteral("asset_type INTEGER NOT NULL DEFAULT 0")},
@@ -1333,6 +1344,49 @@ bool DatabaseManager::migrateToVersion10(QSqlDatabase &db, QString *errorMessage
         return false;
     }
     return setSchemaVersion(db, 10, errorMessage);
+}
+
+bool DatabaseManager::ensureAssetParentPathSchemaCompatibility(QSqlDatabase &db,
+                                                               QString *errorMessage) const
+{
+    if (!ensureColumn(db,
+                      QStringLiteral("asset_file"),
+                      QStringLiteral("parent_relative_path"),
+                      QStringLiteral("parent_relative_path TEXT NOT NULL DEFAULT ''"),
+                      errorMessage)) {
+        return false;
+    }
+    QSqlQuery backfill(db);
+    if (!backfill.exec(QStringLiteral(
+            "UPDATE asset_file SET parent_relative_path = CASE "
+            "WHEN length(relative_path) > length(name) "
+            "THEN substr(relative_path, 1, length(relative_path) - length(name) - 1) "
+            "ELSE '' END WHERE COALESCE(parent_relative_path, '') = ''"))) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("回填素材父目录路径失败：%1")
+                                .arg(backfill.lastError().text());
+        }
+        return false;
+    }
+    QSqlQuery index(db);
+    if (!index.exec(QStringLiteral(
+            "CREATE INDEX IF NOT EXISTS idx_asset_file_source_parent "
+            "ON asset_file(source_root_id, parent_relative_path)"))) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("创建素材父目录索引失败：%1")
+                                .arg(index.lastError().text());
+        }
+        return false;
+    }
+    return true;
+}
+
+bool DatabaseManager::migrateToVersion11(QSqlDatabase &db, QString *errorMessage) const
+{
+    if (!ensureAssetParentPathSchemaCompatibility(db, errorMessage)) {
+        return false;
+    }
+    return setSchemaVersion(db, 11, errorMessage);
 }
 
 int DatabaseManager::currentSchemaVersion(QSqlDatabase &db) const

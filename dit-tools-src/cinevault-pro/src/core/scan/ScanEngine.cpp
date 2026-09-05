@@ -646,6 +646,7 @@ void ScanEngine::runScan(SourceRoot sourceRoot,
                 "extension = (SELECT s.extension FROM temp.scan_asset_stage s WHERE s.source_root_id = asset_file.source_root_id AND s.path_key = asset_file.path_key), "
                 "absolute_path = (SELECT s.absolute_path FROM temp.scan_asset_stage s WHERE s.source_root_id = asset_file.source_root_id AND s.path_key = asset_file.path_key), "
                 "relative_path = (SELECT s.relative_path FROM temp.scan_asset_stage s WHERE s.source_root_id = asset_file.source_root_id AND s.path_key = asset_file.path_key), "
+                "parent_relative_path = (SELECT s.parent_relative_path FROM temp.scan_asset_stage s WHERE s.source_root_id = asset_file.source_root_id AND s.path_key = asset_file.path_key), "
                 "parent_path = (SELECT s.parent_path FROM temp.scan_asset_stage s WHERE s.source_root_id = asset_file.source_root_id AND s.path_key = asset_file.path_key), "
                 "asset_type = (SELECT s.asset_type FROM temp.scan_asset_stage s WHERE s.source_root_id = asset_file.source_root_id AND s.path_key = asset_file.path_key), "
                 "size_bytes = (SELECT s.size_bytes FROM temp.scan_asset_stage s WHERE s.source_root_id = asset_file.source_root_id AND s.path_key = asset_file.path_key), "
@@ -655,9 +656,9 @@ void ScanEngine::runScan(SourceRoot sourceRoot,
                 "WHERE s.source_root_id = asset_file.source_root_id AND s.path_key = asset_file.path_key)"),
             QStringLiteral(
                 "INSERT INTO asset_file "
-                "(source_root_id, name, extension, absolute_path, relative_path, parent_path, path_key, asset_type, "
+                "(source_root_id, name, extension, absolute_path, relative_path, parent_relative_path, parent_path, path_key, asset_type, "
                 "size_bytes, modified_at, is_readable, created_at) "
-                "SELECT s.source_root_id, s.name, s.extension, s.absolute_path, s.relative_path, s.parent_path, s.path_key, "
+                "SELECT s.source_root_id, s.name, s.extension, s.absolute_path, s.relative_path, s.parent_relative_path, s.parent_path, s.path_key, "
                 "s.asset_type, s.size_bytes, s.modified_at, s.is_readable, s.created_at FROM temp.scan_asset_stage s "
                 "WHERE s.source_root_id = ? AND NOT EXISTS (SELECT 1 FROM asset_file af "
                 "WHERE af.source_root_id = s.source_root_id AND af.path_key = s.path_key)"),
@@ -1489,7 +1490,6 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
             db.rollback();
             throw std::runtime_error(message.toStdString());
         }
-        countWriterLease.reset();
         for (auto depth = maxDepth; depth >= 0; --depth) {
             QSqlQuery recursiveCounts(db);
             recursiveCounts.prepare(QStringLiteral(
@@ -1604,6 +1604,7 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
                            "extension = (SELECT s.extension FROM scan_stage_asset s WHERE s.session_id = %1 AND s.path_key = asset_file.path_key), "
                            "absolute_path = (SELECT s.absolute_path FROM scan_stage_asset s WHERE s.session_id = %1 AND s.path_key = asset_file.path_key), "
                            "relative_path = (SELECT s.relative_path FROM scan_stage_asset s WHERE s.session_id = %1 AND s.path_key = asset_file.path_key), "
+                           "parent_relative_path = (SELECT s.parent_relative_path FROM scan_stage_asset s WHERE s.session_id = %1 AND s.path_key = asset_file.path_key), "
                            "parent_path = (SELECT s.parent_path FROM scan_stage_asset s WHERE s.session_id = %1 AND s.path_key = asset_file.path_key), "
                            "asset_type = (SELECT s.asset_type FROM scan_stage_asset s WHERE s.session_id = %1 AND s.path_key = asset_file.path_key), "
                            "size_bytes = (SELECT s.size_bytes FROM scan_stage_asset s WHERE s.session_id = %1 AND s.path_key = asset_file.path_key), "
@@ -1612,8 +1613,8 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
                            "WHERE source_root_id = ? AND EXISTS (SELECT 1 FROM scan_stage_asset s "
                            "WHERE s.session_id = %1 AND s.path_key = asset_file.path_key)").arg(sessionLiteral),
             QStringLiteral("INSERT INTO asset_file "
-                           "(source_root_id, name, extension, absolute_path, relative_path, parent_path, path_key, asset_type, size_bytes, modified_at, is_readable, created_at) "
-                           "SELECT ?, s.name, s.extension, s.absolute_path, s.relative_path, s.parent_path, s.path_key, s.asset_type, s.size_bytes, s.modified_at, s.is_readable, s.created_at "
+                           "(source_root_id, name, extension, absolute_path, relative_path, parent_relative_path, parent_path, path_key, asset_type, size_bytes, modified_at, is_readable, created_at) "
+                           "SELECT ?, s.name, s.extension, s.absolute_path, s.relative_path, s.parent_relative_path, s.parent_path, s.path_key, s.asset_type, s.size_bytes, s.modified_at, s.is_readable, s.created_at "
                            "FROM scan_stage_asset s WHERE s.session_id = %1 AND NOT EXISTS (SELECT 1 FROM asset_file af "
                            "WHERE af.source_root_id = ? AND af.path_key = s.path_key)").arg(sessionLiteral),
             QStringLiteral("DELETE FROM asset_file WHERE source_root_id = ?%2 AND NOT EXISTS (SELECT 1 FROM scan_stage_asset s "
@@ -1679,32 +1680,44 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
             std::sort(affected.begin(), affected.end(), [](const QString &left, const QString &right) {
                 return FolderPathMetadata::depth(left) > FolderPathMetadata::depth(right);
             });
+            QSqlQuery directCount(db);
+            directCount.prepare(QStringLiteral(
+                "SELECT COUNT(*) FROM asset_file "
+                "WHERE source_root_id = ? AND parent_relative_path = ?"));
+            QSqlQuery childCount(db);
+            childCount.prepare(QStringLiteral(
+                "SELECT COALESCE(SUM(recursive_file_count), 0) FROM folder_node "
+                "WHERE source_root_id = ? AND parent_relative_path = ?"));
             QSqlQuery refreshFolderCounts(db);
             refreshFolderCounts.prepare(QStringLiteral(
-                "UPDATE folder_node SET "
-                "direct_file_count = (SELECT COUNT(*) FROM asset_file af WHERE af.source_root_id = ? "
-                "AND CASE WHEN length(af.relative_path) > length(af.name) "
-                "THEN substr(af.relative_path, 1, length(af.relative_path) - length(af.name) - 1) "
-                "ELSE '' END = ?), "
-                "file_count = (SELECT COUNT(*) FROM asset_file af WHERE af.source_root_id = ? "
-                "AND CASE WHEN length(af.relative_path) > length(af.name) "
-                "THEN substr(af.relative_path, 1, length(af.relative_path) - length(af.name) - 1) "
-                "ELSE '' END = ?), "
-                "recursive_file_count = (SELECT COUNT(*) FROM asset_file af WHERE af.source_root_id = ? "
-                "AND (? = '' OR af.relative_path = ? "
-                "OR substr(af.relative_path, 1, length(?) + 1) = ? || '/')), "
-                "updated_at = ? WHERE source_root_id = ? AND relative_path = ?"));
+                "UPDATE folder_node SET direct_file_count = ?, file_count = ?, "
+                "recursive_file_count = ?, updated_at = ? "
+                "WHERE source_root_id = ? AND relative_path = ?"));
             const auto countUpdatedAt = QDateTime::currentDateTime().toString(Qt::ISODate);
             for (const auto &relativePath : std::as_const(affected)) {
-                refreshFolderCounts.addBindValue(sourceRoot.id);
-                refreshFolderCounts.addBindValue(relativePath);
-                refreshFolderCounts.addBindValue(sourceRoot.id);
-                refreshFolderCounts.addBindValue(relativePath);
-                refreshFolderCounts.addBindValue(sourceRoot.id);
-                refreshFolderCounts.addBindValue(relativePath);
-                refreshFolderCounts.addBindValue(relativePath);
-                refreshFolderCounts.addBindValue(relativePath);
-                refreshFolderCounts.addBindValue(relativePath);
+                directCount.addBindValue(sourceRoot.id);
+                directCount.addBindValue(relativePath);
+                if (!directCount.exec() || !directCount.next()) {
+                    const auto message = directCount.lastError().text();
+                    db.rollback();
+                    throw std::runtime_error(message.toStdString());
+                }
+                const auto directFiles = directCount.value(0).toLongLong();
+                directCount.finish();
+
+                childCount.addBindValue(sourceRoot.id);
+                childCount.addBindValue(relativePath);
+                if (!childCount.exec() || !childCount.next()) {
+                    const auto message = childCount.lastError().text();
+                    db.rollback();
+                    throw std::runtime_error(message.toStdString());
+                }
+                const auto recursiveFiles = directFiles + childCount.value(0).toLongLong();
+                childCount.finish();
+
+                refreshFolderCounts.addBindValue(directFiles);
+                refreshFolderCounts.addBindValue(directFiles);
+                refreshFolderCounts.addBindValue(recursiveFiles);
                 refreshFolderCounts.addBindValue(countUpdatedAt);
                 refreshFolderCounts.addBindValue(sourceRoot.id);
                 refreshFolderCounts.addBindValue(relativePath);
@@ -1738,6 +1751,7 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
             db.rollback();
             throw std::runtime_error(message.toStdString());
         }
+        countWriterLease.reset();
         batch.totalFiles = finalAssetCounts.value(0).toLongLong();
         batch.totalSizeBytes = finalAssetCounts.value(1).toLongLong();
         batch.warningCount = finalAssetCounts.value(2).toLongLong();

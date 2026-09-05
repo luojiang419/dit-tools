@@ -3,6 +3,10 @@
 #include "domain/Entities.h"
 
 #include <QObject>
+#include <QHash>
+#include <QTimer>
+#include <QThreadPool>
+#include <QVariantList>
 #include <QVector>
 
 class DatabaseManager;
@@ -47,13 +51,34 @@ public:
     void clearFailedJobsForRetry(qint64 sourceRootId, const QVector<JobType> &types);
 
     QVector<Job> jobs() const;
+    void waitForPersistence();
 
 signals:
     void jobsChanged();
     void persistenceError(const QString &errorMessage);
 
 private:
+    struct PendingPersistence {
+        QString key;
+        QString projectDatabasePath;
+        QString statement;
+        QVariantList values;
+        int attempt = 0;
+    };
+
+    struct PersistenceBatchResult {
+        QVector<PendingPersistence> failed;
+        QString errorMessage;
+    };
+
     bool persistJob(const Job &job);
+    void enqueuePersistence(const QString &key,
+                            const QString &projectDatabasePath,
+                            const QString &statement,
+                            const QVariantList &values,
+                            bool flushImmediately = false);
+    void flushPendingPersistence();
+    void startPersistenceBatch(QVector<PendingPersistence> batch, bool observeCompletion);
     void reportPersistenceError(const QString &errorMessage);
     Job *findJob(qint64 jobId);
     bool isCurrentProject(const QString &projectDatabasePath) const;
@@ -68,4 +93,8 @@ private:
     DatabaseManager *m_databaseManager = nullptr;
     QVector<Job> m_jobs;
     qint64 m_nextId = 1;
+    QHash<QString, PendingPersistence> m_pendingPersistence;
+    QTimer m_persistenceTimer;
+    QThreadPool m_persistencePool;
+    bool m_persistenceRunning = false;
 };
