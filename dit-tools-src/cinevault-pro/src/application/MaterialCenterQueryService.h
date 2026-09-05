@@ -18,6 +18,8 @@ public:
                                         SearchEngine *searchEngine,
                                         QObject *parent = nullptr);
 
+    QString databaseFilePath() const;
+
     QVariantList fetchProjectOptions() const;
     QVariantList fetchSourceOptions(const QString &projectUuid) const;
     QVariantList fetchAssetTypeOptions() const;
@@ -32,6 +34,10 @@ public:
                                          const QDate &referenceDate = QDate::currentDate(),
                                          const ModelSearchUnderstanding *modelUnderstanding = nullptr) const;
     VideoAnalysisDetail fetchDetail(const QString &videoKey) const;
+    VideoAnalysisDetailPage fetchDetailPage(const QString &videoKey,
+                                            int frameLimit,
+                                            int afterFrameNumber = 0,
+                                            int preferredFrameNumber = -1) const;
 
 private:
     GlobalDatabaseManager *m_globalDatabaseManager = nullptr;

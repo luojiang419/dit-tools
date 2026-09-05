@@ -1720,36 +1720,30 @@ Rectangle {
                                 onClicked: if (viewModel) viewModel.loadMoreSelectedFrames()
                             }
 
-                            ActionButton {
-                                Layout.preferredWidth: 96
-                                Layout.preferredHeight: 30
-                                visible: viewModel && viewModel.canLoadMoreSelectedFrames
-                                text: "全部展开"
-                                onClicked: if (viewModel) viewModel.showAllSelectedFrames()
-                            }
-
-                            ActionButton {
-                                Layout.preferredWidth: 84
-                                Layout.preferredHeight: 30
-                                visible: viewModel && viewModel.canExpandSelectedFrames && viewModel.selectedFramesExpanded
-                                text: "收起"
-                                onClicked: if (viewModel) viewModel.collapseSelectedFrames()
-                            }
                         }
 
-                        Repeater {
+                        ListView {
+                            id: detailFrameList
+
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: Math.min(contentHeight, 620)
+                            Layout.minimumHeight: count > 0 ? Math.min(contentHeight, 132) : 0
+                            clip: true
+                            spacing: 8
+                            reuseItems: true
+                            boundsBehavior: Flickable.StopAtBounds
                             model: viewModel && viewModel.selectedIsVideo ? viewModel.selectedFrames : []
 
                             delegate: Rectangle {
                                 id: frameCard
 
-                                Layout.fillWidth: true
+                                width: ListView.view ? ListView.view.width : 0
                                 radius: 14
                                 color: Theme.bg
                                 border.width: 1
                                 border.color: Theme.line
                                 clip: true
-                                implicitHeight: Math.max(132, frameTextColumn.implicitHeight + 20)
+                                height: Math.max(132, frameTextColumn.implicitHeight + 20)
 
                                 RowLayout {
                                     id: frameRow

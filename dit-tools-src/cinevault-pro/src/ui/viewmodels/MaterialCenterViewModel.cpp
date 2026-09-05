@@ -10,8 +10,11 @@
 #include "core/search/SearchQueryUnderstanding.h"
 #include "core/search/SearchAssistantRouter.h"
 #include "core/search/SearchResultFusion.h"
+#include "core/search/SearchEngine.h"
+#include "core/search/SemanticSearchIndexService.h"
 #include "core/thumbnail/ContactSheetBuilder.h"
 #include "infrastructure/config/AppSettings.h"
+#include "infrastructure/db/GlobalDatabaseManager.h"
 #include "infrastructure/search/LocalSearchAssistantRuntime.h"
 #include "infrastructure/search/SearchAssistantClient.h"
 #include "shared/Formatters.h"
@@ -35,6 +38,7 @@
 #include <QtConcurrent/QtConcurrentRun>
 
 #include <algorithm>
+#include <memory>
 #include <optional>
 
 namespace {
@@ -261,6 +265,80 @@ struct SearchUnderstandingTaskResult {
     QString errorMessage;
 };
 
+struct MaterialCenterSearchTaskResult {
+    int logicalGeneration = 0;
+    int requestGeneration = 0;
+    bool enhanced = false;
+    QVariantList projectOptions;
+    QVariantList sourceOptions;
+    MaterialSearchResult result;
+    QString errorMessage;
+};
+
+struct MaterialCenterDetailTaskResult {
+    int requestGeneration = 0;
+    QString videoKey;
+    bool replaceCurrent = true;
+    VideoAnalysisDetailPage page;
+    QString errorMessage;
+};
+
+struct ContactSheetTaskResult {
+    int requestGeneration = 0;
+    QString videoKey;
+    QString outputPath;
+    bool success = false;
+};
+
+class MaterialCenterReadContext final {
+public:
+    ~MaterialCenterReadContext()
+    {
+        queryService.reset();
+        searchEngine.reset();
+        semanticIndex.reset();
+        manager.closeDatabase();
+    }
+
+    bool open(const QString &databasePath, int backendGeneration, QString *errorMessage)
+    {
+        if (!manager.openReadOnlyDatabase(databasePath, errorMessage)) {
+            return false;
+        }
+        semanticIndex = std::make_unique<SemanticSearchIndexService>(&manager);
+        searchEngine = std::make_unique<SearchEngine>(&manager, semanticIndex.get());
+        queryService = std::make_unique<MaterialCenterQueryService>(&manager, searchEngine.get());
+        path = databasePath;
+        generation = backendGeneration;
+        return true;
+    }
+
+    QString path;
+    int generation = -1;
+    GlobalDatabaseManager manager;
+    std::unique_ptr<SemanticSearchIndexService> semanticIndex;
+    std::unique_ptr<SearchEngine> searchEngine;
+    std::unique_ptr<MaterialCenterQueryService> queryService;
+};
+
+MaterialCenterReadContext *materialCenterReadContext(const QString &databasePath,
+                                                     int backendGeneration,
+                                                     QString *errorMessage)
+{
+    thread_local std::unique_ptr<MaterialCenterReadContext> context;
+    if (!context || context->path != databasePath || context->generation != backendGeneration) {
+        auto replacement = std::make_unique<MaterialCenterReadContext>();
+        if (!replacement->open(databasePath, backendGeneration, errorMessage)) {
+            return nullptr;
+        }
+        context = std::move(replacement);
+    }
+    if (errorMessage) {
+        errorMessage->clear();
+    }
+    return context.get();
+}
+
 }
 
 MaterialCenterViewModel::MaterialCenterViewModel(MaterialCenterQueryService *queryService,
@@ -288,6 +366,10 @@ MaterialCenterViewModel::MaterialCenterViewModel(MaterialCenterQueryService *que
     , m_contactSheetBuildTimer(new QTimer(this))
     , m_searchRefreshTimer(new QTimer(this))
 {
+    m_queryPool.setMaxThreadCount(1);
+    m_queryPool.setExpiryTimeout(-1);
+    m_detailPool.setMaxThreadCount(1);
+    m_detailPool.setExpiryTimeout(-1);
     m_detailRefreshTimer->setSingleShot(true);
     m_detailRefreshTimer->setInterval(60);
     connect(m_detailRefreshTimer, &QTimer::timeout, this, &MaterialCenterViewModel::loadPendingDetail);
@@ -349,6 +431,7 @@ MaterialCenterViewModel::MaterialCenterViewModel(MaterialCenterQueryService *que
                        const QString &message) {
                     m_semanticIndexing = false;
                     if (success) {
+                        ++m_queryBackendGeneration;
                         m_semanticIndexProcessed = m_semanticIndexTotal;
                         m_semanticIndexStatusText = QStringLiteral("语义索引已更新：新增 %1、更新 %2、未变 %3、移除 %4")
                                                         .arg(inserted)
@@ -370,7 +453,8 @@ MaterialCenterViewModel::MaterialCenterViewModel(MaterialCenterQueryService *que
 
     if (m_syncService) {
         connect(m_syncService, &MaterialCatalogSyncService::catalogChanged, this, [this]() {
-            m_detailCache.clear();
+            ++m_queryBackendGeneration;
+            ++m_detailRequestGeneration;
             m_pendingDetailVideoKey.clear();
             m_pendingContactSheetVideoKey.clear();
             m_detailRefreshTimer->stop();
@@ -380,7 +464,8 @@ MaterialCenterViewModel::MaterialCenterViewModel(MaterialCenterQueryService *que
     }
     if (m_analysisService) {
         connect(m_analysisService, &VideoAnalysisService::catalogChanged, this, [this]() {
-            m_detailCache.clear();
+            ++m_queryBackendGeneration;
+            ++m_detailRequestGeneration;
             m_pendingDetailVideoKey.clear();
             m_pendingContactSheetVideoKey.clear();
             m_detailRefreshTimer->stop();
@@ -429,6 +514,14 @@ MaterialCenterViewModel::MaterialCenterViewModel(MaterialCenterQueryService *que
             }
         });
     }
+}
+
+MaterialCenterViewModel::~MaterialCenterViewModel()
+{
+    m_queryPool.clear();
+    m_detailPool.clear();
+    m_queryPool.waitForDone();
+    m_detailPool.waitForDone();
 }
 
 MaterialCenterListModel *MaterialCenterViewModel::model() const
@@ -760,35 +853,26 @@ QString MaterialCenterViewModel::selectedFrameSamplingText() const
     }
 
     const auto &plan = m_detail.visualAnalysisPlan;
-    const auto interval = qMax(1, plan.frameInterval);
-    const auto contactSheetFrameCount = m_settings ? m_settings->contactSheetFrameCount() : 24;
-    const auto modeText = interval == 1
-        ? QStringLiteral("逐帧解析（已包含拼图画面）")
-        : QStringLiteral("每 %1 帧抽 1 帧 + 拼图均匀取样").arg(interval);
-    const auto terminalCovered = plan.sourceFrameCount > 0
-        && !m_detail.frames.isEmpty()
-        && m_detail.frames.constLast().frameNumber == plan.sourceFrameCount;
-    QSet<int> actualFrameNumbers;
-    for (const auto &frame : m_detail.frames) {
-        actualFrameNumbers.insert(frame.frameNumber);
+    const auto intervalSeconds = qMax(1, plan.frameInterval) / 1000.0;
+    QString modeText = QStringLiteral("候选帧采样");
+    if (plan.samplingPolicy.contains(QStringLiteral("strategy=0"))) {
+        modeText = QStringLiteral("逐帧候选");
+    } else if (plan.samplingPolicy.contains(QStringLiteral("strategy=1"))) {
+        modeText = QStringLiteral("场景变化 + %1 秒间隔").arg(intervalSeconds, 0, 'f', 2);
+    } else if (plan.samplingPolicy.contains(QStringLiteral("strategy=2"))) {
+        modeText = QStringLiteral("每 %1 秒取样").arg(intervalSeconds, 0, 'f', 2);
+    } else if (plan.samplingPolicy.contains(QStringLiteral("strategy=3"))) {
+        modeText = QStringLiteral("高保真 %1 秒取样").arg(intervalSeconds, 0, 'f', 2);
     }
-    bool contactSheetCovered = true;
-    for (const auto frameNumber : VisualAnalysisMetadata::contactSheetFrameNumbers(
-             plan.sourceFrameCount,
-             contactSheetFrameCount)) {
-        if (!actualFrameNumbers.contains(frameNumber)) {
-            contactSheetCovered = false;
-            break;
-        }
-    }
-    const auto coverageText = !terminalCovered
-        ? QStringLiteral("尾帧待补齐")
-        : (contactSheetCovered
-               ? QStringLiteral("首尾及拼图取样已覆盖")
-               : QStringLiteral("拼图取样待补齐"));
+    const auto terminalCovered = VisualAnalysisMetadata::isCurrentSamplingPolicy(plan.samplingPolicy)
+        && plan.plannedFrameCount > 0
+        && m_selectedTotalFrameCount == plan.plannedFrameCount;
+    const auto coverageText = terminalCovered
+        ? QStringLiteral("首尾时间锚点已纳入计划")
+        : QStringLiteral("旧采样计划需重新解析");
     return QStringLiteral("当前结果：%1 · %2 · 共 %3 帧")
         .arg(modeText, coverageText)
-        .arg(m_detail.frames.size());
+        .arg(m_selectedTotalFrameCount);
 }
 
 QString MaterialCenterViewModel::selectedFrameSearchStatus() const
@@ -798,7 +882,7 @@ QString MaterialCenterViewModel::selectedFrameSearchStatus() const
 
 int MaterialCenterViewModel::selectedFrameCount() const
 {
-    return m_selectedAllFramesCache.size();
+    return m_selectedTotalFrameCount;
 }
 
 int MaterialCenterViewModel::selectedVisibleFrameCount() const
@@ -808,22 +892,22 @@ int MaterialCenterViewModel::selectedVisibleFrameCount() const
 
 int MaterialCenterViewModel::selectedRemainingFrameCount() const
 {
-    return qMax(0, selectedFrameCount() - selectedVisibleFrameCount());
+    return qMax(0, selectedFrameCount() - m_detail.frames.size());
 }
 
 bool MaterialCenterViewModel::selectedFramesExpanded() const
 {
-    return selectedFrameCount() > 0 && selectedVisibleFrameCount() >= selectedFrameCount();
+    return selectedFrameCount() > 0 && !m_selectedFramesHasMore;
 }
 
 bool MaterialCenterViewModel::canExpandSelectedFrames() const
 {
-    return m_selectedAllFramesCache.size() > kInitialVisibleFrameCount;
+    return m_selectedFramesHasMore;
 }
 
 bool MaterialCenterViewModel::canLoadMoreSelectedFrames() const
 {
-    return selectedRemainingFrameCount() > 0 && !selectedFramesExpanded();
+    return m_selectedFramesHasMore && !m_selectedFramesLoading;
 }
 
 bool MaterialCenterViewModel::selectedFramesLoading() const
@@ -981,13 +1065,9 @@ void MaterialCenterViewModel::reload()
     }
 
     m_searchRefreshTimer->stop();
-
-    m_projectOptions = prependAllOption(m_queryService->fetchProjectOptions(), QStringLiteral("全部项目"));
-    m_sourceOptions = prependAllOption(m_queryService->fetchSourceOptions(m_projectFilter), QStringLiteral("全部素材源"));
+    ++m_searchGeneration;
     m_assetTypeOptions = fileTypeOptions();
-
     executeSearch();
-    startSearchUnderstanding(m_lastParsedQuery);
 }
 
 void MaterialCenterViewModel::prepareGlobalQuickSearch()
@@ -1028,46 +1108,105 @@ void MaterialCenterViewModel::executeSearch(const ModelSearchUnderstanding *mode
     scope.confirmationStatusFilter = -1;
     scope.assetTypeFilter = m_assetTypeFilter;
     scope.resultQuickFilter = static_cast<SearchResultQuickFilter>(m_searchResultFilter);
-    auto result = m_queryService->searchMaterials(m_searchText,
-                                                  scope,
-                                                  QDate::currentDate(),
-                                                  modelUnderstanding);
-    if (!modelUnderstanding) {
-        m_lastBaselineSearchResult = result;
-        m_lastBaselineSearchGeneration = m_searchGeneration;
-    } else if (m_lastBaselineSearchGeneration == m_searchGeneration
-               && m_lastBaselineSearchResult.parsedQuery.originalText.simplified()
-                   == m_searchText.simplified()) {
-        auto outcome = SearchResultFusion::preserveBaselineRecall(
-            m_lastBaselineSearchResult,
-            result);
-        result = std::move(outcome.result);
-        switch (outcome.protection) {
-        case SearchRecallProtection::EnhancedResultEmpty:
-            m_searchAssistantUsed = false;
-            m_searchAssistantStatusText = QStringLiteral(
-                "模型条件过窄，已保留 %1 条原向量/本地召回结果")
-                                              .arg(outcome.preservedHitCount);
-            break;
-        case SearchRecallProtection::ResultTargetChanged:
-            m_searchAssistantUsed = false;
-            m_searchAssistantStatusText = QStringLiteral(
-                "模型改变了结果类型，已保留 %1 条原向量/本地召回结果")
-                                              .arg(outcome.preservedHitCount);
-            break;
-        case SearchRecallProtection::BaselineHitsAdded:
-            m_searchAssistantUsed = true;
-            m_searchAssistantStatusText = QStringLiteral(
-                "模型增强：新增 %1 条、双路共同命中 %2 条，并保留 %3 条原本地召回")
-                                              .arg(outcome.enhancedOnlyHitCount)
-                                              .arg(outcome.sharedHitCount)
-                                              .arg(outcome.preservedHitCount);
-            break;
-        case SearchRecallProtection::None:
-            break;
+    const auto logicalGeneration = m_searchGeneration;
+    const auto requestGeneration = ++m_searchRequestGeneration;
+    const auto backendGeneration = m_queryBackendGeneration;
+    const auto databasePath = m_queryService->databaseFilePath();
+    const auto queryText = m_searchText;
+    const auto projectFilter = m_projectFilter;
+    const auto referenceDate = QDate::currentDate();
+    const auto understanding = modelUnderstanding
+        ? std::optional<ModelSearchUnderstanding>(*modelUnderstanding)
+        : std::nullopt;
+
+    auto *watcher = new QFutureWatcher<MaterialCenterSearchTaskResult>(this);
+    connect(watcher, &QFutureWatcher<MaterialCenterSearchTaskResult>::finished, this,
+            [this, watcher]() {
+        auto task = watcher->result();
+        watcher->deleteLater();
+        if (task.logicalGeneration != m_searchGeneration
+            || task.requestGeneration != m_searchRequestGeneration) {
+            return;
         }
-    }
-    applySearchResult(result);
+        if (!task.errorMessage.isEmpty()) {
+            m_searchWarningMessage = task.errorMessage;
+            emit searchStateChanged();
+            return;
+        }
+        if (!task.enhanced) {
+            m_projectOptions = prependAllOption(task.projectOptions, QStringLiteral("全部项目"));
+            m_sourceOptions = prependAllOption(task.sourceOptions, QStringLiteral("全部素材源"));
+            emit filtersChanged();
+            m_lastBaselineSearchResult = task.result;
+            m_lastBaselineSearchGeneration = task.logicalGeneration;
+        } else if (m_lastBaselineSearchGeneration == task.logicalGeneration
+                   && m_lastBaselineSearchResult.parsedQuery.originalText.simplified()
+                       == m_searchText.simplified()) {
+            auto outcome = SearchResultFusion::preserveBaselineRecall(
+                m_lastBaselineSearchResult,
+                task.result);
+            task.result = std::move(outcome.result);
+            switch (outcome.protection) {
+            case SearchRecallProtection::EnhancedResultEmpty:
+                m_searchAssistantUsed = false;
+                m_searchAssistantStatusText = QStringLiteral(
+                    "模型条件过窄，已保留 %1 条原向量/本地召回结果")
+                                                  .arg(outcome.preservedHitCount);
+                break;
+            case SearchRecallProtection::ResultTargetChanged:
+                m_searchAssistantUsed = false;
+                m_searchAssistantStatusText = QStringLiteral(
+                    "模型改变了结果类型，已保留 %1 条原向量/本地召回结果")
+                                                  .arg(outcome.preservedHitCount);
+                break;
+            case SearchRecallProtection::BaselineHitsAdded:
+                m_searchAssistantUsed = true;
+                m_searchAssistantStatusText = QStringLiteral(
+                    "模型增强：新增 %1 条、双路共同命中 %2 条，并保留 %3 条原本地召回")
+                                                  .arg(outcome.enhancedOnlyHitCount)
+                                                  .arg(outcome.sharedHitCount)
+                                                  .arg(outcome.preservedHitCount);
+                break;
+            case SearchRecallProtection::None:
+                break;
+            }
+        }
+        applySearchResult(task.result);
+        if (!task.enhanced) {
+            startSearchUnderstanding(task.result.parsedQuery);
+        }
+    });
+    watcher->setFuture(QtConcurrent::run(
+        &m_queryPool,
+        [databasePath,
+         backendGeneration,
+         logicalGeneration,
+         requestGeneration,
+         queryText,
+         projectFilter,
+         scope,
+         referenceDate,
+         understanding]() {
+            MaterialCenterSearchTaskResult task;
+            task.logicalGeneration = logicalGeneration;
+            task.requestGeneration = requestGeneration;
+            task.enhanced = understanding.has_value();
+            auto *context = materialCenterReadContext(
+                databasePath, backendGeneration, &task.errorMessage);
+            if (!context || !context->queryService) {
+                return task;
+            }
+            if (!task.enhanced) {
+                task.projectOptions = context->queryService->fetchProjectOptions();
+                task.sourceOptions = context->queryService->fetchSourceOptions(projectFilter);
+            }
+            task.result = context->queryService->searchMaterials(
+                queryText,
+                scope,
+                referenceDate,
+                understanding ? &*understanding : nullptr);
+            return task;
+        }));
 }
 
 void MaterialCenterViewModel::applySearchResult(const MaterialSearchResult &result)
@@ -1582,18 +1721,9 @@ bool MaterialCenterViewModel::openSelectedProject()
     }
 
     if (m_detail.asset.projectDatabasePath.trimmed().isEmpty() && m_queryService) {
-        const auto videoKey = m_detail.asset.videoKey;
-        auto detail = m_queryService->fetchDetail(videoKey);
-        if (!detail.asset.videoKey.trimmed().isEmpty()) {
-            m_detailRefreshTimer->stop();
-            m_pendingDetailVideoKey.clear();
-            m_detail = detail;
-            m_detailCache.insert(videoKey, detail);
-            refreshSelectedCaches();
-            emit selectionChanged();
-            emit analysisProgressChanged();
-            emit dimensionAnalysisChanged();
-        }
+        loadDetailPage(m_detail.asset.videoKey, 0, true);
+        setMessage(QStringLiteral("正在加载素材所属项目信息，请稍后重试。"));
+        return false;
     }
 
     if (m_detail.asset.projectDatabasePath.trimmed().isEmpty()) {
@@ -1849,29 +1979,17 @@ void MaterialCenterViewModel::loadMoreSelectedFrames()
     if (!canLoadMoreSelectedFrames()) {
         return;
     }
-    m_selectedVisibleFrameLimit += kVisibleFrameBatchSize;
-    applySelectedFrameExpansion();
-    emit selectionChanged();
+    loadDetailPage(m_detail.asset.videoKey, m_selectedFrameCursor, false);
 }
 
 void MaterialCenterViewModel::showAllSelectedFrames()
 {
-    if (selectedFrameCount() <= 0) {
-        return;
-    }
-    m_selectedVisibleFrameLimit = selectedFrameCount();
-    applySelectedFrameExpansion();
-    emit selectionChanged();
+    loadMoreSelectedFrames();
 }
 
 void MaterialCenterViewModel::collapseSelectedFrames()
 {
-    if (selectedFrameCount() <= 0) {
-        return;
-    }
-    m_selectedVisibleFrameLimit = kInitialVisibleFrameCount;
-    applySelectedFrameExpansion();
-    emit selectionChanged();
+    // 帧详情由数据库分页和虚拟化视图控制，不再回收已加载页。
 }
 
 GlobalVideoAsset MaterialCenterViewModel::assetByVideoKey(const QString &videoKey) const
@@ -1900,15 +2018,6 @@ GlobalVideoAsset MaterialCenterViewModel::assetForFileAction(const QString &vide
         && !m_detail.asset.absolutePath.trimmed().isEmpty()) {
         return m_detail.asset;
     }
-    if (m_detailCache.contains(normalizedKey)) {
-        asset = m_detailCache.value(normalizedKey).asset;
-        if (!asset.absolutePath.trimmed().isEmpty()) {
-            return asset;
-        }
-    }
-    if (m_queryService) {
-        return m_queryService->fetchDetail(normalizedKey).asset;
-    }
     return {};
 }
 
@@ -1927,6 +2036,7 @@ void MaterialCenterViewModel::prepareSelection(const QString &videoKey)
 {
     const auto normalizedKey = videoKey.trimmed();
 
+    ++m_detailRequestGeneration;
     m_detailRefreshTimer->stop();
     m_contactSheetBuildTimer->stop();
     m_pendingDetailVideoKey.clear();
@@ -1935,7 +2045,9 @@ void MaterialCenterViewModel::prepareSelection(const QString &videoKey)
     m_selectedFramesCache.clear();
     m_selectedFrameSearchStatusCache.clear();
     m_selectedThumbnailUrlCache = {};
-    m_selectedVisibleFrameLimit = kInitialVisibleFrameCount;
+    m_selectedTotalFrameCount = 0;
+    m_selectedFrameCursor = 0;
+    m_selectedFramesHasMore = false;
     m_selectedFramesLoading = false;
     m_detail = {};
 
@@ -1948,16 +2060,6 @@ void MaterialCenterViewModel::prepareSelection(const QString &videoKey)
         m_detail.asset = asset;
     } else {
         m_detail.asset.videoKey = normalizedKey;
-    }
-
-    if (m_detailCache.contains(normalizedKey)) {
-        auto detail = m_detailCache.value(normalizedKey);
-        if (!asset.videoKey.trimmed().isEmpty()) {
-            detail.asset = asset;
-        }
-        m_detail = detail;
-        refreshSelectedCaches();
-        return;
     }
 
     refreshSelectedThumbnailUrl(false);
@@ -1976,26 +2078,104 @@ void MaterialCenterViewModel::loadPendingDetail()
         return;
     }
 
-    auto detail = m_queryService->fetchDetail(videoKey);
-    if (detail.asset.videoKey.trimmed().isEmpty()) {
+    loadDetailPage(videoKey, 0, true);
+}
+
+void MaterialCenterViewModel::loadDetailPage(const QString &videoKey,
+                                             int afterFrameNumber,
+                                             bool replaceCurrent)
+{
+    if (!m_queryService || videoKey.trimmed().isEmpty()
+        || (m_selectedFramesLoading && !replaceCurrent)) {
         return;
     }
 
-    const auto asset = assetByVideoKey(videoKey);
-    if (!asset.videoKey.trimmed().isEmpty()) {
-        detail.asset = asset;
+    const auto normalizedKey = videoKey.trimmed();
+    const auto requestGeneration = ++m_detailRequestGeneration;
+    const auto backendGeneration = m_queryBackendGeneration;
+    const auto databasePath = m_queryService->databaseFilePath();
+    const auto preferredFrameNumber = replaceCurrent && m_detail.asset.videoKey == normalizedKey
+        ? m_detail.asset.matchedFrameNumber
+        : -1;
+    m_selectedFramesLoading = true;
+    if (replaceCurrent) {
+        m_selectedFrameSearchStatusCache = QStringLiteral("正在加载逐帧解析...");
     }
-    m_detailCache.insert(videoKey, detail);
-
-    if (m_detail.asset.videoKey != videoKey) {
-        return;
-    }
-
-    m_detail = detail;
-    refreshSelectedCaches();
     emit selectionChanged();
-    emit analysisProgressChanged();
-    emit dimensionAnalysisChanged();
+
+    auto *watcher = new QFutureWatcher<MaterialCenterDetailTaskResult>(this);
+    connect(watcher, &QFutureWatcher<MaterialCenterDetailTaskResult>::finished, this,
+            [this, watcher]() {
+        auto task = watcher->result();
+        watcher->deleteLater();
+        if (task.requestGeneration != m_detailRequestGeneration
+            || task.videoKey != m_detail.asset.videoKey) {
+            return;
+        }
+        m_selectedFramesLoading = false;
+        if (!task.errorMessage.isEmpty()
+            || task.page.detail.asset.videoKey.trimmed().isEmpty()) {
+            m_selectedFrameSearchStatusCache = task.errorMessage.isEmpty()
+                ? QStringLiteral("无法读取当前素材详情")
+                : task.errorMessage;
+            emit selectionChanged();
+            return;
+        }
+
+        const auto selectedAsset = assetByVideoKey(task.videoKey);
+        if (task.replaceCurrent) {
+            m_detail = std::move(task.page.detail);
+            if (!selectedAsset.videoKey.trimmed().isEmpty()) {
+                m_detail.asset = selectedAsset;
+            }
+        } else {
+            QSet<int> existingFrameNumbers;
+            for (const auto &frame : std::as_const(m_detail.frames)) {
+                existingFrameNumbers.insert(frame.frameNumber);
+            }
+            for (auto &frame : task.page.detail.frames) {
+                if (!existingFrameNumbers.contains(frame.frameNumber)) {
+                    existingFrameNumbers.insert(frame.frameNumber);
+                    m_detail.frames.append(std::move(frame));
+                }
+            }
+            std::sort(m_detail.frames.begin(), m_detail.frames.end(), [](const auto &left, const auto &right) {
+                return left.frameNumber < right.frameNumber;
+            });
+        }
+        m_selectedTotalFrameCount = task.page.totalFrameCount;
+        m_selectedFrameCursor = task.page.nextFrameNumber;
+        m_selectedFramesHasMore = task.page.hasMoreFrames;
+        refreshSelectedCaches();
+        emit selectionChanged();
+        emit analysisProgressChanged();
+        emit dimensionAnalysisChanged();
+    });
+    watcher->setFuture(QtConcurrent::run(
+        &m_detailPool,
+        [databasePath,
+         backendGeneration,
+         requestGeneration,
+         normalizedKey,
+         afterFrameNumber,
+         preferredFrameNumber,
+         replaceCurrent]() {
+            MaterialCenterDetailTaskResult task;
+            task.requestGeneration = requestGeneration;
+            task.videoKey = normalizedKey;
+            task.replaceCurrent = replaceCurrent;
+            auto *context = materialCenterReadContext(
+                databasePath, backendGeneration, &task.errorMessage);
+            if (!context || !context->queryService) {
+                return task;
+            }
+            task.page = context->queryService->fetchDetailPage(
+                normalizedKey,
+                kVisibleFrameBatchSize,
+                afterFrameNumber,
+                preferredFrameNumber);
+            return task;
+        }));
 }
 
 void MaterialCenterViewModel::refreshSelectedCaches()
@@ -2004,7 +2184,9 @@ void MaterialCenterViewModel::refreshSelectedCaches()
     m_selectedFramesCache.clear();
 
     if (!hasSelection()) {
-        m_selectedVisibleFrameLimit = kInitialVisibleFrameCount;
+        m_selectedTotalFrameCount = 0;
+        m_selectedFrameCursor = 0;
+        m_selectedFramesHasMore = false;
         m_selectedFramesLoading = false;
         m_selectedFrameSearchStatusCache.clear();
         m_selectedThumbnailUrlCache = {};
@@ -2051,14 +2233,18 @@ void MaterialCenterViewModel::refreshSelectedCaches()
     applySelectedFrameExpansion();
 
     if (terms.isEmpty()) {
-        m_selectedFrameSearchStatusCache = QStringLiteral("共 %1 帧解析结果").arg(m_detail.frames.size());
+        m_selectedFrameSearchStatusCache = m_selectedFramesHasMore
+            ? QStringLiteral("共 %1 帧解析结果，已加载 %2 帧")
+                  .arg(m_selectedTotalFrameCount)
+                  .arg(m_detail.frames.size())
+            : QStringLiteral("共 %1 帧解析结果").arg(m_selectedTotalFrameCount);
     } else if (matchCount == 0) {
         m_selectedFrameSearchStatusCache = QStringLiteral("搜索“%1”未命中该素材的逐帧解析").arg(m_searchText.trimmed());
     } else {
         m_selectedFrameSearchStatusCache = QStringLiteral("搜索“%1”命中 %2/%3 帧")
             .arg(m_searchText.trimmed())
             .arg(matchCount)
-            .arg(m_detail.frames.size());
+            .arg(m_selectedTotalFrameCount);
     }
 
     refreshSelectedThumbnailUrl(true);
@@ -2066,21 +2252,7 @@ void MaterialCenterViewModel::refreshSelectedCaches()
 
 void MaterialCenterViewModel::applySelectedFrameExpansion()
 {
-    m_selectedFramesCache.clear();
-
-    if (m_selectedAllFramesCache.isEmpty()) {
-        return;
-    }
-
-    const auto visibleCount = qBound(0, m_selectedVisibleFrameLimit, m_selectedAllFramesCache.size());
-    if (visibleCount >= m_selectedAllFramesCache.size()) {
-        m_selectedFramesCache = m_selectedAllFramesCache;
-        return;
-    }
-
-    for (int index = 0; index < visibleCount; ++index) {
-        m_selectedFramesCache.append(m_selectedAllFramesCache.at(index));
-    }
+    m_selectedFramesCache = m_selectedAllFramesCache;
 }
 
 void MaterialCenterViewModel::refreshSelectedThumbnailUrl(bool allowContactSheetBuild)
@@ -2132,8 +2304,6 @@ void MaterialCenterViewModel::buildPendingContactSheet()
     VideoAnalysisDetail detail;
     if (m_detail.asset.videoKey == videoKey) {
         detail = m_detail;
-    } else if (m_detailCache.contains(videoKey)) {
-        detail = m_detailCache.value(videoKey);
     } else {
         return;
     }
@@ -2147,17 +2317,39 @@ void MaterialCenterViewModel::buildPendingContactSheet()
     const auto contactSheetPath = Paths::projectContactSheetPath(detail.asset.projectDatabasePath,
                                                                  detail.asset.videoKey,
                                                                  frameCount);
-    if (!QFile::exists(contactSheetPath)) {
-        QString errorMessage;
-        if (!ContactSheetBuilder::build(frameImagePaths, frameCount, contactSheetPath, &errorMessage)) {
-            return;
-        }
-    }
-
-    if (m_detail.asset.videoKey == videoKey && QFile::exists(contactSheetPath)) {
+    if (QFile::exists(contactSheetPath)) {
         m_selectedThumbnailUrlCache = QUrl::fromLocalFile(contactSheetPath);
         emit selectionChanged();
+        return;
     }
+
+    const auto requestGeneration = m_detailRequestGeneration;
+    auto *watcher = new QFutureWatcher<ContactSheetTaskResult>(this);
+    connect(watcher, &QFutureWatcher<ContactSheetTaskResult>::finished, this,
+            [this, watcher]() {
+        const auto task = watcher->result();
+        watcher->deleteLater();
+        if (task.requestGeneration != m_detailRequestGeneration
+            || task.videoKey != m_detail.asset.videoKey
+            || !task.success
+            || !QFile::exists(task.outputPath)) {
+            return;
+        }
+        m_selectedThumbnailUrlCache = QUrl::fromLocalFile(task.outputPath);
+        emit selectionChanged();
+    });
+    watcher->setFuture(QtConcurrent::run(
+        &m_detailPool,
+        [requestGeneration, videoKey, frameImagePaths, frameCount, contactSheetPath]() {
+            ContactSheetTaskResult task;
+            task.requestGeneration = requestGeneration;
+            task.videoKey = videoKey;
+            task.outputPath = contactSheetPath;
+            QString errorMessage;
+            task.success = ContactSheetBuilder::build(
+                frameImagePaths, frameCount, contactSheetPath, &errorMessage);
+            return task;
+        }));
 }
 
 void MaterialCenterViewModel::refreshDetail()

@@ -339,6 +339,13 @@ struct VideoAnalysisDetail {
     QVector<MaterialDimensionAnalysis> dimensionAnalyses;
 };
 
+struct VideoAnalysisDetailPage {
+    VideoAnalysisDetail detail;
+    int totalFrameCount = 0;
+    int nextFrameNumber = 0;
+    bool hasMoreFrames = false;
+};
+
 struct JobSubject {
     QString kind;
     QString key;

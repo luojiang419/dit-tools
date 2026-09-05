@@ -14,6 +14,7 @@ public:
     static constexpr int CurrentSchemaVersion = 14;
 
     bool openDatabase(QString *errorMessage);
+    bool openReadOnlyDatabase(const QString &databaseFilePath, QString *errorMessage);
     void closeDatabase();
     bool isOpen() const;
     bool hasFts5() const;

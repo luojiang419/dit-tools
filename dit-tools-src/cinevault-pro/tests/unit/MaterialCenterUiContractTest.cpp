@@ -229,7 +229,10 @@ private slots:
     {
         const auto source = sourceFile(QStringLiteral("src/ui/viewmodels/MaterialCenterViewModel.cpp"));
         QVERIFY2(!source.isEmpty(), "无法读取 MaterialCenterViewModel.cpp");
-        QVERIFY(source.contains(QStringLiteral("m_queryService->searchMaterials(m_searchText,")));
+        QVERIFY(source.contains(QStringLiteral("QtConcurrent::run(")));
+        QVERIFY(source.contains(QStringLiteral("&m_queryPool")));
+        QVERIFY(source.contains(QStringLiteral("context->queryService->searchMaterials(")));
+        QVERIFY(!source.contains(QStringLiteral("m_queryService->searchMaterials(")));
         QVERIFY(!source.contains(QStringLiteral("m_queryService->fetchAssets(")));
         QVERIFY(source.contains(QStringLiteral("scope.projectUuid = m_projectFilter")));
         QVERIFY(source.contains(QStringLiteral("scope.sourceRootName = m_sourceFilter")));
@@ -255,9 +258,18 @@ private slots:
         QVERIFY(source.contains(QStringLiteral("task.cacheKey != currentCacheKey")));
         QVERIFY(!source.contains(QStringLiteral("task.generation != m_searchGeneration")));
         QVERIFY(source.contains(QStringLiteral("Formatters::formatFrameTimestamp(frame.timestampMs)")));
-        QVERIFY(source.contains(QStringLiteral("尾帧待补齐")));
-        QVERIFY(source.contains(QStringLiteral("拼图均匀取样")));
-        QVERIFY(source.contains(QStringLiteral("拼图取样待补齐")));
+        QVERIFY(source.contains(QStringLiteral("fetchDetailPage(")));
+        QVERIFY(source.contains(QStringLiteral("m_detailRequestGeneration")));
+        QVERIFY(source.contains(QStringLiteral("首尾时间锚点已纳入计划")));
+        QVERIFY(source.contains(QStringLiteral("旧采样计划需重新解析")));
+
+        const auto qml = sourceFile(
+            QStringLiteral("src/ui/qml/workspaces/MaterialCenterWorkspace.qml"));
+        const auto detailListId = qml.indexOf(QStringLiteral("id: detailFrameList"));
+        QVERIFY(detailListId >= 0);
+        QVERIFY(qml.contains(QStringLiteral("reuseItems: true")));
+        QVERIFY(qml.lastIndexOf(QStringLiteral("ListView {"), detailListId)
+                > qml.lastIndexOf(QStringLiteral("Repeater {"), detailListId));
     }
 
     void qmlConsumesSearchStateAndFolderActions()

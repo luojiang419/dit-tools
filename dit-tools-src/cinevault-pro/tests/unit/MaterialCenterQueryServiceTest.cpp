@@ -589,6 +589,48 @@ private slots:
         QCOMPARE(detail.visualAnalysisPlan.plannedFrameCount, 2);
     }
 
+    void fetchDetailPage_usesKeysetAndIncludesPreferredFrame()
+    {
+        GlobalDbFixture fixture;
+        QVERIFY2(fixture.valid, qPrintable(fixture.errorMessage));
+        SearchEngine searchEngine;
+        MaterialCenterQueryService service(&fixture.manager, &searchEngine);
+
+        const auto first = service.fetchDetailPage(QStringLiteral("video-1"), 1, 0, 61);
+        QCOMPARE(first.totalFrameCount, 2);
+        QVERIFY(first.hasMoreFrames);
+        QCOMPARE(first.nextFrameNumber, 1);
+        QCOMPARE(first.detail.frames.size(), 2);
+        QCOMPARE(first.detail.frames.at(0).frameNumber, 1);
+        QCOMPARE(first.detail.frames.at(1).frameNumber, 61);
+
+        const auto second = service.fetchDetailPage(QStringLiteral("video-1"), 1, first.nextFrameNumber);
+        QCOMPARE(second.totalFrameCount, 2);
+        QVERIFY(!second.hasMoreFrames);
+        QCOMPARE(second.nextFrameNumber, 61);
+        QCOMPARE(second.detail.frames.size(), 1);
+        QCOMPARE(second.detail.frames.first().frameNumber, 61);
+    }
+
+    void readOnlyManager_opensIndependentQueryConnection()
+    {
+        GlobalDbFixture fixture;
+        QVERIFY2(fixture.valid, qPrintable(fixture.errorMessage));
+        GlobalDatabaseManager readOnlyManager;
+        QString errorMessage;
+        QVERIFY2(readOnlyManager.openReadOnlyDatabase(
+                     fixture.manager.databaseFilePath(), &errorMessage),
+                 qPrintable(errorMessage));
+        QVERIFY(readOnlyManager.isOpen());
+        QVERIFY(readOnlyManager.hasFts5());
+        QSqlQuery query(readOnlyManager.database());
+        QVERIFY2(query.exec(QStringLiteral("SELECT COUNT(*) FROM global_video_asset")),
+                 qPrintable(query.lastError().text()));
+        QVERIFY(query.next());
+        QCOMPARE(query.value(0).toInt(), 9);
+        readOnlyManager.closeDatabase();
+    }
+
     void searchMaterials_partitionsFolderAndAssetResults()
     {
         GlobalDbFixture fixture;

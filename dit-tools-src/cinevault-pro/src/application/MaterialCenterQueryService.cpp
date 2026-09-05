@@ -96,6 +96,35 @@ GlobalVideoAsset readAssetRow(const QSqlQuery &query)
     return asset;
 }
 
+FrameAnalysisRecord readFrameAnalysisRow(const QSqlQuery &query, const QString &videoKey)
+{
+    FrameAnalysisRecord frame;
+    frame.id = query.value(0).toLongLong();
+    frame.videoKey = videoKey;
+    frame.frameNumber = query.value(1).toInt();
+    frame.timestampMs = query.value(2).toLongLong();
+    frame.imagePath = query.value(3).toString();
+    frame.caption = query.value(4).toString();
+    frame.tags = parseJsonList(query.value(5).toString());
+    frame.objects = parseJsonList(query.value(6).toString());
+    frame.actions = query.value(7).toString();
+    frame.setting = query.value(8).toString();
+    frame.entities = VisualAnalysisMetadata::entityFactsFromJson(query.value(9).toString());
+    frame.ocrText = query.value(10).toString();
+    frame.ocrBlocks = parseJsonList(query.value(11).toString());
+    frame.structuredProfileVersion = query.value(12).toInt();
+    frame.factsComplete = query.value(13).toBool();
+    frame.modelName = query.value(14).toString();
+    frame.promptVersion = query.value(15).toString();
+    frame.analyzedAt = query.value(16).toString();
+    frame.errorMessage = query.value(17).toString();
+    frame.analysisState = static_cast<FrameAnalysisState>(query.value(18).toInt());
+    frame.retryCount = query.value(19).toInt();
+    frame.lastHttpStatus = query.value(20).toInt();
+    frame.lastAttemptAt = query.value(21).toString();
+    return frame;
+}
+
 QString assetResultSelectClause()
 {
     return QStringLiteral(
@@ -326,6 +355,11 @@ MaterialCenterQueryService::MaterialCenterQueryService(GlobalDatabaseManager *gl
     , m_globalDatabaseManager(globalDatabaseManager)
     , m_searchEngine(searchEngine)
 {
+}
+
+QString MaterialCenterQueryService::databaseFilePath() const
+{
+    return m_globalDatabaseManager ? m_globalDatabaseManager->databaseFilePath() : QString();
 }
 
 QVariantList MaterialCenterQueryService::fetchProjectOptions() const
@@ -1017,9 +1051,18 @@ MaterialSearchResult MaterialCenterQueryService::searchMaterials(
 
 VideoAnalysisDetail MaterialCenterQueryService::fetchDetail(const QString &videoKey) const
 {
-    VideoAnalysisDetail detail;
+    return fetchDetailPage(videoKey, 2000).detail;
+}
+
+VideoAnalysisDetailPage MaterialCenterQueryService::fetchDetailPage(const QString &videoKey,
+                                                                    int frameLimit,
+                                                                    int afterFrameNumber,
+                                                                    int preferredFrameNumber) const
+{
+    VideoAnalysisDetailPage page;
+    auto &detail = page.detail;
     if (!m_globalDatabaseManager || !m_globalDatabaseManager->isOpen() || videoKey.trimmed().isEmpty()) {
-        return detail;
+        return page;
     }
 
     QSqlQuery assetQuery(m_globalDatabaseManager->database());
@@ -1039,7 +1082,7 @@ VideoAnalysisDetail MaterialCenterQueryService::fetchDetail(const QString &video
         "WHERE g.video_key = ?"));
     assetQuery.addBindValue(videoKey.trimmed());
     if (!execOrEmpty(assetQuery) || !assetQuery.next()) {
-        return detail;
+        return page;
     }
     detail.asset = readAssetRow(assetQuery);
 
@@ -1063,6 +1106,15 @@ VideoAnalysisDetail MaterialCenterQueryService::fetchDetail(const QString &video
         detail.visualAnalysisPlan.updatedAt = planQuery.value(8).toString();
     }
 
+    QSqlQuery countQuery(m_globalDatabaseManager->database());
+    countQuery.prepare(QStringLiteral(
+        "SELECT COUNT(*) FROM video_frame_analysis WHERE video_key = ?"));
+    countQuery.addBindValue(videoKey.trimmed());
+    if (execOrEmpty(countQuery) && countQuery.next()) {
+        page.totalFrameCount = countQuery.value(0).toInt();
+    }
+
+    const auto boundedFrameLimit = qBound(1, frameLimit, 2000);
     QSqlQuery frameQuery(m_globalDatabaseManager->database());
     frameQuery.prepare(QStringLiteral(
         "SELECT id, frame_number, timestamp_ms, COALESCE(image_path, ''), COALESCE(caption, ''), "
@@ -1071,38 +1123,44 @@ VideoAnalysisDetail MaterialCenterQueryService::fetchDetail(const QString &video
         "COALESCE(ocr_blocks_json, '[]'), COALESCE(structured_profile_version, 1), COALESCE(facts_complete, 0), "
         "COALESCE(model_name, ''), COALESCE(prompt_version, ''), COALESCE(analyzed_at, ''), COALESCE(error_message, ''), "
         "COALESCE(analysis_state, 0), COALESCE(retry_count, 0), COALESCE(last_http_status, 0), COALESCE(last_attempt_at, '') "
-        "FROM video_frame_analysis WHERE video_key = ? ORDER BY frame_number"));
+        "FROM video_frame_analysis WHERE video_key = ? AND frame_number > ? "
+        "ORDER BY frame_number LIMIT ?"));
     frameQuery.addBindValue(videoKey.trimmed());
+    frameQuery.addBindValue(qMax(0, afterFrameNumber));
+    frameQuery.addBindValue(boundedFrameLimit + 1);
     if (!execOrEmpty(frameQuery)) {
-        return detail;
+        return page;
     }
 
-    while (frameQuery.next()) {
-        FrameAnalysisRecord frame;
-        frame.id = frameQuery.value(0).toLongLong();
-        frame.videoKey = videoKey.trimmed();
-        frame.frameNumber = frameQuery.value(1).toInt();
-        frame.timestampMs = frameQuery.value(2).toLongLong();
-        frame.imagePath = frameQuery.value(3).toString();
-        frame.caption = frameQuery.value(4).toString();
-        frame.tags = parseJsonList(frameQuery.value(5).toString());
-        frame.objects = parseJsonList(frameQuery.value(6).toString());
-        frame.actions = frameQuery.value(7).toString();
-        frame.setting = frameQuery.value(8).toString();
-        frame.entities = VisualAnalysisMetadata::entityFactsFromJson(frameQuery.value(9).toString());
-        frame.ocrText = frameQuery.value(10).toString();
-        frame.ocrBlocks = parseJsonList(frameQuery.value(11).toString());
-        frame.structuredProfileVersion = frameQuery.value(12).toInt();
-        frame.factsComplete = frameQuery.value(13).toBool();
-        frame.modelName = frameQuery.value(14).toString();
-        frame.promptVersion = frameQuery.value(15).toString();
-        frame.analyzedAt = frameQuery.value(16).toString();
-        frame.errorMessage = frameQuery.value(17).toString();
-        frame.analysisState = static_cast<FrameAnalysisState>(frameQuery.value(18).toInt());
-        frame.retryCount = frameQuery.value(19).toInt();
-        frame.lastHttpStatus = frameQuery.value(20).toInt();
-        frame.lastAttemptAt = frameQuery.value(21).toString();
-        detail.frames.append(frame);
+    while (frameQuery.next() && detail.frames.size() < boundedFrameLimit) {
+        detail.frames.append(readFrameAnalysisRow(frameQuery, videoKey.trimmed()));
+    }
+    page.hasMoreFrames = frameQuery.isValid();
+    page.nextFrameNumber = detail.frames.isEmpty()
+        ? qMax(0, afterFrameNumber)
+        : detail.frames.constLast().frameNumber;
+
+    if (afterFrameNumber <= 0 && preferredFrameNumber > 0
+        && std::none_of(detail.frames.cbegin(), detail.frames.cend(), [preferredFrameNumber](const auto &frame) {
+            return frame.frameNumber == preferredFrameNumber;
+        })) {
+        QSqlQuery preferredQuery(m_globalDatabaseManager->database());
+        preferredQuery.prepare(QStringLiteral(
+            "SELECT id, frame_number, timestamp_ms, COALESCE(image_path, ''), COALESCE(caption, ''), "
+            "COALESCE(tags_json, '[]'), COALESCE(objects_json, '[]'), COALESCE(actions, ''), "
+            "COALESCE(setting_text, ''), COALESCE(entities_json, '[]'), COALESCE(ocr_text, ''), "
+            "COALESCE(ocr_blocks_json, '[]'), COALESCE(structured_profile_version, 1), COALESCE(facts_complete, 0), "
+            "COALESCE(model_name, ''), COALESCE(prompt_version, ''), COALESCE(analyzed_at, ''), COALESCE(error_message, ''), "
+            "COALESCE(analysis_state, 0), COALESCE(retry_count, 0), COALESCE(last_http_status, 0), COALESCE(last_attempt_at, '') "
+            "FROM video_frame_analysis WHERE video_key = ? AND frame_number = ? LIMIT 1"));
+        preferredQuery.addBindValue(videoKey.trimmed());
+        preferredQuery.addBindValue(preferredFrameNumber);
+        if (execOrEmpty(preferredQuery) && preferredQuery.next()) {
+            detail.frames.append(readFrameAnalysisRow(preferredQuery, videoKey.trimmed()));
+            std::sort(detail.frames.begin(), detail.frames.end(), [](const auto &left, const auto &right) {
+                return left.frameNumber < right.frameNumber;
+            });
+        }
     }
 
     QSqlQuery dimensionQuery(m_globalDatabaseManager->database());
@@ -1112,7 +1170,7 @@ VideoAnalysisDetail MaterialCenterQueryService::fetchDetail(const QString &video
         "ORDER BY analyzed_at DESC, id DESC"));
     dimensionQuery.addBindValue(videoKey.trimmed());
     if (!execOrEmpty(dimensionQuery)) {
-        return detail;
+        return page;
     }
 
     while (dimensionQuery.next()) {
@@ -1122,5 +1180,5 @@ VideoAnalysisDetail MaterialCenterQueryService::fetchDetail(const QString &video
         dimension.analyzedAt = dimensionQuery.value(2).toString();
         detail.dimensionAnalyses.append(dimension);
     }
-    return detail;
+    return page;
 }

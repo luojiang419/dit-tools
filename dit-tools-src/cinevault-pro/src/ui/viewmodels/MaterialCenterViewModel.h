@@ -9,6 +9,7 @@
 #include <QObject>
 #include <QSet>
 #include <QTimer>
+#include <QThreadPool>
 #include <QUrl>
 #include <QVariantList>
 
@@ -115,6 +116,7 @@ public:
                                      LocalSearchAssistantRuntime *localSearchAssistantRuntime,
                                      SearchAssistantClient *searchAssistantClient,
                                      QObject *parent = nullptr);
+    ~MaterialCenterViewModel() override;
 
     MaterialCenterListModel *model() const;
     MaterialCenterFolderListModel *folderModel() const;
@@ -264,6 +266,7 @@ private:
     FolderSearchHit folderByKey(const QString &folderKey) const;
     void prepareSelection(const QString &videoKey);
     void loadPendingDetail();
+    void loadDetailPage(const QString &videoKey, int afterFrameNumber, bool replaceCurrent);
     void refreshSelectedCaches();
     void applySelectedFrameExpansion();
     void refreshSelectedThumbnailUrl(bool allowContactSheetBuild);
@@ -317,6 +320,8 @@ private:
     bool m_searchAssistantBusy = false;
     bool m_searchAssistantUsed = false;
     int m_searchGeneration = 0;
+    int m_searchRequestGeneration = 0;
+    int m_queryBackendGeneration = 0;
     MaterialSearchResult m_lastBaselineSearchResult;
     int m_lastBaselineSearchGeneration = -1;
     QString m_quickSearchRevealVideoKey;
@@ -328,7 +333,6 @@ private:
     QSet<QString> m_searchUnderstandingInFlight;
     QHash<QString, AnalysisProgressState> m_analysisProgressByVideoKey;
     QHash<QString, DimensionProgressState> m_dimensionProgressByVideoKey;
-    QHash<QString, VideoAnalysisDetail> m_detailCache;
     QVariantList m_selectedAllFramesCache;
     QVariantList m_selectedFramesCache;
     QString m_selectedFrameSearchStatusCache;
@@ -338,8 +342,13 @@ private:
     QTimer *m_detailRefreshTimer = nullptr;
     QTimer *m_contactSheetBuildTimer = nullptr;
     QTimer *m_searchRefreshTimer = nullptr;
-    int m_selectedVisibleFrameLimit = 24;
+    int m_selectedTotalFrameCount = 0;
+    int m_selectedFrameCursor = 0;
+    int m_detailRequestGeneration = 0;
+    bool m_selectedFramesHasMore = false;
     bool m_selectedFramesLoading = false;
     QString m_currentAnalysisVideoKey;
     int m_queuedAnalysisCount = 0;
+    QThreadPool m_queryPool;
+    QThreadPool m_detailPool;
 };

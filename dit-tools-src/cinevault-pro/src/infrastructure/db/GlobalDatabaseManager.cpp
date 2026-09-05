@@ -1014,6 +1014,51 @@ bool GlobalDatabaseManager::migrateToVersion13(QSqlDatabase &db, QString *errorM
     return setSchemaVersion(db, 13, errorMessage);
 }
 
+bool GlobalDatabaseManager::openReadOnlyDatabase(const QString &databaseFilePath,
+                                                 QString *errorMessage)
+{
+    closeDatabase();
+    const auto normalizedPath = QDir::cleanPath(QFileInfo(databaseFilePath).absoluteFilePath());
+    const QFileInfo databaseInfo(normalizedPath);
+    if (!databaseInfo.isFile() || !databaseInfo.isReadable()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("全局素材数据库不可读：%1").arg(normalizedPath);
+        }
+        return false;
+    }
+
+    auto db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), m_connectionName);
+    db.setConnectOptions(QStringLiteral("QSQLITE_OPEN_READONLY"));
+    db.setDatabaseName(normalizedPath);
+    if (!db.open()) {
+        if (errorMessage) {
+            *errorMessage = db.lastError().text();
+        }
+        closeDatabase();
+        return false;
+    }
+
+    QSqlQuery configure(db);
+    if (!configure.exec(QStringLiteral("PRAGMA query_only=ON"))
+        || !configure.exec(QStringLiteral("PRAGMA busy_timeout=1000"))) {
+        if (errorMessage) {
+            *errorMessage = configure.lastError().text();
+        }
+        db.close();
+        closeDatabase();
+        return false;
+    }
+    QSqlQuery fts(db);
+    fts.prepare(QStringLiteral(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'video_search_fts' LIMIT 1"));
+    m_hasFts5 = fts.exec() && fts.next();
+    m_databaseFilePath = normalizedPath;
+    if (errorMessage) {
+        errorMessage->clear();
+    }
+    return true;
+}
+
 bool GlobalDatabaseManager::migrateToVersion14(QSqlDatabase &db, QString *errorMessage)
 {
     if (!ensureCatalogGenerationSchemaCompatibility(db, errorMessage)) {
