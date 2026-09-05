@@ -1,0 +1,19 @@
+{
+    "batches": [
+        {
+            "changed_paths": [
+            ],
+            "overflowed": false,
+            "source_root": "G:/"
+        },
+        {
+            "changed_paths": [
+                "G:/DCIM",
+                "G:/DCIM/sample.mov"
+            ],
+            "overflowed": false,
+            "source_root": "G:/DCIM"
+        }
+    ],
+    "scope": "current SourceChangeMonitor with synthetic injected Windows paths; no filesystem writes"
+}

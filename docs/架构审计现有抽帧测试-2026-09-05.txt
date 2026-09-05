@@ -1,0 +1,7 @@
+********* Start testing of FFmpegAdapterFrameExtractionTest *********
+Config: Using QtTest library 6.6.3, Qt 6.6.3 (x86_64-little_endian-llp64 shared (dynamic) release build; by MSVC 2019), windows 10
+PASS   : FFmpegAdapterFrameExtractionTest::initTestCase()
+PASS   : FFmpegAdapterFrameExtractionTest::filmStoryboardIntervalSampling_extractsQualityCandidates()
+PASS   : FFmpegAdapterFrameExtractionTest::cleanupTestCase()
+Totals: 3 passed, 0 failed, 0 skipped, 0 blacklisted, 211ms
+********* Finished testing of FFmpegAdapterFrameExtractionTest *********
