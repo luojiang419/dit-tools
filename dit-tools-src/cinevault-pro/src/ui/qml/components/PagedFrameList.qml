@@ -21,6 +21,12 @@ ListView {
     spacing: 8
     boundsBehavior: Flickable.StopAtBounds
 
+    // The frame viewport scrolls independently of the surrounding detail pane.
+    // Keep the handler on the view so model/page replacement preserves its grab.
+    MiddleDragScrollHandler {
+        flickable: frameList
+    }
+
     function requestNextPage() {
         if (!hasMore || loading || requestPending)
             return

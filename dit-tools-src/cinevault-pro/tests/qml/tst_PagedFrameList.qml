@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls
 import QtTest
 import "../../src/ui/qml/components"
 
@@ -31,22 +32,36 @@ Item {
         }
     }
 
-    PagedFrameList {
-        id: frameList
-        width: 340
-        height: 240
-        totalFrameCount: total
-        delegate: Text {
-            required property var modelData
-            width: 300
-            height: 44
-            text: "Frame " + modelData.frameNumber
+    ScrollView {
+        id: detailScroll
+        width: 360
+        height: 260
+        contentWidth: availableWidth
+        contentHeight: 400
+
+        MiddleDragScrollHandler {
+            parent: detailScroll.contentItem
+            flickable: detailScroll.contentItem
         }
-        onLoadMoreRequested: {
-            ++requests
-            loading = true
-            if (!holdResponse)
-                response.start()
+
+        PagedFrameList {
+            id: frameList
+            y: 80
+            width: 340
+            height: 240
+            totalFrameCount: total
+            delegate: Text {
+                required property var modelData
+                width: 300
+                height: 44
+                text: "Frame " + modelData.frameNumber
+            }
+            onLoadMoreRequested: {
+                ++requests
+                loading = true
+                if (!holdResponse)
+                    response.start()
+            }
         }
     }
 
@@ -71,7 +86,64 @@ Item {
             frameList.loading = false
             frameList.completePage(true, false)
             tryCompare(frameList, "requestPending", false)
+            detailScroll.contentItem.contentY = 80
             waitForRendering(frameList)
+        }
+
+        function test_middleHoldCrossesPagesAndWindowBudget() {
+            total = 505
+            var outerY = detailScroll.contentItem.contentY
+            mousePress(frameList, 120, 20, Qt.MiddleButton)
+            try {
+                mouseMove(frameList, 120, 22, 20, Qt.MiddleButton)
+                mouseMove(frameList, 120, 220, 20, Qt.MiddleButton)
+                // Keep the pointer stationary with the button held: no re-press
+                // or extra movement may be needed after a page/model replacement.
+                tryVerify(function() { return cursor === total }, 20000)
+                tryCompare(frameList, "requestPending", false)
+                tryCompare(frameList, "atYEnd", true)
+                compare(frameList.model[frameList.count - 1].frameNumber, 505)
+                verify(frameList.count <= 240)
+                compare(detailScroll.contentItem.contentY, outerY)
+            } finally {
+                mouseRelease(frameList, 120, 220, Qt.MiddleButton)
+            }
+        }
+
+        function test_middleReleaseStopsAndReverseScrolls() {
+            mousePress(frameList, 120, 20, Qt.MiddleButton)
+            try {
+                mouseMove(frameList, 120, 22, 20, Qt.MiddleButton)
+                mouseMove(frameList, 120, 180, 20, Qt.MiddleButton)
+                tryVerify(function() { return frameList.contentY > 300 })
+            } finally {
+                mouseRelease(frameList, 120, 180, Qt.MiddleButton)
+            }
+            wait(60)
+            var stoppedY = frameList.contentY
+            wait(120)
+            compare(frameList.contentY, stoppedY)
+            mousePress(frameList, 120, 220, Qt.MiddleButton)
+            try {
+                mouseMove(frameList, 120, 218, 20, Qt.MiddleButton)
+                mouseMove(frameList, 120, 40, 20, Qt.MiddleButton)
+                tryVerify(function() { return frameList.contentY < stoppedY - 100 })
+            } finally {
+                mouseRelease(frameList, 120, 40, Qt.MiddleButton)
+            }
+        }
+
+        function test_middleOutsideFramesScrollsDetails() {
+            detailScroll.contentItem.contentY = 0
+            mousePress(detailScroll, 120, 10, Qt.MiddleButton)
+            try {
+                mouseMove(detailScroll, 120, 12, 20, Qt.MiddleButton)
+                mouseMove(detailScroll, 120, 65, 20, Qt.MiddleButton)
+                tryVerify(function() { return detailScroll.contentItem.contentY > 50 })
+                compare(frameList.contentY, 0)
+            } finally {
+                mouseRelease(detailScroll, 120, 65, Qt.MiddleButton)
+            }
         }
 
         function test_wheelLoadsBeyondFirstPage() {
