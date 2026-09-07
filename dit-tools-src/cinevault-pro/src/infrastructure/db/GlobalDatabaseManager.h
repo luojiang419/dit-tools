@@ -11,13 +11,14 @@ class GlobalDatabaseManager : public QObject {
 public:
     explicit GlobalDatabaseManager(QObject *parent = nullptr);
 
-    static constexpr int CurrentSchemaVersion = 14;
+    static constexpr int CurrentSchemaVersion = 15;
 
     bool openDatabase(QString *errorMessage);
     bool openReadOnlyDatabase(const QString &databaseFilePath, QString *errorMessage);
     void closeDatabase();
     bool isOpen() const;
     bool hasFts5() const;
+    bool hasFastFileSearch() const;
     QString databaseFilePath() const;
     QSqlDatabase database() const;
     QSqlDatabase openThreadConnection(const QString &connectionName, QString *errorMessage) const;
@@ -40,15 +41,18 @@ private:
     bool migrateToVersion12(QSqlDatabase &db, QString *errorMessage);
     bool migrateToVersion13(QSqlDatabase &db, QString *errorMessage);
     bool migrateToVersion14(QSqlDatabase &db, QString *errorMessage);
+    bool migrateToVersion15(QSqlDatabase &db, QString *errorMessage);
     bool ensureFolderSchemaCompatibility(QSqlDatabase &db, QString *errorMessage);
     bool ensureVisualAnalysisSchemaCompatibility(QSqlDatabase &db, QString *errorMessage);
     bool ensureSemanticSearchSchemaCompatibility(QSqlDatabase &db, QString *errorMessage);
     bool ensureCaptureTimeSchemaCompatibility(QSqlDatabase &db, QString *errorMessage);
     bool ensureCatalogGenerationSchemaCompatibility(QSqlDatabase &db, QString *errorMessage);
+    bool ensureFastFileSearchSchemaCompatibility(QSqlDatabase &db, QString *errorMessage);
     int currentSchemaVersion(QSqlDatabase &db) const;
     bool setSchemaVersion(QSqlDatabase &db, int version, QString *errorMessage) const;
 
     QString m_connectionName;
     QString m_databaseFilePath;
     bool m_hasFts5 = false;
+    bool m_hasFastFileSearch = false;
 };

@@ -252,6 +252,7 @@ private slots:
         QVERIFY(source.contains(QStringLiteral("SearchDocumentSyncService::synchronizationFinished")));
         QVERIFY(source.contains(QStringLiteral("scheduleImmediateFullSync")));
         QVERIFY(source.contains(QStringLiteral("m_searchRefreshTimer->start(0)")));
+        QVERIFY(source.contains(QStringLiteral("m_searchRefreshTimer->setInterval(40)")));
         QVERIFY(source.contains(QStringLiteral("understandQuery")));
         QVERIFY(!source.contains(QStringLiteral("rerankFrameCandidates")));
         QVERIFY(!source.contains(QStringLiteral("startFrameRerank")));
@@ -271,6 +272,10 @@ private slots:
         QVERIFY(pagedList.contains(QStringLiteral("reuseItems: true")));
         QVERIFY(qml.lastIndexOf(QStringLiteral("PagedFrameList {"), detailListId)
                 > qml.lastIndexOf(QStringLiteral("Repeater {"), detailListId));
+        const auto quickSearch = sourceFile(
+            QStringLiteral("src/ui/qml/components/QuickSearchWindow.qml"));
+        QVERIFY(quickSearch.contains(QStringLiteral("onTextEdited: root.submitSearch()")));
+        QVERIFY(!quickSearch.contains(QStringLiteral("id: searchDebounce")));
     }
 
     void qmlConsumesSearchStateAndFolderActions()

@@ -81,7 +81,6 @@ Window {
     }
 
     function hideSearch() {
-        searchDebounce.stop()
         hide()
     }
 
@@ -210,14 +209,10 @@ Window {
         onTriggered: if (root.visible && !root.active && !root.pinned) root.hideSearch()
     }
 
-    Timer {
-        id: searchDebounce
-        interval: 80
-        onTriggered: {
-            root.selectedFlatIndex = 0
-            if (root.materialCenterViewModel) {
-                root.materialCenterViewModel.setSearchText(searchField.text)
-            }
+    function submitSearch() {
+        root.selectedFlatIndex = 0
+        if (root.materialCenterViewModel) {
+            root.materialCenterViewModel.setSearchText(searchField.text)
         }
     }
 
@@ -334,7 +329,7 @@ Window {
                             border.color: searchField.activeFocus
                                 ? root.quickSelectedLine : root.quickLine
                         }
-                        onTextEdited: searchDebounce.restart()
+                        onTextEdited: root.submitSearch()
                         onAccepted: root.activateCurrent(false)
                         Keys.onDownPressed: function(event) {
                             root.moveSelection(1)
@@ -357,7 +352,7 @@ Window {
                                 root.activateCurrent(true)
                                 event.accepted = true
                             } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_R) {
-                                searchDebounce.restart()
+                                if (root.materialCenterViewModel) root.materialCenterViewModel.reload()
                                 event.accepted = true
                             } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_I) {
                                 root.showMainWindow()

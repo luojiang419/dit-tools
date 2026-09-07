@@ -1096,6 +1096,8 @@ if(BUILD_TESTING)
     add_test(NAME PagedFrameListTest COMMAND PagedFrameListTest
         -input "${CMAKE_CURRENT_SOURCE_DIR}/tests/qml/tst_PagedFrameList.qml"
         -o PagedFrameListTest-results.txt,txt)
+    set_tests_properties(PagedFrameListTest PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
     qt_add_executable(ReliabilityRecoveryTest
         tests/unit/ReliabilityRecoveryTest.cpp
@@ -1484,6 +1486,23 @@ if(BUILD_TESTING)
         add_test(NAME LargeCatalogStressTest COMMAND LargeCatalogStressTest -v1)
         set_tests_properties(LargeCatalogStressTest PROPERTIES LABELS "stress")
 
+        qt_add_executable(LargeSearchStressTest
+            tests/stress/LargeSearchStressTest.cpp
+            src/core/search/SearchEngine.cpp
+            src/core/search/NaturalLanguageQueryParser.cpp
+            src/core/search/SearchQueryUnderstanding.cpp
+            src/infrastructure/db/GlobalDatabaseManager.cpp
+            src/infrastructure/db/DatabaseMigration.cpp
+            src/shared/Paths.cpp
+        )
+        target_include_directories(LargeSearchStressTest PRIVATE src)
+        target_link_libraries(LargeSearchStressTest PRIVATE Qt6::Core Qt6::Sql Qt6::Test)
+        if(WIN32)
+            target_link_libraries(LargeSearchStressTest PRIVATE Psapi)
+        endif()
+        add_test(NAME LargeSearchStressTest COMMAND LargeSearchStressTest -v1)
+        set_tests_properties(LargeSearchStressTest PROPERTIES LABELS "stress")
+
         qt_add_executable(MediaTaskServiceRecoveryTest
             tests/unit/MediaTaskServiceRecoveryTest.cpp
             src/application/IndexingWorkCoordinator.cpp
@@ -1705,6 +1724,9 @@ if(BUILD_TESTING)
         endif()
         if(TARGET LargeCatalogStressTest)
             list(APPEND CINEVAULT_PATH_AWARE_TESTS LargeCatalogStressTest)
+        endif()
+        if(TARGET LargeSearchStressTest)
+            list(APPEND CINEVAULT_PATH_AWARE_TESTS LargeSearchStressTest)
         endif()
         if(TARGET MediaTaskServiceRecoveryTest)
             list(APPEND CINEVAULT_PATH_AWARE_TESTS MediaTaskServiceRecoveryTest)

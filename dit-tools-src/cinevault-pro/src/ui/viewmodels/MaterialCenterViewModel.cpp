@@ -347,10 +347,9 @@ MaterialCenterViewModel::MaterialCenterViewModel(MaterialCenterQueryService *que
     connect(m_contactSheetBuildTimer, &QTimer::timeout, this, &MaterialCenterViewModel::buildPendingContactSheet);
 
     m_searchRefreshTimer->setSingleShot(true);
-    // Keep local results responsive while avoiding one model request per
-    // keystroke. Every stable non-empty query is still sent to the local text
-    // assistant after this short debounce.
-    m_searchRefreshTimer->setInterval(400);
+    // Local indexed results use one short debounce for both search surfaces.
+    // Model understanding starts only after the baseline result is visible.
+    m_searchRefreshTimer->setInterval(40);
     connect(m_searchRefreshTimer, &QTimer::timeout, this, &MaterialCenterViewModel::reload);
 
     if (m_localSearchAssistantRuntime) {

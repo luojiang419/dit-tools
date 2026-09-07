@@ -133,6 +133,74 @@ QString createSearchFtsStatement()
         ");");
 }
 
+QString createFastFileSearchFtsStatement()
+{
+    return QStringLiteral(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS file_name_search_fts USING fts5("
+        "video_key UNINDEXED,"
+        "file_name UNINDEXED,"
+        "absolute_path,"
+        "tokenize='trigram'"
+        ");");
+}
+
+bool ensureFastFileSearchSchema(QSqlDatabase &db, bool *available, QString *errorMessage)
+{
+    QSqlQuery exists(db);
+    exists.prepare(QStringLiteral(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'file_name_search_fts' LIMIT 1"));
+    const bool existed = exists.exec() && exists.next();
+
+    QSqlQuery query(db);
+    if (!query.exec(createFastFileSearchFtsStatement())) {
+        if (available) {
+            *available = false;
+        }
+        return true;
+    }
+
+    const QStringList triggers{
+        QStringLiteral(
+            "CREATE TRIGGER IF NOT EXISTS trg_fast_file_search_insert "
+            "AFTER INSERT ON global_video_asset WHEN NEW.is_available = 1 BEGIN "
+            "INSERT INTO file_name_search_fts(video_key, file_name, absolute_path) "
+            "VALUES (NEW.video_key, NEW.file_name, NEW.absolute_path); END;"),
+        QStringLiteral(
+            "CREATE TRIGGER IF NOT EXISTS trg_fast_file_search_update "
+            "AFTER UPDATE OF video_key, file_name, absolute_path, is_available ON global_video_asset BEGIN "
+            "DELETE FROM file_name_search_fts WHERE video_key = OLD.video_key; "
+            "INSERT INTO file_name_search_fts(video_key, file_name, absolute_path) "
+            "SELECT NEW.video_key, NEW.file_name, NEW.absolute_path "
+            "WHERE NEW.is_available = 1; END;"),
+        QStringLiteral(
+            "CREATE TRIGGER IF NOT EXISTS trg_fast_file_search_delete "
+            "AFTER DELETE ON global_video_asset BEGIN "
+            "DELETE FROM file_name_search_fts WHERE video_key = OLD.video_key; END;")
+    };
+    if (!executeBatch(db, triggers, errorMessage)) {
+        if (available) {
+            *available = false;
+        }
+        return false;
+    }
+    if (!existed && !query.exec(QStringLiteral(
+            "INSERT INTO file_name_search_fts(video_key, file_name, absolute_path) "
+            "SELECT video_key, file_name, absolute_path "
+            "FROM global_video_asset WHERE is_available = 1"))) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("回填快速文件搜索索引失败：%1").arg(query.lastError().text());
+        }
+        if (available) {
+            *available = false;
+        }
+        return false;
+    }
+    if (available) {
+        *available = true;
+    }
+    return true;
+}
+
 bool ensureSearchFtsSchema(QSqlDatabase &db, bool *hasFts5, QString *errorMessage)
 {
     QSqlQuery query(db);
@@ -240,6 +308,7 @@ void GlobalDatabaseManager::closeDatabase()
     if (!QSqlDatabase::contains(m_connectionName)) {
         m_databaseFilePath.clear();
         m_hasFts5 = false;
+        m_hasFastFileSearch = false;
         return;
     }
 
@@ -250,6 +319,7 @@ void GlobalDatabaseManager::closeDatabase()
     QSqlDatabase::removeDatabase(m_connectionName);
     m_databaseFilePath.clear();
     m_hasFts5 = false;
+    m_hasFastFileSearch = false;
 }
 
 bool GlobalDatabaseManager::isOpen() const
@@ -260,6 +330,11 @@ bool GlobalDatabaseManager::isOpen() const
 bool GlobalDatabaseManager::hasFts5() const
 {
     return m_hasFts5;
+}
+
+bool GlobalDatabaseManager::hasFastFileSearch() const
+{
+    return m_hasFastFileSearch;
 }
 
 QString GlobalDatabaseManager::databaseFilePath() const
@@ -598,6 +673,14 @@ bool GlobalDatabaseManager::initializeSchema(QSqlDatabase &db, bool databaseExis
     } else if (!ensureCatalogGenerationSchemaCompatibility(db, errorMessage)) {
         return rollback();
     }
+    if (version < 15) {
+        if (!migrateToVersion15(db, errorMessage)) {
+            return rollback();
+        }
+        version = 15;
+    } else if (!ensureFastFileSearchSchemaCompatibility(db, errorMessage)) {
+        return rollback();
+    }
 
     if (!db.commit()) {
         if (errorMessage) {
@@ -792,7 +875,8 @@ bool GlobalDatabaseManager::createSchema(QSqlDatabase &db, QString *errorMessage
         return false;
     }
 
-    return ensureSearchFtsSchema(db, &m_hasFts5, errorMessage);
+    return ensureSearchFtsSchema(db, &m_hasFts5, errorMessage)
+        && ensureFastFileSearchSchema(db, &m_hasFastFileSearch, errorMessage);
 }
 
 bool GlobalDatabaseManager::ensureSchemaCompatibility(QSqlDatabase &db, QString *errorMessage)
@@ -919,8 +1003,7 @@ bool GlobalDatabaseManager::ensureSchemaCompatibility(QSqlDatabase &db, QString 
     if (!ensureSearchFtsSchema(db, &m_hasFts5, errorMessage)) {
         return false;
     }
-
-    return true;
+    return ensureFastFileSearchSchema(db, &m_hasFastFileSearch, errorMessage);
 }
 
 bool GlobalDatabaseManager::migrateToVersion8(QSqlDatabase &db, QString *errorMessage)
@@ -1040,6 +1123,9 @@ bool GlobalDatabaseManager::openReadOnlyDatabase(const QString &databaseFilePath
 
     QSqlQuery configure(db);
     if (!configure.exec(QStringLiteral("PRAGMA query_only=ON"))
+        || !configure.exec(QStringLiteral("PRAGMA cache_size=-32768"))
+        || !configure.exec(QStringLiteral("PRAGMA temp_store=MEMORY"))
+        || !configure.exec(QStringLiteral("PRAGMA mmap_size=268435456"))
         || !configure.exec(QStringLiteral("PRAGMA busy_timeout=1000"))) {
         if (errorMessage) {
             *errorMessage = configure.lastError().text();
@@ -1052,6 +1138,9 @@ bool GlobalDatabaseManager::openReadOnlyDatabase(const QString &databaseFilePath
     fts.prepare(QStringLiteral(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'video_search_fts' LIMIT 1"));
     m_hasFts5 = fts.exec() && fts.next();
+    fts.prepare(QStringLiteral(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'file_name_search_fts' LIMIT 1"));
+    m_hasFastFileSearch = fts.exec() && fts.next();
     m_databaseFilePath = normalizedPath;
     if (errorMessage) {
         errorMessage->clear();
@@ -1079,6 +1168,21 @@ bool GlobalDatabaseManager::migrateToVersion14(QSqlDatabase &db, QString *errorM
         return false;
     }
     return setSchemaVersion(db, 14, errorMessage);
+}
+
+bool GlobalDatabaseManager::migrateToVersion15(QSqlDatabase &db, QString *errorMessage)
+{
+    if (!ensureFastFileSearchSchemaCompatibility(db, errorMessage)) {
+        return false;
+    }
+    return setSchemaVersion(db, 15, errorMessage);
+}
+
+bool GlobalDatabaseManager::ensureFastFileSearchSchemaCompatibility(
+    QSqlDatabase &db,
+    QString *errorMessage)
+{
+    return ensureFastFileSearchSchema(db, &m_hasFastFileSearch, errorMessage);
 }
 
 bool GlobalDatabaseManager::ensureCatalogGenerationSchemaCompatibility(

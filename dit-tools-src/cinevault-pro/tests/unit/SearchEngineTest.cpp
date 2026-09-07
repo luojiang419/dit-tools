@@ -181,6 +181,52 @@ class SearchEngineTest : public QObject {
     Q_OBJECT
 
 private slots:
+    void configuresBoundedMemoryCacheAndFastFileIndex()
+    {
+        Fixture fixture;
+        QVERIFY2(fixture.valid, qPrintable(fixture.errorMessage));
+        QVERIFY(fixture.manager.hasFastFileSearch());
+
+        QSqlQuery pragma(fixture.manager.database());
+        QVERIFY(pragma.exec(QStringLiteral("PRAGMA cache_size")));
+        QVERIFY(pragma.next());
+        QCOMPARE(pragma.value(0).toInt(), -32768);
+        QVERIFY(pragma.exec(QStringLiteral("PRAGMA temp_store")));
+        QVERIFY(pragma.next());
+        QCOMPARE(pragma.value(0).toInt(), 2);
+
+        QVERIFY(pragma.exec(QStringLiteral("SELECT COUNT(*) FROM file_name_search_fts")));
+        QVERIFY(pragma.next());
+        QCOMPARE(pragma.value(0).toInt(), 5);
+    }
+
+    void fastFileIndexFindsMiddleSubstringAndTracksChanges()
+    {
+        Fixture fixture;
+        QVERIFY2(fixture.valid, qPrintable(fixture.errorMessage));
+        SearchEngine engine(&fixture.manager);
+
+        auto result = engine.searchMaterials(QStringLiteral("夜景航"));
+        QVERIFY(findHit(result, SearchDocumentType::Asset, QStringLiteral("asset-night-video")));
+        QVERIFY(findHit(result, SearchDocumentType::Asset, QStringLiteral("asset-night-image")));
+
+        QSqlQuery update(fixture.manager.database());
+        QVERIFY(update.exec(QStringLiteral(
+            "UPDATE global_video_asset SET file_name = 'summer-middle-cut.mp4', "
+            "relative_path = 'cuts/summer-middle-cut.mp4', "
+            "absolute_path = 'G:/cuts/summer-middle-cut.mp4' "
+            "WHERE video_key = 'asset-night-video'")));
+        result = engine.searchMaterials(QStringLiteral("middle"));
+        QVERIFY(findHit(result, SearchDocumentType::Asset, QStringLiteral("asset-night-video")));
+
+        QVERIFY(update.exec(QStringLiteral(
+            "UPDATE global_video_asset SET is_available = 0 WHERE video_key = 'asset-night-video'")));
+        QVERIFY(update.exec(QStringLiteral(
+            "SELECT COUNT(*) FROM file_name_search_fts WHERE video_key = 'asset-night-video'")));
+        QVERIFY(update.next());
+        QCOMPARE(update.value(0).toInt(), 0);
+    }
+
     void naturalLanguageFiltersDateAndAssetTypeAndReturnsOnlyAssets()
     {
         Fixture fixture;

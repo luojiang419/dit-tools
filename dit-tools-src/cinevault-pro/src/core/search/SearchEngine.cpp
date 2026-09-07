@@ -21,6 +21,12 @@ constexpr qsizetype kMaximumResultLimit = 2000;
 constexpr qsizetype kMaximumCandidateLimit = 8000;
 constexpr qsizetype kSemanticCandidateLimit = 200;
 
+struct FastFileCandidate {
+    QString videoKey;
+    QString fileName;
+    QString absolutePath;
+};
+
 struct SemanticDocumentMetadata {
     SearchDocumentType type = SearchDocumentType::Unknown;
     QString entityKey;
@@ -196,6 +202,44 @@ QString groupedFtsQuery(const ParsedMaterialQuery &query,
         }
     }
     return predicates.join(QStringLiteral(" AND "));
+}
+
+QString trigramFtsQuery(const ParsedMaterialQuery &query)
+{
+    const auto quoteTerm = [](QString term) {
+        term = term.simplified();
+        if (term.size() < 3) {
+            return QString{};
+        }
+        term.replace(QLatin1Char('"'), QStringLiteral("\"\""));
+        return QStringLiteral("\"%1\"").arg(term);
+    };
+    const auto groups = requiredLexicalGroups(query);
+    if (!groups.isEmpty()) {
+        QStringList predicates;
+        for (const auto &group : groups) {
+            QStringList alternatives;
+            for (const auto &term : group.alternatives) {
+                const auto quoted = quoteTerm(term);
+                if (!quoted.isEmpty()) {
+                    alternatives.append(quoted);
+                }
+            }
+            if (!alternatives.isEmpty()) {
+                predicates.append(QStringLiteral("(%1)").arg(alternatives.join(QStringLiteral(" OR "))));
+            }
+        }
+        return predicates.join(QStringLiteral(" AND "));
+    }
+
+    QStringList terms;
+    for (const auto &term : query.lexicalTerms) {
+        const auto quoted = quoteTerm(term);
+        if (!quoted.isEmpty()) {
+            terms.append(quoted);
+        }
+    }
+    return terms.join(QStringLiteral(" OR "));
 }
 
 double lexicalGroupCoverageScore(const QVector<SearchLexicalGroup> &groups,
@@ -815,7 +859,7 @@ QString SearchEngine::buildFtsQuery(const QString &keyword) const
     QStringList escapedTokens;
     for (auto token : tokens) {
         token.replace(QLatin1Char('"'), QStringLiteral("\"\""));
-        escapedTokens.append(QStringLiteral("\"%1\"").arg(token));
+        escapedTokens.append(QStringLiteral("\"%1\"*").arg(token));
     }
     if (escapedTokens.isEmpty()) {
         return {};
@@ -855,23 +899,48 @@ HybridSearchResult SearchEngine::searchMaterials(const QString &queryText,
     QHash<QString, double> bestVisualDocumentScore;
 
     QHash<QString, double> ftsScores;
+    QHash<QString, FastFileCandidate> fastFileCandidates;
+    bool candidateIndexQuerySucceeded = false;
     if (m_globalDatabaseManager->hasFts5() && !result.parsedQuery.lexicalTerms.isEmpty()) {
         QSqlQuery ftsQuery(db);
         ftsQuery.prepare(QStringLiteral(
             "SELECT video_key FROM video_search_fts WHERE video_search_fts MATCH ? "
-            "ORDER BY bm25(video_search_fts) LIMIT ?"));
+            "LIMIT ?"));
         ftsQuery.addBindValue(groupedFtsQuery(result.parsedQuery, *this));
         ftsQuery.addBindValue(lexicalCandidateLimit);
         if (ftsQuery.exec()) {
-            qsizetype rank = 0;
+            candidateIndexQuerySucceeded = true;
             while (ftsQuery.next()) {
-                const auto rankScore = std::max(0.75, 1.0 - (static_cast<double>(rank) * 0.0025));
-                ftsScores.insert(ftsQuery.value(0).toString(), rankScore);
-                ++rank;
+                ftsScores.insert(ftsQuery.value(0).toString(), 0.80);
             }
         } else {
             appendWarning(&result.warningMessage,
                           QStringLiteral("FTS 查询失败：%1").arg(ftsQuery.lastError().text()));
+        }
+    }
+
+    const auto fileQuery = trigramFtsQuery(result.parsedQuery);
+    if (m_globalDatabaseManager->hasFastFileSearch()
+        && !fileQuery.isEmpty()) {
+        QSqlQuery fileFtsQuery(db);
+        fileFtsQuery.prepare(QStringLiteral(
+            "SELECT video_key, file_name, absolute_path FROM file_name_search_fts "
+            "WHERE file_name_search_fts MATCH ? LIMIT ?"));
+        fileFtsQuery.addBindValue(fileQuery);
+        fileFtsQuery.addBindValue(lexicalCandidateLimit);
+        if (fileFtsQuery.exec()) {
+            candidateIndexQuerySucceeded = true;
+            while (fileFtsQuery.next()) {
+                const auto videoKey = fileFtsQuery.value(0).toString();
+                ftsScores[videoKey] = std::max(ftsScores.value(videoKey), 1.0);
+                fastFileCandidates.insert(videoKey,
+                                          FastFileCandidate{videoKey,
+                                                            fileFtsQuery.value(1).toString(),
+                                                            fileFtsQuery.value(2).toString()});
+            }
+        } else {
+            appendWarning(&result.warningMessage,
+                          QStringLiteral("快速文件名查询失败：%1").arg(fileFtsQuery.lastError().text()));
         }
     }
 
@@ -1228,7 +1297,50 @@ HybridSearchResult SearchEngine::searchMaterials(const QString &queryText,
 
     const bool hasLexicalTerms = !result.parsedQuery.lexicalTerms.isEmpty();
     if (result.parsedQuery.resultTarget == SearchResultTarget::Assets) {
-        appendAssets({}, hasLexicalTerms, {});
+        const bool simpleCandidateQuery = scope.projectUuid.isEmpty()
+            && scope.sourceRootName.isEmpty()
+            && scope.analysisStatusFilter < 0
+            && scope.confirmationStatusFilter < 0
+            && scope.assetTypeFilter < 0
+            && result.parsedQuery.assetTypeFilter < 0
+            && result.parsedQuery.assetTypeFilters.isEmpty()
+            && result.parsedQuery.dateConstraint.isEmpty()
+            && result.parsedQuery.ocrText.isEmpty()
+            && result.parsedQuery.excludedTerms.isEmpty()
+            && !result.parsedQuery.hasStrictEntityConstraints();
+        const auto indexedCandidates = simpleCandidateQuery
+                && candidateIndexQuerySucceeded
+                && !ftsScores.isEmpty()
+            ? ftsScores.keys()
+            : QStringList{};
+        if (!indexedCandidates.isEmpty()) {
+            for (const auto &candidate : std::as_const(fastFileCandidates)) {
+                HybridSearchHit hit;
+                hit.documentType = SearchDocumentType::Asset;
+                hit.entityKey = candidate.videoKey;
+                hit.documentKey = canonicalDocumentKey(hit.documentType, hit.entityKey);
+                hit.lexicalScore = textMatchScore(result.parsedQuery.lexicalTerms,
+                                                  candidate.fileName,
+                                                  candidate.absolutePath,
+                                                  &hit.pathScore);
+                hit.lexicalScore = std::max(hit.lexicalScore, ftsScores.value(candidate.videoKey));
+                hit.reasons.append(QStringLiteral("文件名或路径快速索引命中"));
+                mergeHit(&mergedHits, std::move(hit));
+            }
+
+            QStringList contentOnlyCandidates;
+            contentOnlyCandidates.reserve(indexedCandidates.size());
+            for (const auto &videoKey : indexedCandidates) {
+                if (!fastFileCandidates.contains(videoKey)) {
+                    contentOnlyCandidates.append(videoKey);
+                }
+            }
+            if (!contentOnlyCandidates.isEmpty()) {
+                appendAssets(contentOnlyCandidates, false, {});
+            }
+        } else {
+            appendAssets({}, hasLexicalTerms, {});
+        }
     } else if (result.parsedQuery.resultTarget == SearchResultTarget::Folders) {
         appendFolders({}, hasLexicalTerms, {});
     } else {
