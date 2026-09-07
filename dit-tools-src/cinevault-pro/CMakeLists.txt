@@ -1513,6 +1513,16 @@ if(BUILD_TESTING)
         add_test(NAME MediaTaskServiceRecoveryTest
             COMMAND MediaTaskServiceRecoveryTest -o MediaTaskServiceRecoveryTest-results.txt,txt)
 
+        qt_add_executable(ReportRenderEngineTest
+            tests/unit/ReportRenderEngineTest.cpp
+            src/core/report/ReportRenderEngine.cpp
+            src/shared/Formatters.cpp
+        )
+        target_include_directories(ReportRenderEngineTest PRIVATE src)
+        target_link_libraries(ReportRenderEngineTest PRIVATE Qt6::Core Qt6::Gui Qt6::Pdf Qt6::Test)
+        add_test(NAME ReportRenderEngineTest COMMAND ReportRenderEngineTest -o ReportRenderEngineTest-results.txt,txt)
+        set_tests_properties(ReportRenderEngineTest PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
         qt_add_executable(LibraryWorkspacePaginationTest
             tests/unit/LibraryWorkspacePaginationTest.cpp
             src/application/LibraryQueryService.cpp
@@ -1677,6 +1687,9 @@ if(BUILD_TESTING)
         endif()
         if(TARGET DocumentPreviewServiceTest)
             list(APPEND CINEVAULT_PATH_AWARE_TESTS DocumentPreviewServiceTest)
+        endif()
+        if(TARGET ReportRenderEngineTest)
+            list(APPEND CINEVAULT_PATH_AWARE_TESTS ReportRenderEngineTest)
         endif()
         if(TARGET MaterialCenterQueryServiceTest)
             list(APPEND CINEVAULT_PATH_AWARE_TESTS MaterialCenterQueryServiceTest)

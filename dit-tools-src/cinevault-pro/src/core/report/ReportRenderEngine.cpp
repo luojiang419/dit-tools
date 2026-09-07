@@ -108,38 +108,6 @@ QString streamSummary(const ReportAssetRow &asset, const QString &kind)
     return lines.join(QStringLiteral("\n"));
 }
 
-QString technicalSummary(const ReportAssetRow &asset)
-{
-    QStringList parts;
-    parts.append(QStringLiteral("封装：%1").arg(fileExtensionLabel(asset)));
-    if (asset.durationMs > 0) {
-        parts.append(QStringLiteral("时长：%1").arg(Formatters::formatDuration(asset.durationMs)));
-    }
-    if (asset.bitRate > 0) {
-        parts.append(QStringLiteral("码率：%1").arg(Formatters::formatBitRate(asset.bitRate)));
-    }
-
-    for (const auto &stream : asset.streams) {
-        if (stream.kind != QStringLiteral("video")) {
-            continue;
-        }
-        if (!stream.codec.isEmpty()) {
-            parts.append(QStringLiteral("编码：%1").arg(stream.codec));
-        }
-        if (stream.width > 0 && stream.height > 0) {
-            parts.append(QStringLiteral("分辨率：%1X%2").arg(stream.width).arg(stream.height));
-        }
-        break;
-    }
-    if (!asset.metadataError.isEmpty()) {
-        parts.append(QStringLiteral("异常：%1").arg(asset.metadataError));
-    }
-    if (parts.isEmpty()) {
-        parts.append(Formatters::probeStatusLabel(asset.probeStatus));
-    }
-    return parts.join(QStringLiteral("\n"));
-}
-
 QVector<ReportAssetRow> assetsByType(const ReportDocument &document, AssetType type)
 {
     QVector<ReportAssetRow> rows;
@@ -296,7 +264,9 @@ private:
         if (m_mode == OutputMode::PreviewImages) {
             m_pageRect = QRectF(68, 68, m_previewPageSize.width() - 136, m_previewPageSize.height() - 136);
         } else {
-            m_pageRect = QRectF(m_writer->pageLayout().paintRectPixels(m_writer->resolution()));
+            // QPdfWriter already translates the painter to the printable origin.
+            m_pageRect = QRectF(QPointF(0, 0),
+                m_writer->pageLayout().paintRectPixels(m_writer->resolution()).size());
         }
         if (!m_pageRect.isValid() || m_pageRect.width() <= 0 || m_pageRect.height() <= 0) {
             m_pageRect = QRectF(72, 72, 1540, 1040);
@@ -345,6 +315,8 @@ private:
             m_previewPainter.end();
         }
         m_previewImage = QImage(m_previewPageSize, QImage::Format_ARGB32_Premultiplied);
+        m_previewImage.setDotsPerMeterX(qRound(144.0 / 0.0254));
+        m_previewImage.setDotsPerMeterY(qRound(144.0 / 0.0254));
         m_previewImage.fill(Qt::white);
         m_previewPainter.begin(&m_previewImage);
         configurePainter();
@@ -426,7 +398,7 @@ private:
 
     QStringList wrappedLines(const QString &text, qreal width, const QFont &lineFont, int maxLines) const
     {
-        QFontMetricsF metrics(lineFont);
+        QFontMetricsF metrics(lineFont, m_painter.device());
         QStringList lines;
         const auto paragraphs = text.split(QLatin1Char('\n'));
         for (const auto &paragraph : paragraphs) {
@@ -452,6 +424,8 @@ private:
         }
         if (lines.size() > maxLines) {
             lines = lines.mid(0, maxLines);
+            lines.last() = metrics.elidedText(lines.last() + QStringLiteral("…"),
+                                              Qt::ElideRight, static_cast<int>(width));
         }
         if (!lines.isEmpty() && metrics.horizontalAdvance(lines.last()) > width) {
             lines.last() = metrics.elidedText(lines.last(), Qt::ElideRight, static_cast<int>(width));
@@ -463,7 +437,7 @@ private:
     {
         m_painter.setFont(lineFont);
         m_painter.setPen(color);
-        QFontMetricsF metrics(lineFont);
+        QFontMetricsF metrics(lineFont, m_painter.device());
         const auto lines = wrappedLines(text, rect.width(), lineFont, maxLines);
         qreal y = rect.top();
         for (const auto &line : lines) {
@@ -688,9 +662,24 @@ private:
         }
     }
 
+    // The header and rows share proportional columns on both PDF and preview pages.
+    QRectF videoColumn(const QRectF &row, int column) const
+    {
+        static constexpr qreal edges[] = {0.0, 0.04, 0.18, 0.59, 0.80, 1.0};
+        return QRectF(row.left() + row.width() * edges[column], row.top(),
+                      row.width() * (edges[column + 1] - edges[column]), row.height())
+            .adjusted(10, 0, -10, 0);
+    }
+
+    qreal videoTextHeight(const QString &text, qreal width, const QFont &textFont, int maxLines) const
+    {
+        return wrappedLines(text, width, textFont, maxLines).size()
+            * (QFontMetricsF(textFont, m_painter.device()).height() + 2);
+    }
+
     void drawVideoMetadata()
     {
-        drawSectionTitle(QStringLiteral("视频元数据明细"));
+        // The running page header already names this section.
         const auto videos = assetsByType(m_document, AssetType::Video);
         if (videos.isEmpty()) {
             drawEmptyBlock(QStringLiteral("当前项目没有视频元数据。"));
@@ -700,33 +689,110 @@ private:
         drawVideoTableHeader();
         int index = 1;
         for (const auto &video : videos) {
-            if (ensureSpace(116)) {
+            const auto nameFont = font(9.0, QFont::DemiBold);
+            const auto detailFont = font(8.0);
+            const qreal fileWidth = videoColumn(m_pageRect, 2).width();
+            const auto directory = QStringLiteral("路径  %1").arg(fileDirectoryLabel(video));
+            const auto modified = QDateTime::fromString(video.modifiedAt, Qt::ISODate);
+            const auto dateLabel = modified.isValid()
+                ? modified.toString(QStringLiteral("yyyy-MM-dd HH:mm"))
+                : (video.modifiedAt.isEmpty() ? QStringLiteral("未记录") : video.modifiedAt);
+            const auto fileMeta = QStringLiteral("大小  %1    修改  %2")
+                .arg(Formatters::formatBytes(video.sizeBytes), dateLabel);
+            const qreal nameHeight = videoTextHeight(video.name, fileWidth, nameFont, 2);
+            const qreal pathHeight = videoTextHeight(directory, fileWidth, detailFont, 2);
+            const qreal metaHeight = videoTextHeight(fileMeta, fileWidth, detailFont, 2);
+            const qreal fileHeight = nameHeight + pathHeight + metaHeight + 38;
+
+            QString codec = QStringLiteral("未检测");
+            QString resolution = QStringLiteral("未检测");
+            for (const auto &stream : video.streams) {
+                if (stream.kind != QStringLiteral("video")) {
+                    continue;
+                }
+                if (!stream.codec.isEmpty()) {
+                    codec = stream.codec;
+                }
+                if (stream.width > 0 && stream.height > 0) {
+                    resolution = QStringLiteral("%1 × %2").arg(stream.width).arg(stream.height);
+                }
+                break;
+            }
+            const QStringList pictureLines = {
+                QStringLiteral("分辨率  %1").arg(resolution),
+                QStringLiteral("编码  %1").arg(codec),
+                QStringLiteral("封装  %1").arg(fileExtensionLabel(video)),
+                QStringLiteral("状态  %1").arg(Formatters::probeStatusLabel(video.probeStatus))
+            };
+            QStringList audioLines;
+            for (const auto &stream : video.streams) {
+                if (stream.kind != QStringLiteral("audio")) {
+                    continue;
+                }
+                audioLines.append(QStringLiteral("音频  %1 · %2声道")
+                    .arg(stream.codec.isEmpty() ? QStringLiteral("未知编码") : stream.codec)
+                    .arg(stream.channels));
+                audioLines.append(QStringLiteral("采样  %1 Hz · %2")
+                    .arg(stream.sampleRate)
+                    .arg(stream.bitRate > 0 ? Formatters::formatBitRate(stream.bitRate) : QStringLiteral("未知码率")));
+            }
+            const auto audio = audioLines.join(QLatin1Char('\n'));
+            const QStringList playbackLines = {
+                QStringLiteral("时长  %1").arg(video.durationMs > 0
+                    ? Formatters::formatDuration(video.durationMs) : QStringLiteral("未检测")),
+                QStringLiteral("码率  %1").arg(video.bitRate > 0
+                    ? Formatters::formatBitRate(video.bitRate) : QStringLiteral("未检测")),
+                audio.isEmpty() ? QStringLiteral("音频  未检测到音频流") : audio
+            };
+            const qreal playbackHeight = videoTextHeight(playbackLines.join(QLatin1Char('\n')),
+                videoColumn(m_pageRect, 4).width(), detailFont, 6) + 28;
+            const qreal bodyHeight = std::max({qreal(140), fileHeight, playbackHeight});
+            const qreal errorHeight = video.metadataError.isEmpty() ? 0
+                : videoTextHeight(QStringLiteral("异常  ") + video.metadataError,
+                    m_pageRect.width() * 0.82 - 20, detailFont, 2) + 12;
+            const qreal rowHeight = bodyHeight + errorHeight;
+            if (ensureSpace(rowHeight)) {
                 drawVideoTableHeader();
             }
-            const QRectF rect(m_pageRect.left(), m_y, m_pageRect.width(), 108);
+            const QRectF rect(m_pageRect.left(), m_y, m_pageRect.width(), rowHeight);
             m_painter.fillRect(rect, QColor(index % 2 == 0 ? "#F8FAFC" : "#FFFFFF"));
             m_painter.setPen(QPen(QColor("#E2E8F0"), 1));
             m_painter.drawRect(rect);
-
-            drawCellText(QRectF(rect.left() + 8, rect.top() + 8, 36, rect.height() - 16),
+            for (int column = 3; column <= 4; ++column) {
+                const auto cell = videoColumn(rect, column);
+                m_painter.drawLine(QPointF(cell.left() - 10, rect.top() + 12),
+                                  QPointF(cell.left() - 10, rect.top() + bodyHeight - 12));
+            }
+            drawCellText(videoColumn(rect, 0).adjusted(0, 14, 0, -14),
                          QString::number(index).rightJustified(2, QLatin1Char('0')),
-                         font(8.5, QFont::DemiBold),
-                         QColor("#111827"),
-                         1,
-                         Qt::AlignHCenter);
-            drawThumbnail(QRectF(rect.left() + 52, rect.top() + 10, 118, rect.height() - 20), video.thumbnailPath, video.name);
-            drawCellText(QRectF(rect.left() + 184, rect.top() + 10, 340, rect.height() - 20),
-                         QStringLiteral("文件名：%1\n文件路径：%2\n大小：%3\n修改：%4")
-                             .arg(video.name, fileDirectoryLabel(video), Formatters::formatBytes(video.sizeBytes), video.modifiedAt),
-                         font(8.2),
-                         QColor("#111827"),
-                         5);
-            drawCellText(QRectF(rect.left() + 540, rect.top() + 10, rect.width() - 552, rect.height() - 20),
-                         technicalSummary(video),
-                         font(8.2),
-                         QColor("#334155"),
-                         5);
-            m_y += rect.height();
+                         font(8.5, QFont::DemiBold), QColor("#64748B"), 1, Qt::AlignHCenter);
+            const auto preview = videoColumn(rect, 1);
+            const qreal previewHeight = std::min(bodyHeight - 28, preview.width() * 9.0 / 16.0);
+            drawThumbnail(QRectF(preview.left(), rect.top() + 14, preview.width(), previewHeight),
+                          video.thumbnailPath, QString());
+            const auto file = videoColumn(rect, 2);
+            qreal textY = rect.top() + 14;
+            drawCellText(QRectF(file.left(), textY, file.width(), nameHeight),
+                         video.name, nameFont, QColor("#111827"), 2);
+            textY += nameHeight + 8;
+            drawCellText(QRectF(file.left(), textY, file.width(), pathHeight),
+                         directory, detailFont, QColor("#475569"), 2);
+            textY += pathHeight + 8;
+            drawCellText(QRectF(file.left(), textY, file.width(), metaHeight),
+                         fileMeta, detailFont, QColor("#475569"), 2);
+            drawCellText(videoColumn(rect, 3).adjusted(0, 14, 0, -14),
+                         pictureLines.join(QLatin1Char('\n')), detailFont, QColor("#334155"), 5);
+            drawCellText(videoColumn(rect, 4).adjusted(0, 14, 0, -14),
+                         playbackLines.join(QLatin1Char('\n')), detailFont, QColor("#334155"), 6);
+            if (errorHeight > 0) {
+                const QRectF errorRect(file.left(), rect.top() + bodyHeight,
+                                       rect.right() - file.left() - 10, errorHeight);
+                m_painter.fillRect(errorRect, QColor("#FFF7ED"));
+                drawCellText(errorRect.adjusted(6, 4, -6, -4),
+                             QStringLiteral("异常  ") + video.metadataError,
+                             detailFont, QColor("#9A3412"), 2);
+            }
+            m_y += rowHeight;
             ++index;
         }
     }
@@ -742,13 +808,15 @@ private:
 
         drawTableHeader({QStringLiteral("序号"), QStringLiteral("文件名"), QStringLiteral("时长"), QStringLiteral("编码/流"), QStringLiteral("码率"), QStringLiteral("大小"), QStringLiteral("相对路径")},
                         {0.06, 0.18, 0.10, 0.20, 0.10, 0.10, 0.26});
+        const qreal rowHeight = std::max(qreal(42),
+            2 * (QFontMetricsF(font(8.1), m_painter.device()).height() + 2) + 10);
         int index = 1;
         for (const auto &audio : audios) {
-            if (ensureSpace(46)) {
+            if (ensureSpace(rowHeight)) {
                 drawTableHeader({QStringLiteral("序号"), QStringLiteral("文件名"), QStringLiteral("时长"), QStringLiteral("编码/流"), QStringLiteral("码率"), QStringLiteral("大小"), QStringLiteral("相对路径")},
                                 {0.06, 0.18, 0.10, 0.20, 0.10, 0.10, 0.26});
             }
-            const QRectF rect(m_pageRect.left(), m_y, m_pageRect.width(), 42);
+            const QRectF rect(m_pageRect.left(), m_y, m_pageRect.width(), rowHeight);
             m_painter.fillRect(rect, QColor(index % 2 == 0 ? "#F8FAFC" : "#FFFFFF"));
             m_painter.setPen(QPen(QColor("#E2E8F0"), 1));
             m_painter.drawRect(rect);
@@ -764,7 +832,7 @@ private:
                         },
                         {0.06, 0.18, 0.10, 0.20, 0.10, 0.10, 0.26},
                         2);
-            m_y += 42;
+            m_y += rowHeight;
             ++index;
         }
     }
@@ -871,16 +939,16 @@ private:
 
     void drawVideoTableHeader()
     {
-        ensureSpace(34);
-        const QRectF rect(m_pageRect.left(), m_y, m_pageRect.width(), 30);
-        m_painter.fillRect(rect, QColor("#EAF1FF"));
-        m_painter.setPen(QPen(QColor("#C7D2FE"), 1));
-        m_painter.drawRect(rect);
-        drawCellText(QRectF(rect.left() + 8, rect.top() + 5, 36, 20), QStringLiteral("序号"), font(8.2, QFont::DemiBold), QColor("#1E3A8A"), 1);
-        drawCellText(QRectF(rect.left() + 52, rect.top() + 5, 118, 20), QStringLiteral("缩略图"), font(8.2, QFont::DemiBold), QColor("#1E3A8A"), 1);
-        drawCellText(QRectF(rect.left() + 184, rect.top() + 5, 340, 20), QStringLiteral("基础信息"), font(8.2, QFont::DemiBold), QColor("#1E3A8A"), 1);
-        drawCellText(QRectF(rect.left() + 540, rect.top() + 5, rect.width() - 552, 20), QStringLiteral("技术元数据"), font(8.2, QFont::DemiBold), QColor("#1E3A8A"), 1);
-        m_y += 30;
+        ensureSpace(190);
+        const QRectF rect(m_pageRect.left(), m_y, m_pageRect.width(), 34);
+        m_painter.fillRect(rect, QColor("#EAF0FF"));
+        const QStringList labels = {QStringLiteral("序号"), QStringLiteral("预览"),
+            QStringLiteral("文件信息"), QStringLiteral("画面参数"), QStringLiteral("时长与音频")};
+        for (int column = 0; column < labels.size(); ++column) {
+            drawCellText(videoColumn(rect, column).adjusted(0, 5, 0, -5), labels.at(column),
+                         font(8.2, QFont::DemiBold), QColor("#1E3A8A"), 1);
+        }
+        m_y += rect.height();
     }
 
     void drawRowText(const QRectF &rect,
