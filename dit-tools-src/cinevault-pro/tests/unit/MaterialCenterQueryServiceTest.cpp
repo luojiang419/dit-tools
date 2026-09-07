@@ -471,6 +471,52 @@ class MaterialCenterQueryServiceTest : public QObject {
     Q_OBJECT
 
 private slots:
+    void browseUsesModifiedTimeBeforeLimitAndPreservesFilters()
+    {
+        GlobalDbFixture fixture;
+        QVERIFY2(fixture.valid, qPrintable(fixture.errorMessage));
+        auto db = fixture.manager.database();
+        QVERIFY(execSql(db, QStringLiteral("UPDATE global_video_asset SET modified_at = '2020-01-01T00:00:00'")));
+        QVERIFY(execSql(db, QStringLiteral("UPDATE global_video_asset SET modified_at = '2026-09-07T12:00:00', "
+                                          "asset_id = 10 WHERE video_key = 'video-1'")));
+        QVERIFY(execSql(db, QStringLiteral("UPDATE global_video_asset SET modified_at = '2026-09-07T12:00:00', "
+                                          "asset_id = 20 WHERE video_key = 'image-1'")));
+        SearchEngine searchEngine(&fixture.manager);
+        MaterialCenterQueryService service(&fixture.manager, &searchEngine);
+        MaterialSearchScope scope;
+        scope.projectUuid = QStringLiteral("project-alpha");
+        scope.sourceRootName = QStringLiteral("Camera A");
+        scope.limit = 2;
+        auto result = service.searchMaterials(QString(), scope);
+        QCOMPARE(result.assets.size(), 2);
+        QCOMPARE(result.assets[0].videoKey, QStringLiteral("image-1"));
+        QCOMPARE(result.assets[1].videoKey, QStringLiteral("video-1"));
+        QVERIFY(result.assets[0].searchReasons.isEmpty());
+        QVERIFY(result.folders.isEmpty());
+        scope.limit = 2000;
+        scope.modifiedTimeAscending = true;
+        result = service.searchMaterials(QStringLiteral("  "), scope);
+        QCOMPARE(result.assets.size(), 9);
+        QCOMPARE(result.assets[7].videoKey, QStringLiteral("video-1"));
+        QCOMPARE(result.assets[8].videoKey, QStringLiteral("image-1"));
+        for (qsizetype i = 1; i < result.assets.size(); ++i) {
+            const auto &left = result.assets[i - 1];
+            const auto &right = result.assets[i];
+            QVERIFY(left.modifiedAt < right.modifiedAt
+                    || (left.modifiedAt == right.modifiedAt && left.assetId <= right.assetId));
+        }
+        scope.resultQuickFilter = SearchResultQuickFilter::Video;
+        QCOMPARE(keysFor(service.searchMaterials({}, scope).assets), QStringList{QStringLiteral("video-1")});
+        scope.assetTypeFilter = static_cast<int>(AssetType::Image);
+        QVERIFY(service.searchMaterials({}, scope).assets.isEmpty());
+        scope.assetTypeFilter = -1;
+        scope.projectUuid = QStringLiteral("missing-project");
+        QVERIFY(service.searchMaterials({}, scope).assets.isEmpty());
+        scope.projectUuid.clear();
+        scope.resultQuickFilter = SearchResultQuickFilter::Frames;
+        QCOMPARE(service.searchMaterials({}, scope).parsedQuery.resultTarget, SearchResultTarget::Frames);
+    }
+
     void fetchAssets_returnsAllAssetTypes()
     {
         GlobalDbFixture fixture;

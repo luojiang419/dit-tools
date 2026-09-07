@@ -152,7 +152,7 @@ Rectangle {
                 }
                 Text {
                     Layout.fillWidth: true
-                    text: viewModel.statusText
+                    text: "当前项目 · 文件浏览与技术检查 · " + viewModel.statusText
                     color: Theme.muted
                     font.pixelSize: 13
                     elide: Text.ElideRight

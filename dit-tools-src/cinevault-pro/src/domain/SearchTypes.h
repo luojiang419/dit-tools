@@ -266,6 +266,7 @@ struct MaterialSearchScope {
     int assetTypeFilter = -1;
     SearchResultQuickFilter resultQuickFilter = SearchResultQuickFilter::Smart;
     qsizetype limit = 2000;
+    bool modifiedTimeAscending = false;
 };
 
 struct HybridSearchHit {

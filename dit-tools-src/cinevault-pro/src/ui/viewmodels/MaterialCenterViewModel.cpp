@@ -515,11 +515,38 @@ QString MaterialCenterViewModel::statusText() const
             ++readyCount;
         }
     }
-    return QStringLiteral("当前结果 %1 个文件夹 · %2 条素材 · %3 个视觉帧 · 已解析 %4 条")
-        .arg(m_folders.size())
-        .arg(m_assets.size())
-        .arg(m_frames.size())
-        .arg(readyCount);
+    const auto scope = m_projectFilter.isEmpty() ? QStringLiteral("全部项目") : QStringLiteral("已选项目");
+    return QStringLiteral("%1 · 内容检索与解析 · 已解析 %2 条%3")
+        .arg(scope).arg(readyCount)
+        .arg(m_assets.size() >= 2000 ? QStringLiteral(" · 当前展示前2000条，可筛选缩小范围") : QString());
+}
+
+bool MaterialCenterViewModel::modifiedTimeAscending() const
+{
+    return m_modifiedTimeAscending;
+}
+
+QString MaterialCenterViewModel::sortOrderText() const
+{
+    return m_modifiedTimeAscending ? QStringLiteral("修改时间正序") : QStringLiteral("修改时间倒序");
+}
+
+void MaterialCenterViewModel::toggleModifiedTimeOrder()
+{
+    setModifiedTimeAscending(!m_modifiedTimeAscending);
+}
+
+void MaterialCenterViewModel::setModifiedTimeAscending(bool ascending)
+{
+    if (m_modifiedTimeAscending == ascending) {
+        return;
+    }
+    m_modifiedTimeAscending = ascending;
+    emit filtersChanged();
+    emit browseOrderChanged(ascending);
+    if (!hasActiveSearch() && !frameSearchMode()) {
+        reload();
+    }
 }
 
 QString MaterialCenterViewModel::message() const
@@ -1095,6 +1122,7 @@ void MaterialCenterViewModel::executeSearch(const ModelSearchUnderstanding *mode
     scope.confirmationStatusFilter = -1;
     scope.assetTypeFilter = m_assetTypeFilter;
     scope.resultQuickFilter = static_cast<SearchResultQuickFilter>(m_searchResultFilter);
+    scope.modifiedTimeAscending = m_modifiedTimeAscending;
     const auto logicalGeneration = m_searchGeneration;
     const auto requestGeneration = ++m_searchRequestGeneration;
     const auto backendGeneration = m_queryBackendGeneration;

@@ -75,6 +75,7 @@ public:
     Q_INVOKABLE void setSourceFilter(qint64 sourceRootId);
     Q_INVOKABLE void setAssetTypeFilter(int assetType);
     Q_INVOKABLE void toggleModifiedTimeOrder();
+    void setModifiedTimeAscending(bool ascending);
     Q_INVOKABLE void selectAsset(qint64 assetId);
     Q_INVOKABLE void selectAssetAt(int index);
     Q_INVOKABLE void moveAssetSelection(int delta);
@@ -86,6 +87,7 @@ public:
 signals:
     void viewModeChanged();
     void filtersChanged();
+    void browseOrderChanged(bool ascending);
     void statusChanged();
     void selectionChanged();
     void paginationChanged();

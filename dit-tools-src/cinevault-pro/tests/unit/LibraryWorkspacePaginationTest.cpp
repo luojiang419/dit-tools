@@ -119,7 +119,11 @@ void LibraryWorkspacePaginationTest::firstPageAndKeysetLoadMoreStayBounded()
         QVERIFY2(ids.at(index - 1) > ids.at(index), "相同 modified_at 必须以 id 倒序稳定分页");
     }
 
-    viewModel.toggleModifiedTimeOrder();
+    QSignalSpy orderSpy(&viewModel, &LibraryWorkspaceViewModel::browseOrderChanged);
+    viewModel.setModifiedTimeAscending(true);
+    viewModel.setModifiedTimeAscending(true);
+    QCOMPARE(orderSpy.count(), 1);
+    QCOMPARE(orderSpy.first().first().toBool(), true);
     QTRY_VERIFY_WITH_TIMEOUT(!viewModel.loading() && viewModel.loadedAssetCount() == 200, 5000);
     const auto ascendingIds = modelIds(viewModel.model());
     for (qsizetype index = 1; index < ascendingIds.size(); ++index) {

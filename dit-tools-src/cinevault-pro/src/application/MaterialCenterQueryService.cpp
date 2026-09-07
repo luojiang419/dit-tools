@@ -445,7 +445,9 @@ QVector<GlobalVideoAsset> MaterialCenterQueryService::fetchAssets(const QString 
                                                                   const QString &sourceName,
                                                                   int analysisStatusFilter,
                                                                   int confirmationStatusFilter,
-                                                                  int assetTypeFilter) const
+                                                                  int assetTypeFilter,
+                                                                  bool modifiedTimeAscending,
+                                                                  qsizetype limit) const
 {
     QVector<GlobalVideoAsset> assets;
     if (!m_globalDatabaseManager || !m_globalDatabaseManager->isOpen()) {
@@ -541,11 +543,11 @@ QVector<GlobalVideoAsset> MaterialCenterQueryService::fetchAssets(const QString 
             binds.append(likePattern);
         }
     }
-    sql += QStringLiteral(
-        " ORDER BY g.file_name COLLATE NOCASE ASC, "
-        "g.project_name COLLATE NOCASE ASC, "
-        "g.relative_path COLLATE NOCASE ASC, "
-        "g.video_key ASC LIMIT 2000");
+    // Match the project library, including ties; apply ordering before LIMIT.
+    sql += modifiedTimeAscending
+        ? QStringLiteral(" ORDER BY g.modified_at ASC, g.asset_id ASC, g.video_key ASC LIMIT ?")
+        : QStringLiteral(" ORDER BY g.modified_at DESC, g.asset_id DESC, g.video_key DESC LIMIT ?");
+    binds.append(static_cast<qint64>(std::clamp<qsizetype>(limit, 1, 2000)));
 
     QSqlQuery query(m_globalDatabaseManager->database());
     query.prepare(sql);
@@ -571,6 +573,26 @@ MaterialSearchResult MaterialCenterQueryService::searchMaterials(
     MaterialSearchResult result;
     if (!m_globalDatabaseManager || !m_globalDatabaseManager->isOpen()) {
         result.warningMessage = QStringLiteral("全局素材数据库尚未打开");
+        result.reliability = SearchReliabilityEvaluator::evaluate(result);
+        return result;
+    }
+    // Browsing is a catalog query, not a zero-score relevance search.
+    if (naturalLanguageQuery.trimmed().isEmpty()
+        && scope.resultQuickFilter != SearchResultQuickFilter::Frames) {
+        int quickType = -1;
+        switch (scope.resultQuickFilter) {
+        case SearchResultQuickFilter::Video: quickType = static_cast<int>(AssetType::Video); break;
+        case SearchResultQuickFilter::Image: quickType = static_cast<int>(AssetType::Image); break;
+        case SearchResultQuickFilter::Document: quickType = static_cast<int>(AssetType::Document); break;
+        default: break;
+        }
+        result.parsedQuery.resultTarget = SearchResultTarget::Assets;
+        if (quickType < 0 || scope.assetTypeFilter < 0 || quickType == scope.assetTypeFilter) {
+            result.assets = fetchAssets({}, scope.projectUuid, scope.sourceRootName,
+                                        scope.analysisStatusFilter, scope.confirmationStatusFilter,
+                                        quickType >= 0 ? quickType : scope.assetTypeFilter,
+                                        scope.modifiedTimeAscending, scope.limit);
+        }
         result.reliability = SearchReliabilityEvaluator::evaluate(result);
         return result;
     }

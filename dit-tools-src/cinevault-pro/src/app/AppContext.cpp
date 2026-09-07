@@ -204,6 +204,10 @@ AppContext::AppContext(QObject *parent)
     m_metadataExtractionService->setWorkCoordinator(m_indexingWorkCoordinator);
     m_materialCatalogSyncService->setWorkCoordinator(m_indexingWorkCoordinator);
     m_searchDocumentSyncService->setWorkCoordinator(m_indexingWorkCoordinator);
+    connect(m_libraryWorkspaceViewModel, &LibraryWorkspaceViewModel::browseOrderChanged,
+            m_materialCenterViewModel, &MaterialCenterViewModel::setModifiedTimeAscending);
+    connect(m_materialCenterViewModel, &MaterialCenterViewModel::browseOrderChanged,
+            m_libraryWorkspaceViewModel, &LibraryWorkspaceViewModel::setModifiedTimeAscending);
     connect(m_projectService,
             &ProjectService::projectAboutToChange,
             this,

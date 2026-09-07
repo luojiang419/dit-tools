@@ -312,8 +312,17 @@ void LibraryWorkspaceViewModel::setAssetTypeFilter(int assetType)
 
 void LibraryWorkspaceViewModel::toggleModifiedTimeOrder()
 {
-    m_modifiedTimeAscending = !m_modifiedTimeAscending;
+    setModifiedTimeAscending(!m_modifiedTimeAscending);
+}
+
+void LibraryWorkspaceViewModel::setModifiedTimeAscending(bool ascending)
+{
+    if (m_modifiedTimeAscending == ascending) {
+        return;
+    }
+    m_modifiedTimeAscending = ascending;
     emit filtersChanged();
+    emit browseOrderChanged(ascending);
     beginResetQuery();
 }
 

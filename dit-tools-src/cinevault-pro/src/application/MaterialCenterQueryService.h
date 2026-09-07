@@ -28,7 +28,9 @@ public:
                                           const QString &sourceName,
                                           int analysisStatusFilter,
                                           int confirmationStatusFilter,
-                                          int assetTypeFilter = -1) const;
+                                          int assetTypeFilter = -1,
+                                          bool modifiedTimeAscending = false,
+                                          qsizetype limit = 2000) const;
     MaterialSearchResult searchMaterials(const QString &naturalLanguageQuery,
                                          const MaterialSearchScope &scope = {},
                                          const QDate &referenceDate = QDate::currentDate(),

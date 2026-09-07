@@ -355,7 +355,8 @@ Rectangle {
                         spacing: 8
 
                         Text {
-                            text: "搜索命中"
+                            objectName: "materialResultHeading"
+                            text: viewModel && viewModel.hasActiveSearch ? "搜索命中" : "素材浏览"
                             color: Theme.text
                             font.pixelSize: 16
                             font.weight: Font.DemiBold
@@ -363,7 +364,10 @@ Rectangle {
 
                         Text {
                             text: viewModel
-                                ? "· " + (viewModel.folderCount + viewModel.assetCount + viewModel.frameCount)
+                                ? (viewModel.frameSearchMode
+                                   ? "· " + viewModel.frameCount + " 帧"
+                                   : "· " + viewModel.assetCount + " 条素材"
+                                     + (viewModel.folderCount > 0 ? " · " + viewModel.folderCount + " 个文件夹" : ""))
                                 : ""
                             color: Theme.muted
                             font.pixelSize: 12
@@ -421,32 +425,6 @@ Rectangle {
                         Layout.fillWidth: true
                         Layout.preferredHeight: 1
                         color: Theme.line
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        visible: viewModel && viewModel.frameSearchMode
-
-                        Text {
-                            text: "视觉帧命中"
-                            color: Theme.text
-                            font.pixelSize: 16
-                            font.weight: Font.DemiBold
-                        }
-
-                        Text {
-                            text: viewModel ? "· " + viewModel.frameCount : ""
-                            color: Theme.muted
-                            font.pixelSize: 12
-                        }
-
-                        Item { Layout.fillWidth: true }
-
-                        Text {
-                            text: "结果显示在中央操作区 · 按相关度排序"
-                            color: Theme.blue
-                            font.pixelSize: 11
-                        }
                     }
 
                     GridView {
@@ -731,16 +709,10 @@ Rectangle {
                         visible: viewModel && viewModel.folderCount > 0
 
                         Text {
-                            text: "文件夹命中"
+                            text: "文件夹"
                             color: Theme.text
                             font.pixelSize: 14
                             font.weight: Font.DemiBold
-                        }
-
-                        Text {
-                            text: viewModel ? "· " + viewModel.folderCount : ""
-                            color: Theme.muted
-                            font.pixelSize: 12
                         }
 
                         Item { Layout.fillWidth: true }
@@ -915,19 +887,31 @@ Rectangle {
                         visible: !viewModel || !viewModel.frameSearchMode
 
                         Text {
-                            text: "素材命中"
+                            visible: viewModel && viewModel.folderCount > 0
+                            text: "素材"
                             color: Theme.text
                             font.pixelSize: 14
                             font.weight: Font.DemiBold
                         }
 
                         Text {
-                            text: viewModel ? "· " + viewModel.assetCount : ""
+                            visible: !viewModel || !viewModel.hasActiveSearch
+                            text: "普通浏览与素材库使用相同排序"
                             color: Theme.muted
                             font.pixelSize: 12
                         }
 
                         Item { Layout.fillWidth: true }
+
+                        ActionButton {
+                            objectName: "materialBrowseOrder"
+                            visible: root.viewModel && !root.viewModel.hasActiveSearch
+                            Layout.preferredWidth: 124
+                            Layout.preferredHeight: 30
+                            text: root.viewModel ? root.viewModel.sortOrderText : "修改时间倒序"
+                            primary: root.viewModel && root.viewModel.modifiedTimeAscending
+                            onClicked: if (root.viewModel) root.viewModel.toggleModifiedTimeOrder()
+                        }
 
                         Text {
                             visible: viewModel && viewModel.hasActiveSearch

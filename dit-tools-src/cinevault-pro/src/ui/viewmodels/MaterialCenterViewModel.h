@@ -59,6 +59,8 @@ class MaterialCenterViewModel : public QObject {
     Q_PROPERTY(int assetTypeFilter READ assetTypeFilter NOTIFY filtersChanged)
     Q_PROPERTY(int searchResultFilter READ searchResultFilter NOTIFY filtersChanged)
     Q_PROPERTY(int analysisStatusFilter READ analysisStatusFilter NOTIFY filtersChanged)
+    Q_PROPERTY(bool modifiedTimeAscending READ modifiedTimeAscending NOTIFY filtersChanged)
+    Q_PROPERTY(QString sortOrderText READ sortOrderText NOTIFY filtersChanged)
     Q_PROPERTY(QVariantList analysisStatusOptions READ analysisStatusOptions CONSTANT)
     Q_PROPERTY(QString selectedVideoKey READ selectedVideoKey NOTIFY selectionChanged)
     Q_PROPERTY(QString selectedAssetKey READ selectedAssetKey NOTIFY selectionChanged)
@@ -124,6 +126,10 @@ public:
     MaterialCenterFolderListModel *folderModel() const;
     MaterialCenterFrameListModel *frameModel() const;
     QString statusText() const;
+    bool modifiedTimeAscending() const;
+    QString sortOrderText() const;
+    void setModifiedTimeAscending(bool ascending);
+    Q_INVOKABLE void toggleModifiedTimeOrder();
     QString message() const;
     int folderCount() const;
     int assetCount() const;
@@ -239,6 +245,7 @@ public:
 signals:
     void statusChanged();
     void filtersChanged();
+    void browseOrderChanged(bool ascending);
     void searchStateChanged();
     void selectionChanged();
     void selectedFramePageLoaded(bool replaceCurrent, bool fromEnd);
@@ -309,6 +316,7 @@ private:
     int m_assetTypeFilter = -1;
     int m_searchResultFilter = static_cast<int>(SearchResultQuickFilter::Smart);
     int m_analysisStatusFilter = -1;
+    bool m_modifiedTimeAscending = false;
     QVariantList m_projectOptions;
     QVariantList m_sourceOptions;
     QVariantList m_assetTypeOptions;
