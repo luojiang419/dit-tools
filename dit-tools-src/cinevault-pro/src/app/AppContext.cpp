@@ -381,9 +381,6 @@ AppContext::~AppContext()
     if (m_videoAnalysisService) {
         m_videoAnalysisService->waitForIdle();
     }
-    if (m_jobEngine) {
-        m_jobEngine->waitForPersistence();
-    }
     if (m_searchDocumentSyncService) {
         m_searchDocumentSyncService->waitForIdle();
     }
@@ -398,6 +395,9 @@ AppContext::~AppContext()
     }
     if (m_scanEngine) {
         m_scanEngine->waitForIdle();
+    }
+    if (m_jobEngine) {
+        m_jobEngine->waitForPersistence(true);
     }
     PerformanceTelemetry::global().logSnapshot(QStringLiteral("app_shutdown"));
     QFile::remove(recoveryMarker);

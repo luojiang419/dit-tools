@@ -2,6 +2,7 @@
 
 #include "domain/Entities.h"
 #include "domain/SearchTypes.h"
+#include "shared/LatestRequestQueue.h"
 
 #include <QHash>
 #include <QDate>
@@ -351,6 +352,9 @@ private:
     bool m_selectedFramesLoading = false;
     QString m_currentAnalysisVideoKey;
     int m_queuedAnalysisCount = 0;
+    LatestRequestQueue m_searchRequests;
+    LatestRequestQueue m_detailRequests;
+    LatestRequestQueue m_contactSheetRequests;
     QThreadPool m_queryPool;
     QThreadPool m_detailPool;
 };

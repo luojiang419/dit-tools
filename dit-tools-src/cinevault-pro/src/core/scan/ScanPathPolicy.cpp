@@ -89,6 +89,19 @@ bool ScanPathPolicy::isExcludedPath(const QString &sourceRootPath,
                                     const QString &candidatePath,
                                     const QString &projectDatabasePath)
 {
+    QStorageInfo sourceStorage(sourceRootPath);
+    sourceStorage.refresh();
+    const auto wholeVolumeSource = sourceStorage.isValid()
+        && isSamePath(sourceRootPath, sourceStorage.rootPath());
+
+    return isExcludedPath(sourceRootPath, candidatePath, projectDatabasePath, wholeVolumeSource);
+}
+
+bool ScanPathPolicy::isExcludedPath(const QString &sourceRootPath,
+                                    const QString &candidatePath,
+                                    const QString &projectDatabasePath,
+                                    bool wholeVolumeSource)
+{
     if (!isPathInside(candidatePath, sourceRootPath)) {
         return true;
     }
@@ -97,10 +110,6 @@ bool ScanPathPolicy::isExcludedPath(const QString &sourceRootPath,
         return true;
     }
 
-    QStorageInfo sourceStorage(sourceRootPath);
-    sourceStorage.refresh();
-    const auto wholeVolumeSource = sourceStorage.isValid()
-        && isSamePath(sourceRootPath, sourceStorage.rootPath());
 
     static const QSet<QString> excludedDirectoryNames{
         QStringLiteral("$recycle.bin"),

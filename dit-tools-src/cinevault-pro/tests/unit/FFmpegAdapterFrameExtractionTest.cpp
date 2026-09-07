@@ -4,6 +4,9 @@
 #include <QElapsedTimer>
 #include <QFileInfo>
 #include <QImage>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QProcess>
 #include <QStandardPaths>
 #include <QTemporaryDir>
@@ -170,6 +173,73 @@ private slots:
         QCOMPARE(result.sourceFrameCount, 1);
         QCOMPARE(result.frames.size(), 1);
         QCOMPARE(result.frames.first().timestampMs, qint64{0});
+    }
+
+    void variableRateAndNonzeroStartKeepSourceTimestamps_data()
+    {
+        QTest::addColumn<int>("strategy");
+        QTest::newRow("per-frame") << static_cast<int>(VideoFrameExtractionStrategy::PerFrame);
+        QTest::newRow("interval") << static_cast<int>(VideoFrameExtractionStrategy::IntervalOnly);
+        QTest::newRow("scene") << static_cast<int>(VideoFrameExtractionStrategy::SceneAndInterval);
+    }
+
+    void variableRateAndNonzeroStartKeepSourceTimestamps()
+    {
+        QFETCH(int, strategy);
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        const auto sourcePath = QDir(temp.path()).filePath(QStringLiteral("vfr-offset.mkv"));
+        QString error;
+        QVERIFY2(runProcess(m_ffmpegPath,
+            {QStringLiteral("-y"), QStringLiteral("-v"), QStringLiteral("error"),
+             QStringLiteral("-copyts"), QStringLiteral("-f"), QStringLiteral("lavfi"),
+             QStringLiteral("-i"), QStringLiteral("testsrc=size=128x64:rate=10"),
+             QStringLiteral("-vf"), QStringLiteral("setpts=5/TB+if(lt(N\\,5)\\,N\\,5+(N-5)*3)/(10*TB)"),
+             QStringLiteral("-frames:v"), QStringLiteral("10"),
+             QStringLiteral("-fps_mode"), QStringLiteral("passthrough"),
+             QStringLiteral("-c:v"), QStringLiteral("ffv1"), sourcePath}, &error), qPrintable(error));
+        FFmpegAdapter adapter;
+        FrameExtractionRequest request;
+        request.sourcePath = sourcePath;
+        request.outputDirectory = QDir(temp.path()).filePath(QStringLiteral("frames"));
+        request.strategy = static_cast<VideoFrameExtractionStrategy>(strategy);
+        request.intervalSeconds = 2.0;
+        request.maxWidth = 64;
+        request.maxHeight = 64;
+        const auto result = adapter.extractFrames(request);
+        QVERIFY2(result.success, qPrintable(result.errorMessage));
+        QCOMPARE(result.sourceFrameCount, 10);
+        QCOMPARE(result.frames.first().timestampMs, qint64{5000});
+        QCOMPARE(result.frames.last().timestampMs, qint64{6700});
+        if (request.strategy == VideoFrameExtractionStrategy::PerFrame) QCOMPARE(result.frames.size(), 10);
+        const QSet<qint64> sourceTimes{5000, 5100, 5200, 5300, 5400, 5500, 5800, 6100, 6400, 6700};
+        for (const auto &frame : result.frames) QVERIFY(sourceTimes.contains(frame.timestampMs));
+    }
+
+    void twoHourVideoHasBoundedCoverageManifest()
+    {
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        const auto source = createVideo(temp, QStringLiteral("two-hours.mkv"),
+                                         QStringLiteral("color=c=gray:size=64x32:rate=1"), 7201);
+        FrameExtractionRequest request;
+        request.sourcePath = source;
+        request.outputDirectory = QDir(temp.path()).filePath(QStringLiteral("frames"));
+        request.strategy = VideoFrameExtractionStrategy::IntervalOnly;
+        request.intervalSeconds = 240;
+        request.maxWidth = 64;
+        request.maxHeight = 64;
+        FFmpegAdapter adapter;
+        const auto result = adapter.extractFrames(request);
+        QVERIFY2(result.success, qPrintable(result.errorMessage));
+        QCOMPARE(result.frames.size(), 31);
+        QCOMPARE(result.frames.last().timestampMs, qint64{7200000});
+        QFile manifest(QDir(request.outputDirectory).filePath(QStringLiteral("coverage.json")));
+        QVERIFY(manifest.open(QIODevice::ReadOnly));
+        const auto json = QJsonDocument::fromJson(manifest.readAll()).object();
+        QCOMPARE(json.value(QStringLiteral("source_frame_count")).toInt(), 7201);
+        QCOMPARE(json.value(QStringLiteral("candidates")).toArray().size(), 31);
+        QCOMPARE(json.value(QStringLiteral("last_source_pts_ms")).toInteger(), qint64{7200000});
     }
 
     void cancellationStopsExternalProcessPromptly()

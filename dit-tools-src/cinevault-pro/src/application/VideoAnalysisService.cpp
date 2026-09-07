@@ -1,4 +1,6 @@
 #include "application/VideoAnalysisService.h"
+#include "application/AnalysisRunStore.h"
+#include "shared/FrameRequestSchedule.h"
 
 #include "application/DocumentPreviewService.h"
 #include "core/thumbnail/ContactSheetBuilder.h"
@@ -1711,7 +1713,10 @@ bool VideoAnalysisService::enqueueVideo(const QString &videoKey, QString *errorM
 
     AnalysisJob job;
     job.videoKey = normalizedKey;
-    if (asset.analysisStatus == VideoAnalysisStatus::Ready) {
+    const AnalysisRunStore pendingRun(Paths::projectFrameCacheDirectory(asset.projectDatabasePath, normalizedKey));
+    if (asset.assetType == AssetType::Video && pendingRun.hasPendingRun()) {
+        job.mode = AnalysisRunMode::Resume;
+    } else if (asset.analysisStatus == VideoAnalysisStatus::Ready) {
         QString completenessError;
         const auto hasVisualGap = (asset.assetType == AssetType::Video || asset.assetType == AssetType::Image)
             && hasIncompleteVisualFrames(
@@ -1801,7 +1806,10 @@ int VideoAnalysisService::enqueueVideosForSupplement(const QStringList &videoKey
 
         AnalysisJob job;
         job.videoKey = normalizedKey;
-        if (asset.analysisStatus == VideoAnalysisStatus::Ready) {
+        const AnalysisRunStore pendingRun(Paths::projectFrameCacheDirectory(asset.projectDatabasePath, normalizedKey));
+        if (asset.assetType == AssetType::Video && pendingRun.hasPendingRun()) {
+            job.mode = AnalysisRunMode::Resume;
+        } else if (asset.analysisStatus == VideoAnalysisStatus::Ready) {
             const bool supportsStructuredFacts = asset.assetType == AssetType::Video
                 || asset.assetType == AssetType::Image;
             if (!supportsStructuredFacts) {
@@ -2497,7 +2505,7 @@ void VideoAnalysisService::startNextAnalysis()
 
     m_analysisStopSource = std::stop_source{};
     const auto stopToken = m_analysisStopSource.get_token();
-    auto future = QtConcurrent::run([this, job, config, jobProjectDatabasePath, jobId, stopToken]() {
+    auto analysisWork = [this, job, config, jobProjectDatabasePath, jobId, stopToken]() {
         const auto connectionName = QStringLiteral("video_analysis_%1").arg(reinterpret_cast<quintptr>(QThread::currentThreadId()));
         QString errorMessage;
         qint64 lastProgress = 0;
@@ -2509,6 +2517,7 @@ void VideoAnalysisService::startNextAnalysis()
         ConfirmationStatus previousConfirmationStatus = ConfirmationStatus::Pending;
         QString previousAnalysisError;
         VisualAnalysisPlan stagedPlan;
+        std::unique_ptr<AnalysisRunStore> runStore;
         const auto connectionGuard = qScopeGuard([&]() {
             db.close();
             db = QSqlDatabase();
@@ -2536,9 +2545,8 @@ void VideoAnalysisService::startNextAnalysis()
                                      nullptr);
                 }
             }
-            if (preserveActiveAnalysisOnFailure && !stagingCacheDirectory.isEmpty()) {
-                QDir(stagingCacheDirectory).removeRecursively();
-            }
+            // Keep pending-run.json and per-frame checkpoints for explicit resume.
+            // The active database generation and its images remain untouched.
             failJob(jobProjectDatabasePath, jobId, normalizedMessage);
             reportAnalysisProgress(job.videoKey, lastProgress, normalizedMessage, JobState::Failed, normalizedMessage);
             notifyCatalogChanged(job.videoKey);
@@ -2575,8 +2583,6 @@ void VideoAnalysisService::startNextAnalysis()
             finishFailure(errorMessage, nullptr, false);
             return;
         }
-        if (cancelled()) return;
-
         GlobalVideoAsset asset;
         if (!loadVideoAsset(db, job.videoKey, &asset, &errorMessage)) {
             finishFailure(errorMessage, &db, false);
@@ -2585,6 +2591,8 @@ void VideoAnalysisService::startNextAnalysis()
         previousAnalysisStatus = asset.analysisStatus;
         previousConfirmationStatus = asset.confirmationStatus;
         previousAnalysisError = asset.errorMessage;
+        preserveActiveAnalysisOnFailure = asset.analysisStatus == VideoAnalysisStatus::Ready;
+        if (cancelled()) return;
         updateJobSubject(jobProjectDatabasePath, jobId, analysisSubjectForAsset(asset));
 
         if (!canAnalyzeAsset(asset.assetType, asset.extension)) {
@@ -2830,11 +2838,6 @@ void VideoAnalysisService::startNextAnalysis()
             return persistAnalysisTask(db, task, &errorMessage);
         };
 
-        auto reloadFrames = [&]() {
-            errorMessage.clear();
-            return loadFrameRows(db, job.videoKey, &errorMessage);
-        };
-
         auto buildContactSheet = [&](const QVector<FrameAnalysisRecord> &frames,
                                      int sourceFrameCount = 0) {
             Q_UNUSED(sourceFrameCount)
@@ -2891,6 +2894,7 @@ void VideoAnalysisService::startNextAnalysis()
                 return false;
             }
 
+            if (cancelled()) return false;
             if (!db.transaction()) {
                 finishFailure(db.lastError().text(), &db);
                 return false;
@@ -2936,12 +2940,18 @@ void VideoAnalysisService::startNextAnalysis()
                 finishFailure(errorMessage, &db, false);
                 return false;
             }
+            if (stopToken.stop_requested() || m_shuttingDown.load()) {
+                db.rollback();
+                cancelled();
+                return false;
+            }
             if (!db.commit()) {
                 db.rollback();
                 finishFailure(db.lastError().text(), &db);
                 return false;
             }
             if (stagingFreshRun) {
+                if (runStore) runStore->markPublished();
                 stagingFreshRun = false;
                 preserveActiveAnalysisOnFailure = false;
                 buildContactSheet(frames);
@@ -2967,13 +2977,14 @@ void VideoAnalysisService::startNextAnalysis()
             return;
         }
 
-        QVector<FrameAnalysisRecord> frames = reloadFrames();
+        QVector<FrameAnalysisRecord> frames = loadFrameRows(db, job.videoKey, &errorMessage);
         if (!errorMessage.trimmed().isEmpty()) {
             finishFailure(errorMessage, &db, false);
             return;
         }
 
         const auto cacheDirectory = Paths::projectFrameCacheDirectory(asset.projectDatabasePath, job.videoKey);
+        runStore = std::make_unique<AnalysisRunStore>(cacheDirectory);
 
         if (job.mode == AnalysisRunMode::SingleFrame) {
             auto frameIndex = -1;
@@ -3087,6 +3098,34 @@ void VideoAnalysisService::startNextAnalysis()
                 || plan.samplingPolicy != samplingPolicy(config)
                 || plan.frameInterval != configuredInterval
                 || plan.structuredProfileVersion < cinevault::searchconfig::kStructuredVisionProfileVersion;
+            bool resumedStagedRun = false;
+            if (job.mode == AnalysisRunMode::Resume) {
+                VisualAnalysisPlan expected;
+                expected.videoKey = job.videoKey;
+                expected.samplingPolicy = samplingPolicy(config);
+                expected.assetSizeBytes = asset.sizeBytes;
+                expected.assetModifiedAt = asset.modifiedAt;
+                if (!runStore->load(expected, config.model, &stagedPlan, &frames,
+                                    &resumedStagedRun, &errorMessage)) {
+                    finishFailure(errorMessage, &db);
+                    return;
+                }
+                if (!resumedStagedRun && runStore->hasPendingRun()) {
+                    needsFreshExtraction = true;
+                }
+                if (resumedStagedRun) {
+                    plan = stagedPlan;
+                    stagingFreshRun = true;
+                    preserveActiveAnalysisOnFailure = true;
+                    stagingCacheDirectory = runStore->runDirectory();
+                    needsFreshExtraction = false;
+                    if (!updateAssetState(db, job.videoKey, previousAnalysisStatus,
+                                          previousConfirmationStatus, previousAnalysisError, &errorMessage)) {
+                        finishFailure(errorMessage, &db);
+                        return;
+                    }
+                }
+            }
             if (needsFreshExtraction) {
                 stagingFreshRun = hasPlan
                     || asset.analysisStatus == VideoAnalysisStatus::Ready
@@ -3163,6 +3202,10 @@ void VideoAnalysisService::startNextAnalysis()
                         frame.analysisState = FrameAnalysisState::Pending;
                         frames.append(frame);
                     }
+                    if (!runStore->begin(stagedPlan, frames, config.model, &errorMessage)) {
+                        finishFailure(errorMessage, &db);
+                        return;
+                    }
                 } else {
                     if (!db.transaction()) {
                         finishFailure(db.lastError().text(), &db);
@@ -3182,7 +3225,7 @@ void VideoAnalysisService::startNextAnalysis()
                         finishFailure(db.lastError().text(), &db);
                         return;
                     }
-                    frames = reloadFrames();
+                    frames = loadFrameRows(db, job.videoKey, &errorMessage);
                     if (!errorMessage.trimmed().isEmpty()) {
                         finishFailure(errorMessage, &db, false);
                         return;
@@ -3207,7 +3250,7 @@ void VideoAnalysisService::startNextAnalysis()
                         return;
                     }
                 }
-                buildContactSheet(frames);
+                if (!stagingFreshRun) buildContactSheet(frames);
                 updateRunning(10,
                               QStringLiteral("继续解析视频帧，已完成 %1/%2，跳过 %3 帧")
                                   .arg(task.completedFrames)
@@ -3223,22 +3266,16 @@ void VideoAnalysisService::startNextAnalysis()
                                                       QStringLiteral("跳过 %1 帧").arg(task.skippedFrames)));
             }
 
-            const auto maxFrameRequests = VisionApiClient::maxConcurrentFrameRequests(config.model);
+            const auto maxFrameRequests = qMin(FrameRequestSchedule::MaximumConcurrency, VisionApiClient::maxConcurrentFrameRequests(config.model));
             if (maxFrameRequests > 1) {
                 QThreadPool requestPool;
                 requestPool.setMaxThreadCount(maxFrameRequests);
+                FrameRequestSchedule frameSchedule;
 
                 while (true) {
                     if (cancelled()) return;
-                    QVector<int> frameIndexes;
-                    frameIndexes.reserve(maxFrameRequests);
-                    for (int index = 0; index < frames.size() && frameIndexes.size() < maxFrameRequests; ++index) {
-                        if (!VisualAnalysisMetadata::isFrameAnalysisComplete(
-                                frames.at(index),
-                                cinevault::searchconfig::kStructuredVisionProfileVersion)) {
-                            frameIndexes.append(index);
-                        }
-                    }
+                    const auto frameIndexes = frameSchedule.takeNext(
+                        frames, maxFrameRequests, cinevault::searchconfig::kStructuredVisionProfileVersion);
                     if (frameIndexes.isEmpty()) {
                         break;
                     }
@@ -3295,6 +3332,10 @@ void VideoAnalysisService::startNextAnalysis()
                                     ? FrameAnalysisState::Skipped
                                     : FrameAnalysisState::Failed;
                             }
+                        }
+                        if (stagingFreshRun && !runStore->saveFrame(frame, &errorMessage)) {
+                            finishFailure(errorMessage, &db);
+                            return;
                         }
                         if (!stagingFreshRun
                             && !updateFrameAnalysis(db, job.videoKey, frame, &errorMessage)) {
@@ -3380,6 +3421,10 @@ void VideoAnalysisService::startNextAnalysis()
                     }
                 }
 
+                if (stagingFreshRun && !runStore->saveFrame(frame, &errorMessage)) {
+                    finishFailure(errorMessage, &db);
+                    return;
+                }
                 if (!stagingFreshRun
                     && !updateFrameAnalysis(db, job.videoKey, frame, &errorMessage)) {
                     finishFailure(errorMessage, &db, false);
@@ -3432,6 +3477,11 @@ void VideoAnalysisService::startNextAnalysis()
                         frame,
                         cinevault::searchconfig::kStructuredVisionProfileVersion);
                 });
+            if (stagingFreshRun && remainingStructuredGaps > 0) {
+                finishFailure(QStringLiteral("重建仍有 %1 帧未完成，已保留原解析和新检查点，可继续解析。")
+                                  .arg(remainingStructuredGaps), &db);
+                return;
+            }
             if (remainingStructuredGaps > 0) {
                 successMessage += QStringLiteral("；仍有 %1 帧结构化事实待补齐").arg(remainingStructuredGaps);
             }
@@ -3444,8 +3494,8 @@ void VideoAnalysisService::startNextAnalysis()
         QMetaObject::invokeMethod(this, [this, videoKey = job.videoKey]() {
             finishCurrentAnalysis(videoKey, true);
         }, Qt::QueuedConnection);
-    });
-    m_futures.addFuture(future);
+    };
+    m_futures.addFuture(QtConcurrent::run(std::move(analysisWork)));
 }
 
 void VideoAnalysisService::finishCurrentAnalysis(const QString &videoKey, bool succeeded)

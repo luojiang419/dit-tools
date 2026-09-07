@@ -1,4 +1,5 @@
 #include "core/jobs/JobEngine.h"
+#include "application/IndexingWorkCoordinator.h"
 #include "core/scan/ScanEngine.h"
 #include "infrastructure/db/DatabaseManager.h"
 #include "infrastructure/monitoring/PerformanceTelemetry.h"
@@ -65,18 +66,29 @@ private slots:
 
         QTemporaryDir temporaryDirectory;
         QVERIFY(temporaryDirectory.isValid());
-        const auto databasePath = temporaryDirectory.filePath(QStringLiteral("stress.cvdb"));
+        const auto databasePath = environment.value(QStringLiteral("CINEVAULT_STRESS_DATABASE"),
+            temporaryDirectory.filePath(QStringLiteral("stress.cvdb")));
 
         DatabaseManager databaseManager;
         QString errorMessage;
         QVERIFY2(databaseManager.openProjectDatabase(databasePath, &errorMessage), qPrintable(errorMessage));
-        const auto sourceRootId = insertSourceRoot(databaseManager.database(), sourcePath);
+        qint64 sourceRootId = 0;
+        QSqlQuery existingSource(databaseManager.database());
+        existingSource.prepare(QStringLiteral("SELECT id FROM source_root WHERE path = ? LIMIT 1"));
+        existingSource.addBindValue(QFileInfo(sourcePath).absoluteFilePath());
+        QVERIFY(existingSource.exec());
+        if (existingSource.next()) sourceRootId = existingSource.value(0).toLongLong();
+        existingSource.finish();
+        if (sourceRootId <= 0) sourceRootId = insertSourceRoot(databaseManager.database(), sourcePath);
         QVERIFY(sourceRootId > 0);
 
         auto &telemetry = PerformanceTelemetry::global();
         telemetry.resetForTesting();
+        IndexingWorkCoordinator coordinator;
         JobEngine jobEngine(&databaseManager);
+        jobEngine.setWorkCoordinator(&coordinator);
         ScanEngine scanEngine(&databaseManager, &jobEngine, nullptr, nullptr);
+        scanEngine.setWorkCoordinator(&coordinator);
         QSignalSpy finishedSpy(&scanEngine, &ScanEngine::scanFinished);
         QSignalSpy failedSpy(&scanEngine, &ScanEngine::scanFailed);
         const auto jobId = jobEngine.createJob(
@@ -96,6 +108,10 @@ private slots:
         QSqlQuery countQuery(databaseManager.database());
         QVERIFY2(countQuery.exec(QStringLiteral("SELECT COUNT(*) FROM asset_file")) && countQuery.next(),
                  qPrintable(countQuery.lastError().text()));
+
+        const auto expectedCount = environment.value(QStringLiteral("CINEVAULT_STRESS_EXPECTED_COUNT")).toLongLong();
+        if (expectedCount > 0) QCOMPARE(countQuery.value(0).toLongLong(), expectedCount);
+        jobEngine.waitForPersistence();
 
         auto report = telemetry.snapshot();
         report.insert(QStringLiteral("schema_version"), 1);

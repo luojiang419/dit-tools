@@ -1,4 +1,5 @@
 #include "core/jobs/JobEngine.h"
+#include "application/IndexingWorkCoordinator.h"
 #include "infrastructure/db/DatabaseManager.h"
 
 #include <QDir>
@@ -32,6 +33,7 @@ private slots:
     void reloadJobsCapsLoadedHistory();
     void persistenceFailureDoesNotPublishInMemoryJob();
     void progressPersistenceDoesNotBlockUiOnWriterLock();
+    void finalDrainPersistsAfterCoordinatorShutdown();
 };
 
 void JobEngineTest::clearFinishedJobsKeepsOnlyActiveJobs()
@@ -351,6 +353,11 @@ void JobEngineTest::progressPersistenceDoesNotBlockUiOnWriterLock()
     QVERIFY2(elapsed.elapsed() < 100,
              qPrintable(QStringLiteral("UI 更新被数据库锁阻塞 %1ms").arg(elapsed.elapsed())));
 
+    elapsed.restart();
+    const auto blockedId = engine.createJob(JobType::Scan, QStringLiteral("锁下创建"), QStringLiteral("应快速失败"));
+    QCOMPARE(blockedId, qint64{0});
+    QVERIFY2(elapsed.elapsed() < 250, "Foreground job creation waited on the writer lock too long");
+
     lockDatabase.rollback();
     lockQuery = QSqlQuery();
     lockDatabase.close();
@@ -365,6 +372,29 @@ void JobEngineTest::progressPersistenceDoesNotBlockUiOnWriterLock()
     QVERIFY(query.next());
     QCOMPARE(query.value(0).toInt(), 42);
     QCOMPARE(query.value(1).toString(), QStringLiteral("后台写入"));
+}
+
+void JobEngineTest::finalDrainPersistsAfterCoordinatorShutdown()
+{
+    QTemporaryDir temp;
+    QVERIFY(temp.isValid());
+    DatabaseManager manager;
+    QString error;
+    QVERIFY2(manager.openProjectDatabase(QDir(temp.path()).filePath(QStringLiteral("shutdown.cvdb")), &error), qPrintable(error));
+    IndexingWorkCoordinator coordinator;
+    JobEngine engine(&manager);
+    engine.setWorkCoordinator(&coordinator);
+    const auto id = engine.createJob(JobType::Scan, QStringLiteral("关闭排空"), QStringLiteral("准备中"));
+    QVERIFY(id > 0);
+    coordinator.shutdown();
+    engine.completeJob(id, QStringLiteral("生产者已结束"));
+    engine.waitForPersistence(true);
+    QSqlQuery query(manager.database());
+    QVERIFY(query.exec(QStringLiteral("SELECT state, progress, detail FROM job WHERE id = %1").arg(id)));
+    QVERIFY(query.next());
+    QCOMPARE(query.value(0).toInt(), static_cast<int>(JobState::Completed));
+    QCOMPARE(query.value(1).toInt(), 100);
+    QCOMPARE(query.value(2).toString(), QStringLiteral("生产者已结束"));
 }
 
 QTEST_GUILESS_MAIN(JobEngineTest)

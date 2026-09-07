@@ -874,9 +874,7 @@ bool MaterialCenterViewModel::canExpandSelectedFrames() const
 
 bool MaterialCenterViewModel::canLoadMoreSelectedFrames() const
 {
-    return m_selectedFramesHasMore
-        && !m_selectedFramesLoading
-        && m_detail.frames.size() < kMaxLoadedDetailFrames;
+    return m_selectedFramesHasMore && !m_selectedFramesLoading;
 }
 
 bool MaterialCenterViewModel::selectedFramesLoading() const
@@ -1088,11 +1086,13 @@ void MaterialCenterViewModel::executeSearch(const ModelSearchUnderstanding *mode
         ? std::optional<ModelSearchUnderstanding>(*modelUnderstanding)
         : std::nullopt;
 
+    m_searchRequests.submit([=, this]() {
     auto *watcher = new QFutureWatcher<MaterialCenterSearchTaskResult>(this);
     connect(watcher, &QFutureWatcher<MaterialCenterSearchTaskResult>::finished, this,
             [this, watcher]() {
         auto task = watcher->result();
         watcher->deleteLater();
+        m_searchRequests.complete();
         if (task.logicalGeneration != m_searchGeneration
             || task.requestGeneration != m_searchRequestGeneration) {
             return;
@@ -1176,6 +1176,7 @@ void MaterialCenterViewModel::executeSearch(const ModelSearchUnderstanding *mode
                 understanding ? &*understanding : nullptr);
             return task;
         }));
+    });
 }
 
 void MaterialCenterViewModel::applySearchResult(const MaterialSearchResult &result)
@@ -1749,6 +1750,7 @@ bool MaterialCenterViewModel::openQuickSearchResultAtIndex(const QString &videoK
     const auto quickSearchQuery = m_searchText;
     const auto targetProjectUuid = targetAsset.projectUuid.trimmed();
     selectVideo(normalizedKey);
+    m_detail.asset = targetAsset;
     if (!openSelectedProject()) {
         return false;
     }
@@ -1945,13 +1947,6 @@ void MaterialCenterViewModel::toggleSelectedFramesExpanded()
 
 void MaterialCenterViewModel::loadMoreSelectedFrames()
 {
-    if (m_detail.frames.size() >= kMaxLoadedDetailFrames) {
-        m_selectedFrameSearchStatusCache = QStringLiteral(
-            "已加载 %1 帧，达到单次浏览上限；可重新选择素材继续浏览。")
-            .arg(m_detail.frames.size());
-        emit selectionChanged();
-        return;
-    }
     if (!canLoadMoreSelectedFrames()) {
         return;
     }
@@ -2081,11 +2076,13 @@ void MaterialCenterViewModel::loadDetailPage(const QString &videoKey,
     }
     emit selectionChanged();
 
+    m_detailRequests.submit([=, this]() {
     auto *watcher = new QFutureWatcher<MaterialCenterDetailTaskResult>(this);
     connect(watcher, &QFutureWatcher<MaterialCenterDetailTaskResult>::finished, this,
             [this, watcher]() {
         auto task = watcher->result();
         watcher->deleteLater();
+        m_detailRequests.complete();
         if (task.requestGeneration != m_detailRequestGeneration
             || task.videoKey != m_detail.asset.videoKey) {
             return;
@@ -2124,13 +2121,20 @@ void MaterialCenterViewModel::loadDetailPage(const QString &videoKey,
                 existingFrameNumbers.insert(frame.frameNumber);
             }
             for (auto &frame : task.page.detail.frames) {
-                if (m_detail.frames.size() >= kMaxLoadedDetailFrames) {
-                    break;
-                }
+                if (existingFrameNumbers.contains(frame.frameNumber)) continue;
                 const auto frameBytes = estimatedFrameCacheBytes(frame);
-                if (m_selectedFrameCacheBytes + frameBytes > kMaxLoadedDetailBytes) {
+                if (frameBytes > kMaxLoadedDetailBytes) {
                     hitByteLimit = true;
-                    break;
+                    continue;
+                }
+                // Slide the loaded window forward; the keyset cursor still allows
+                // browsing the entire video without retaining every previous page.
+                while (!m_detail.frames.isEmpty()
+                       && (m_detail.frames.size() >= kMaxLoadedDetailFrames
+                           || m_selectedFrameCacheBytes + frameBytes > kMaxLoadedDetailBytes)) {
+                    m_selectedFrameCacheBytes -= estimatedFrameCacheBytes(m_detail.frames.first());
+                    existingFrameNumbers.remove(m_detail.frames.first().frameNumber);
+                    m_detail.frames.removeFirst();
                 }
                 if (!existingFrameNumbers.contains(frame.frameNumber)) {
                     existingFrameNumbers.insert(frame.frameNumber);
@@ -2146,10 +2150,9 @@ void MaterialCenterViewModel::loadDetailPage(const QString &videoKey,
         m_selectedFrameCursor = task.page.nextFrameNumber;
         m_selectedFramesHasMore = task.page.hasMoreFrames;
         if (hitByteLimit) {
-            m_selectedFramesHasMore = false;
             m_selectedFrameCacheByteLimited = true;
             m_selectedFrameSearchStatusCache = QStringLiteral(
-                "已加载 %1 帧，达到详情缓存字节上限；可重新选择素材继续浏览。")
+                "当前显示 %1 帧，过大的帧详情已略过；可继续加载后续帧。")
                 .arg(m_detail.frames.size());
         }
         refreshSelectedCaches();
@@ -2182,6 +2185,7 @@ void MaterialCenterViewModel::loadDetailPage(const QString &videoKey,
                 preferredFrameNumber);
             return task;
         }));
+    });
 }
 
 void MaterialCenterViewModel::refreshSelectedCaches()
@@ -2243,12 +2247,12 @@ void MaterialCenterViewModel::refreshSelectedCaches()
 
     if (m_selectedFrameCacheByteLimited) {
         m_selectedFrameSearchStatusCache = QStringLiteral(
-            "已加载 %1 帧，达到详情缓存字节上限；可重新选择素材继续浏览。")
+            "当前显示 %1 帧，过大的帧详情已略过；可继续加载后续帧。")
             .arg(m_detail.frames.size());
     } else if (terms.isEmpty() && m_detail.frames.size() >= kMaxLoadedDetailFrames
         && m_selectedFramesHasMore) {
         m_selectedFrameSearchStatusCache = QStringLiteral(
-            "已加载 %1 帧，达到单次浏览上限；可重新选择素材继续浏览。")
+            "当前显示最近 %1 帧；继续加载将移出较早的详情。")
             .arg(m_detail.frames.size());
     } else if (terms.isEmpty()) {
         m_selectedFrameSearchStatusCache = m_selectedFramesHasMore
@@ -2342,11 +2346,13 @@ void MaterialCenterViewModel::buildPendingContactSheet()
     }
 
     const auto requestGeneration = m_detailRequestGeneration;
+    m_contactSheetRequests.submit([=, this]() {
     auto *watcher = new QFutureWatcher<ContactSheetTaskResult>(this);
     connect(watcher, &QFutureWatcher<ContactSheetTaskResult>::finished, this,
             [this, watcher]() {
         const auto task = watcher->result();
         watcher->deleteLater();
+        m_contactSheetRequests.complete();
         if (task.requestGeneration != m_detailRequestGeneration
             || task.videoKey != m_detail.asset.videoKey
             || !task.success
@@ -2368,6 +2374,7 @@ void MaterialCenterViewModel::buildPendingContactSheet()
                 frameImagePaths, frameCount, contactSheetPath, &errorMessage);
             return task;
         }));
+    });
 }
 
 void MaterialCenterViewModel::refreshDetail()

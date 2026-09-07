@@ -2,6 +2,8 @@ param(
     [string]$QtRoot = $env:QT_ROOT,
     [string]$FfmpegDevRoot = $env:FFMPEG_DEV_ROOT,
     [string]$Configuration = "Release",
+    [ValidatePattern('^$|^[a-zA-Z0-9_-]+$')]
+    [string]$BuildDirectoryName = "",
     [string]$Version,
     [string]$UpdateSignerSha256 = $env:CINEVAULT_UPDATE_SIGNER_SHA256,
     [string]$SigningCertificateSha1 = $env:CINEVAULT_SIGNING_CERT_SHA1,
@@ -116,7 +118,7 @@ $configurePreset = if ($EnableFfmpeg) {
     if ($isDebug) { "windows-msvc-debug" } else { "windows-msvc-release" }
 }
 $buildPreset = $configurePreset
-$buildDirName = $configurePreset
+$buildDirName = if ([string]::IsNullOrWhiteSpace($BuildDirectoryName)) { $configurePreset } else { $BuildDirectoryName }
 $buildDir = Join-Path $projectRoot "build\$buildDirName"
 
 $env:QT_ROOT = $context.QtRoot
@@ -143,8 +145,8 @@ try {
         $assistantPrepareScript = Join-Path $projectRoot "cmake\PrepareSearchAssistantDependencies.cmake"
         Invoke-VcVarsCommand "cmake -DOUTPUT_ROOT=`"$assistantCacheRoot`" -DINCLUDE_MODEL=OFF -P `"$assistantPrepareScript`""
     }
-    Invoke-VcVarsCommand "cmake --preset $configurePreset -DCINEVAULT_APP_VERSION=$appVersion -DCINEVAULT_UPDATE_SIGNER_SHA256=$normalizedUpdateSignerSha256"
-    Invoke-VcVarsCommand "cmake --build --preset $buildPreset --config $Configuration"
+    Invoke-VcVarsCommand "cmake --preset $configurePreset -B `"$buildDir`" -DCINEVAULT_APP_VERSION=$appVersion -DCINEVAULT_UPDATE_SIGNER_SHA256=$normalizedUpdateSignerSha256"
+    Invoke-VcVarsCommand "cmake --build `"$buildDir`" --config $Configuration"
 } finally {
     Pop-Location
 }

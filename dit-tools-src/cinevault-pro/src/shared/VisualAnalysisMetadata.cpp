@@ -133,7 +133,7 @@ QString VisualAnalysisMetadata::samplingPolicy(VideoFrameExtractionStrategy stra
     const auto sceneValue = strategy == VideoFrameExtractionStrategy::SceneAndInterval
         ? QString::number(qBound(0.05, sceneThreshold, 0.95), 'f', 3)
         : QStringLiteral("na");
-    return QStringLiteral("filmstoryboard_candidate_sampling_v2|strategy=%1|interval=%2|scene=%3|sharpness=%4|max=%5x%6")
+    return QStringLiteral("filmstoryboard_candidate_sampling_v3|strategy=%1|interval=%2|scene=%3|sharpness=%4|max=%5x%6")
         .arg(static_cast<int>(strategy))
         .arg(effectiveInterval, 0, 'f', 3)
         .arg(sceneValue)
@@ -144,7 +144,7 @@ QString VisualAnalysisMetadata::samplingPolicy(VideoFrameExtractionStrategy stra
 
 bool VisualAnalysisMetadata::isCurrentSamplingPolicy(const QString &policy)
 {
-    return policy.startsWith(QStringLiteral("filmstoryboard_candidate_sampling_v2|"));
+    return policy.startsWith(QStringLiteral("filmstoryboard_candidate_sampling_v3|"));
 }
 
 int VisualAnalysisMetadata::fixedFrameInterval(AnalysisMode mode, int configuredInterval)

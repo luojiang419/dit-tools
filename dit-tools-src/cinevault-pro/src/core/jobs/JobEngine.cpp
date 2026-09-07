@@ -25,6 +25,28 @@
 namespace {
 constexpr int kMaxLoadedJobs = 500;
 
+// Creation/deletion have synchronous success contracts. Bound their foreground
+// lock wait; frequent progress and terminal updates use the background writer.
+class ForegroundJobWriteBudget {
+public:
+    explicit ForegroundJobWriteBudget(QSqlDatabase database) : m_database(database)
+    {
+        QSqlQuery query(m_database);
+        if (query.exec(QStringLiteral("PRAGMA busy_timeout")) && query.next()) m_previous = query.value(0).toInt();
+        query.finish();
+        query.exec(QStringLiteral("PRAGMA busy_timeout = 50"));
+    }
+    ~ForegroundJobWriteBudget()
+    {
+        QSqlQuery query(m_database);
+        query.exec(QStringLiteral("PRAGMA busy_timeout = %1").arg(m_previous));
+    }
+private:
+    QSqlDatabase m_database;
+    int m_previous = 5000;
+};
+
+
 bool isFinishedJobState(JobState state)
 {
     return state == JobState::Completed
@@ -516,6 +538,7 @@ bool JobEngine::removeFinishedJob(qint64 jobId)
     }
 
     if (m_databaseManager && m_databaseManager->hasOpenProject()) {
+        ForegroundJobWriteBudget budget(m_databaseManager->database());
         QSqlQuery query(m_databaseManager->database());
         query.prepare(QStringLiteral("DELETE FROM job WHERE id = ?"));
         query.addBindValue(jobId);
@@ -546,11 +569,13 @@ void JobEngine::clearFinishedJobs()
     }
 
     if (m_databaseManager && m_databaseManager->hasOpenProject()) {
+        ForegroundJobWriteBudget budget(m_databaseManager->database());
         QSqlQuery query(m_databaseManager->database());
-        query.prepare(QStringLiteral("DELETE FROM job WHERE state IN (?, ?, ?)"));
-        query.addBindValue(static_cast<int>(JobState::Completed));
-        query.addBindValue(static_cast<int>(JobState::Failed));
-        query.addBindValue(static_cast<int>(JobState::Cancelled));
+        QStringList ids;
+        for (const auto &job : m_jobs) {
+            if (isFinishedJobState(job.state)) ids.append(QString::number(job.id));
+        }
+        query.prepare(QStringLiteral("DELETE FROM job WHERE id IN (%1)").arg(ids.join(QLatin1Char(','))));
         if (!query.exec()) {
             reportPersistenceError(
                 QStringLiteral("清理已结束任务失败：%1").arg(query.lastError().text()));
@@ -583,6 +608,7 @@ void JobEngine::clearFailedJobsForRetry(qint64 sourceRootId,
     }
 
     if (m_databaseManager && m_databaseManager->hasOpenProject()) {
+        ForegroundJobWriteBudget budget(m_databaseManager->database());
         QSqlQuery query(m_databaseManager->database());
         query.prepare(QStringLiteral(
             "DELETE FROM job WHERE state = ? AND source_root_id = ? AND type IN (%1)")
@@ -687,8 +713,14 @@ void JobEngine::startPersistenceBatch(QVector<PendingPersistence> batch,
     watcher->setFuture(m_persistenceFuture);
 }
 
-void JobEngine::waitForPersistence()
+void JobEngine::waitForPersistence(bool producersStopped)
 {
+    if (producersStopped) {
+        // All project producers are joined by AppContext. No resource arbitration
+        // is needed now, and the coordinator has already rejected new leases.
+        m_persistencePool.waitForDone();
+        m_workCoordinator = nullptr;
+    }
     m_persistenceTimer.stop();
     while (true) {
         m_persistencePool.waitForDone();
@@ -776,6 +808,7 @@ bool JobEngine::persistJob(const Job &job)
         return true;
     }
 
+    ForegroundJobWriteBudget budget(m_databaseManager->database());
     QSqlQuery query(m_databaseManager->database());
     if (!query.prepare(QStringLiteral(
             "INSERT OR REPLACE INTO job (id, type, state, title, detail, error_message, progress, source_root_id, "

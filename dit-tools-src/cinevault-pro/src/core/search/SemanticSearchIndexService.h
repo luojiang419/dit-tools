@@ -6,6 +6,8 @@
 #include "domain/SearchTypes.h"
 
 #include <QMutex>
+#include <QLockFile>
+#include <memory>
 #include <QString>
 #include <QStringList>
 #include <QVector>
@@ -43,6 +45,7 @@ public:
     [[nodiscard]] QString indexFilePath() const;
 
 private:
+    bool acquireUpdateLockLocked(QString *errorMessage);
     bool ensureReadyLocked(QString *errorMessage, bool allowRebuild);
     bool rebuildLocked(const QString &reason, QString *errorMessage);
     bool setStateLocked(const QString &status,
@@ -58,6 +61,7 @@ private:
     mutable QMutex m_mutex;
     bool m_ready = false;
     bool m_lastEnsureRebuilt = false;
+    std::unique_ptr<QLockFile> m_updateFileLock;
     bool m_bulkUpdateActive = false;
     bool m_bulkUpdateDirty = false;
 };

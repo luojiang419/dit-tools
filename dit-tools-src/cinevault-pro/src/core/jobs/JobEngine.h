@@ -55,7 +55,7 @@ public:
     void clearFailedJobsForRetry(qint64 sourceRootId, const QVector<JobType> &types);
 
     QVector<Job> jobs() const;
-    void waitForPersistence();
+    void waitForPersistence(bool producersStopped = false);
 
 signals:
     void jobsChanged();

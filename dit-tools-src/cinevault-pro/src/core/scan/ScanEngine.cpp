@@ -32,6 +32,7 @@
 #include <QVector>
 
 #include <algorithm>
+#include <optional>
 #include <chrono>
 #include <filesystem>
 #include <stdexcept>
@@ -911,37 +912,48 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
         QStringLiteral("resumable_scan"),
         {{QStringLiteral("source_root_id"), sourceRoot.id},
          {QStringLiteral("session_id"), sessionId}});
+    const QStorageInfo sourceVolume(sourceRoot.path);
+    const auto wholeVolumeSource = sourceVolume.isValid()
+        && FolderPathMetadata::normalizedPathKey(sourceRoot.path)
+            == FolderPathMetadata::normalizedPathKey(sourceVolume.rootPath());
     QString errorMessage;
     qint64 reportedProgress = 0;
     QElapsedTimer progressTimer;
 
+    std::optional<ScanBatch> stagedTotals;
     auto readBatch = [&]() {
         ScanBatch batch;
         batch.sourceRootId = sourceRoot.id;
 
-        QSqlQuery assets(db);
-        assets.prepare(QStringLiteral(
-            "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0), "
-            "COALESCE(SUM(CASE WHEN is_readable = 0 THEN 1 ELSE 0 END), 0) "
-            "FROM scan_stage_asset WHERE session_id = ?"));
-        assets.addBindValue(sessionId);
-        if (!assets.exec() || !assets.next()) {
-            errorMessage = assets.lastError().text();
-            return batch;
-        }
-        batch.totalFiles = assets.value(0).toLongLong();
-        batch.totalSizeBytes = assets.value(1).toLongLong();
-        batch.warningCount = assets.value(2).toLongLong();
+        if (!stagedTotals) {
+            QSqlQuery assets(db);
+            assets.prepare(QStringLiteral(
+                "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0), "
+                "COALESCE(SUM(CASE WHEN is_readable = 0 THEN 1 ELSE 0 END), 0) "
+                "FROM scan_stage_asset WHERE session_id = ?"));
+            assets.addBindValue(sessionId);
+            if (!assets.exec() || !assets.next()) {
+                errorMessage = assets.lastError().text();
+                return batch;
+            }
+            batch.totalFiles = assets.value(0).toLongLong();
+            batch.totalSizeBytes = assets.value(1).toLongLong();
+            batch.warningCount = assets.value(2).toLongLong();
 
-        QSqlQuery folders(db);
-        folders.prepare(QStringLiteral(
-            "SELECT COUNT(*) FROM scan_stage_folder WHERE session_id = ? AND relative_path <> ''"));
-        folders.addBindValue(sessionId);
-        if (!folders.exec() || !folders.next()) {
-            errorMessage = folders.lastError().text();
-            return batch;
+            QSqlQuery folders(db);
+            folders.prepare(QStringLiteral(
+                "SELECT COUNT(*) FROM scan_stage_folder WHERE session_id = ? AND relative_path <> ''"));
+            folders.addBindValue(sessionId);
+            if (!folders.exec() || !folders.next()) {
+                errorMessage = folders.lastError().text();
+                return batch;
+            }
+            batch.totalFolders = folders.value(0).toLongLong();
+
+            stagedTotals = batch;
+        } else {
+            batch = *stagedTotals;
         }
-        batch.totalFolders = folders.value(0).toLongLong();
 
         QSqlQuery work(db);
         work.prepare(QStringLiteral(
@@ -1186,6 +1198,7 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
                     db.rollback();
                     throw std::runtime_error(message.toStdString());
                 }
+                stagedTotals.reset();
                 publishProgress(false);
                 continue;
             }
@@ -1225,6 +1238,24 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
                 throw std::runtime_error(message.toStdString());
             }
 
+            ScanBatch removedTotals;
+            QSqlQuery directTotals(db);
+            directTotals.prepare(QStringLiteral(
+                "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0), "
+                "COALESCE(SUM(CASE WHEN is_readable = 0 THEN 1 ELSE 0 END), 0) "
+                "FROM scan_stage_asset WHERE session_id = ? AND parent_relative_path = ?"));
+            directTotals.addBindValue(sessionId);
+            directTotals.addBindValue(item.relativePath);
+            if (!directTotals.exec() || !directTotals.next()) {
+                const auto message = directTotals.lastError().text();
+                rollbackWork();
+                throw std::runtime_error(message.toStdString());
+            }
+            removedTotals.totalFiles = directTotals.value(0).toLongLong();
+            removedTotals.totalSizeBytes = directTotals.value(1).toLongLong();
+            removedTotals.warningCount = directTotals.value(2).toLongLong();
+            directTotals.finish();
+
             QSqlQuery clearDirectAssets(db);
             clearDirectAssets.prepare(QStringLiteral(
                 "DELETE FROM scan_stage_asset WHERE session_id = ? AND parent_relative_path = ?"));
@@ -1254,6 +1285,12 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
                 rollbackWork();
                 throw std::runtime_error(message.toStdString());
             }
+            if (stagedTotals) {
+                stagedTotals->totalFiles -= removedTotals.totalFiles;
+                stagedTotals->totalSizeBytes -= removedTotals.totalSizeBytes;
+                stagedTotals->warningCount -= removedTotals.warningCount;
+                stagedTotals->totalFolders -= clearDirectFolders.numRowsAffected();
+            }
             stageResetWriterLease.reset();
 
             struct DirectoryEntry {
@@ -1273,6 +1310,7 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
                     throw std::runtime_error(db.lastError().text().toStdString());
                 }
                 const auto batchNow = QDateTime::currentDateTime().toString(Qt::ISODate);
+                ScanBatch addedTotals;
 
                 QSqlQuery stageFolder(db);
                 stageFolder.prepare(QStringLiteral(
@@ -1299,6 +1337,7 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
                     const auto &relativePath = entry.relativePath;
                     const auto &info = entry.info;
                     if (info.isDir()) {
+                        ++addedTotals.totalFolders;
                         const auto folder = makeFolderNode(
                             sourceRoot, rootFolderName, absolutePath, relativePath);
                         stageFolder.addBindValue(sessionId);
@@ -1336,6 +1375,9 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
                         }
                         enqueueDirectory.finish();
                     } else if (info.isFile()) {
+                        ++addedTotals.totalFiles;
+                        addedTotals.totalSizeBytes += info.size();
+                        addedTotals.warningCount += entry.readable ? 0 : 1;
                         const auto parentRelativePath =
                             FolderPathMetadata::parentRelativePath(relativePath);
                         stageFile.addBindValue(sessionId);
@@ -1398,6 +1440,13 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
                     db.rollback();
                     throw std::runtime_error(message.toStdString());
                 }
+                if (stagedTotals) {
+                    stagedTotals->totalFiles += addedTotals.totalFiles;
+                    stagedTotals->totalSizeBytes += addedTotals.totalSizeBytes;
+                    stagedTotals->warningCount += addedTotals.warningCount;
+                    stagedTotals->totalFolders += addedTotals.totalFolders;
+                }
+                writerLease.reset();
                 telemetry.recordBatch(
                     QStringLiteral("scan"),
                     QStringLiteral("directory_stage_write"),
@@ -1421,7 +1470,8 @@ void ScanEngine::runResumableScan(SourceRoot sourceRoot,
                 entry.info = QFileInfo(entry.absolutePath);
                 if (ScanPathPolicy::isExcludedPath(sourceRoot.path,
                                                    entry.absolutePath,
-                                                   projectDatabasePath)
+                                                   projectDatabasePath,
+                                                   wholeVolumeSource)
                     || ScanPathPolicy::isLinkOrReparsePoint(entry.absolutePath)) {
                     continue;
                 }

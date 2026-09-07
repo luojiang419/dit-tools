@@ -13,6 +13,7 @@
 #include <QMutexLocker>
 #include <QRegularExpression>
 #include <QSet>
+#include <QScopeGuard>
 #include <QSqlDatabase>
 #include <QSqlError>
 #include <QSqlQuery>
@@ -92,9 +93,33 @@ SemanticSearchIndexService::SemanticSearchIndexService(GlobalDatabaseManager *gl
 {
 }
 
+bool SemanticSearchIndexService::acquireUpdateLockLocked(QString *errorMessage)
+{
+    if (m_updateFileLock) return true;
+    if (!ensureIndexDirectoryLocked(errorMessage)) return false;
+    auto lock = std::make_unique<QLockFile>(QFileInfo(m_indexFilePath).absoluteFilePath()
+                                           + QStringLiteral(".writer.lock"));
+    // Live writers can legitimately take longer than the default stale timeout.
+    lock->setStaleLockTime(0);
+    if (!lock->tryLock(0)) {
+        if (errorMessage) *errorMessage = QStringLiteral("语义索引已有写入任务，请稍后重试");
+        return false;
+    }
+    QMutexLocker processLocker(&processSemanticIndexMutex);
+    QMutexLocker locker(&m_mutex);
+    m_updateFileLock = std::move(lock);
+    m_ready = false;
+    m_index = SemanticVectorIndex();
+    return true;
+}
+
 bool SemanticSearchIndexService::ensureReady(QString *errorMessage)
 {
     QMutexLocker updateLocker(&processSemanticUpdateMutex);
+    if (!acquireUpdateLockLocked(errorMessage)) return false;
+    const auto releaseUpdateLock = qScopeGuard([this]() {
+        if (!m_bulkUpdateActive) m_updateFileLock.reset();
+    });
     QMutexLocker processLocker(&processSemanticIndexMutex);
     QMutexLocker locker(&m_mutex);
     m_lastEnsureRebuilt = false;
@@ -104,8 +129,16 @@ bool SemanticSearchIndexService::ensureReady(QString *errorMessage)
 bool SemanticSearchIndexService::rebuild(QString *errorMessage)
 {
     QMutexLocker updateLocker(&processSemanticUpdateMutex);
+    if (!acquireUpdateLockLocked(errorMessage)) return false;
+    const auto releaseUpdateLock = qScopeGuard([this]() {
+        if (!m_bulkUpdateActive) m_updateFileLock.reset();
+    });
     QMutexLocker processLocker(&processSemanticIndexMutex);
     QMutexLocker locker(&m_mutex);
+    if (m_bulkUpdateActive) {
+        if (errorMessage) *errorMessage = QStringLiteral("批量更新期间不能重建索引");
+        return false;
+    }
     m_ready = false;
     m_lastEnsureRebuilt = false;
     return rebuildLocked(QStringLiteral("用户请求重建语义索引"), errorMessage);
@@ -114,9 +147,17 @@ bool SemanticSearchIndexService::rebuild(QString *errorMessage)
 bool SemanticSearchIndexService::invalidate(const QString &reason, QString *errorMessage)
 {
     QMutexLocker updateLocker(&processSemanticUpdateMutex);
+    if (!acquireUpdateLockLocked(errorMessage)) return false;
+    const auto releaseUpdateLock = qScopeGuard([this]() {
+        if (!m_bulkUpdateActive) m_updateFileLock.reset();
+    });
     QMutexLocker processLocker(&processSemanticIndexMutex);
     QMutexLocker locker(&m_mutex);
     if (!validateDatabase(m_globalDatabaseManager, errorMessage)) {
+        return false;
+    }
+    if (m_bulkUpdateActive) {
+        if (errorMessage) *errorMessage = QStringLiteral("批量更新期间不能使索引失效");
         return false;
     }
     m_ready = false;
@@ -415,6 +456,10 @@ bool SemanticSearchIndexService::applyChanges(const QVector<SearchDocumentInput>
                                               const SemanticIndexProgressCallback &progressCallback)
 {
     QMutexLocker updateLocker(&processSemanticUpdateMutex);
+    if (!acquireUpdateLockLocked(errorMessage)) return false;
+    const auto releaseUpdateLock = qScopeGuard([this]() {
+        if (!m_bulkUpdateActive) m_updateFileLock.reset();
+    });
     SemanticIndexUpdateResult localResult;
     m_lastEnsureRebuilt = false;
     {
@@ -728,6 +773,14 @@ bool SemanticSearchIndexService::applyChanges(const QVector<SearchDocumentInput>
 bool SemanticSearchIndexService::beginBulkUpdate(QString *errorMessage)
 {
     QMutexLocker updateLocker(&processSemanticUpdateMutex);
+    if (m_bulkUpdateActive) {
+        if (errorMessage) *errorMessage = QStringLiteral("已有批量语义更新尚未发布");
+        return false;
+    }
+    if (!acquireUpdateLockLocked(errorMessage)) return false;
+    const auto releaseUpdateLock = qScopeGuard([this]() {
+        if (!m_bulkUpdateActive) m_updateFileLock.reset();
+    });
     QMutexLocker processLocker(&processSemanticIndexMutex);
     QMutexLocker locker(&m_mutex);
     if (!ensureReadyLocked(errorMessage, true)) {
@@ -741,6 +794,7 @@ bool SemanticSearchIndexService::beginBulkUpdate(QString *errorMessage)
 bool SemanticSearchIndexService::publishBulkUpdate(QString *errorMessage)
 {
     QMutexLocker updateLocker(&processSemanticUpdateMutex);
+    const auto releaseUpdateLock = qScopeGuard([this]() { m_updateFileLock.reset(); });
     QMutexLocker processLocker(&processSemanticIndexMutex);
     QMutexLocker locker(&m_mutex);
     if (!m_bulkUpdateActive) {
@@ -803,6 +857,7 @@ bool SemanticSearchIndexService::publishBulkUpdate(QString *errorMessage)
 void SemanticSearchIndexService::abortBulkUpdate(const QString &reason)
 {
     QMutexLocker updateLocker(&processSemanticUpdateMutex);
+    const auto releaseUpdateLock = qScopeGuard([this]() { m_updateFileLock.reset(); });
     QMutexLocker processLocker(&processSemanticIndexMutex);
     QMutexLocker locker(&m_mutex);
     const auto wasDirty = m_bulkUpdateDirty;

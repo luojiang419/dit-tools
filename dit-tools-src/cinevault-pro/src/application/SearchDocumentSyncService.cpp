@@ -994,19 +994,6 @@ void SearchDocumentSyncService::startScheduledSync()
                 errorMessage = QStringLiteral("搜索文档同步因项目切换、队列拥塞或应用退出而取消");
             }
         }
-        IndexingWorkCoordinator::Lease writerLease;
-        if (errorMessage.isEmpty() && workCoordinator) {
-            writerLease = workCoordinator->acquire({
-                IndexingWorkCoordinator::Resource::SqliteWriter,
-                immediateFullSync
-                    ? IndexingWorkCoordinator::Priority::Foreground
-                    : IndexingWorkCoordinator::Priority::Background,
-                false,
-                workGeneration});
-            if (!writerLease) {
-                errorMessage = QStringLiteral("搜索索引写入因项目切换、队列拥塞或应用退出而取消");
-            }
-        }
         if (errorMessage.isEmpty()) {
             GlobalDatabaseManager workerDatabaseManager;
             if (workerDatabaseManager.openDatabase(&errorMessage)) {
@@ -1073,19 +1060,14 @@ void SearchDocumentSyncService::startScheduledSync()
                 guard->m_consecutiveFailures = 0;
             } else {
                 ++guard->m_consecutiveFailures;
-                if (fullSync) {
-                    guard->m_pendingFullSync = true;
-                    guard->m_pendingImmediateFullSync = false;
-                    guard->m_pendingCatalogChanges.clear();
-                    guard->m_pendingAnalysisVideoKeys.clear();
-                } else {
-                    for (const auto &changeSet : changeSets) {
-                        guard->scheduleCatalogChanges(changeSet);
-                    }
-                    for (const auto &videoKey : analysisVideoKeys) {
-                        guard->scheduleAssetSync(videoKey);
-                    }
-                }
+                // Read current catalog state again: replaying an older Removed/Updated
+                // event over a newer pending change can permanently lose documents.
+                // AppContext also schedules this reconciliation on every startup,
+                // so committed catalog rows are the durable recovery source.
+                guard->m_pendingFullSync = true;
+                guard->m_pendingImmediateFullSync = false;
+                guard->m_pendingCatalogChanges.clear();
+                guard->m_pendingAnalysisVideoKeys.clear();
             }
             const auto message = success
                 ? QStringLiteral("搜索文档同步完成")

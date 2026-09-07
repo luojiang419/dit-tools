@@ -11,6 +11,11 @@ public:
     static bool isExcludedPath(const QString &sourceRootPath,
                                const QString &candidatePath,
                                const QString &projectDatabasePath);
+    // Scanners can reuse the source-volume classification for the whole run.
+    static bool isExcludedPath(const QString &sourceRootPath,
+                               const QString &candidatePath,
+                               const QString &projectDatabasePath,
+                               bool wholeVolumeSource);
     static QStringList normalizeDirtyDirectories(const QString &sourceRootPath,
                                                  const QStringList &changedPaths,
                                                  const QString &projectDatabasePath);

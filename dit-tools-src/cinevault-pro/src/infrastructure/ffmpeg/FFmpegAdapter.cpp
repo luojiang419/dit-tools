@@ -14,6 +14,7 @@
 #include <QRegularExpression>
 #include <QProcess>
 #include <QSet>
+#include <QSaveFile>
 #include <QStringList>
 #include <QtMath>
 
@@ -378,9 +379,9 @@ QString storyboardFilter(VideoFrameExtractionStrategy strategy,
             .arg(seconds, 0, 'f', 3);
     case VideoFrameExtractionStrategy::IntervalOnly:
     case VideoFrameExtractionStrategy::HighFidelity:
-        return QStringLiteral("fps=1/%1").arg(seconds, 0, 'f', 3);
+        return QStringLiteral("select=eq(n\\,0)+gte(t-prev_selected_t\\,%1)").arg(seconds, 0, 'f', 3);
     }
-    return QStringLiteral("fps=1/%1").arg(seconds, 0, 'f', 3);
+    return QStringLiteral("select=eq(n\\,0)+gte(t-prev_selected_t\\,%1)").arg(seconds, 0, 'f', 3);
 }
 
 struct CandidateFrame {
@@ -631,6 +632,7 @@ FrameExtractionResult FFmpegAdapter::extractFrames(const FrameExtractionRequest 
         ? qBound(0.1, request.intervalSeconds, 0.25)
         : qBound(0.1, request.intervalSeconds, 240.0);
     result.frameInterval = qRound(effectiveInterval * 1000.0);
+    constexpr int MaxCandidateFrames = 20000;
     const auto candidatePattern = QDir(request.outputDirectory).filePath(QStringLiteral("candidate_%06d.jpg"));
     const auto extractionFilter = QStringLiteral("%1,%2,format=yuvj420p,showinfo")
                                       .arg(storyboardFilter(request.strategy,
@@ -641,12 +643,14 @@ FrameExtractionResult FFmpegAdapter::extractFrames(const FrameExtractionRequest 
         QStringLiteral("-y"),
         QStringLiteral("-hide_banner"),
         QStringLiteral("-loglevel"), QStringLiteral("info"),
+        QStringLiteral("-copyts"),
         QStringLiteral("-i"), request.sourcePath,
         QStringLiteral("-map"), QStringLiteral("0:v:0"),
         QStringLiteral("-vf"), extractionFilter,
         QStringLiteral("-fps_mode"), QStringLiteral("vfr"),
         QStringLiteral("-q:v"), QStringLiteral("2"),
         QStringLiteral("-start_number"), QStringLiteral("0"),
+        QStringLiteral("-frames:v"), QString::number(MaxCandidateFrames + 1),
         candidatePattern
     };
     const auto extraction = runTimestampProcess(
@@ -654,28 +658,31 @@ FrameExtractionResult FFmpegAdapter::extractFrames(const FrameExtractionRequest 
     const auto &extractionProcess = extraction.process;
     const auto candidateFiles = QDir(request.outputDirectory).entryInfoList(
         {QStringLiteral("candidate_*.jpg")}, QDir::Files, QDir::Name);
-    if (!extractionProcess.ok && !candidateFiles.isEmpty()) {
+    if (!extractionProcess.ok) {
         result.errorMessage = QStringLiteral("按 filmstoryboard 规则抽帧失败：%1")
                                   .arg(extractionProcess.errorMessage);
         return result;
     }
+    if (candidateFiles.size() > MaxCandidateFrames) {
+        result.errorMessage = QStringLiteral("候选帧超过 %1 帧，请增大抽帧间隔或分段解析视频。")
+                                  .arg(MaxCandidateFrames);
+        return result;
+    }
     const auto &timestamps = extraction.timestamps;
+    if (timestamps.size() != candidateFiles.size()) {
+        result.errorMessage = QStringLiteral("抽帧时间戳与图像数量不一致，已停止解析以避免错误时间标记。");
+        return result;
+    }
     QVector<CandidateFrame> candidates;
     candidates.reserve(candidateFiles.size() + 1);
+    auto lastRequiredTimestamp = firstSourceTimestampMs;
     for (int index = 0; index < candidateFiles.size(); ++index) {
-        qint64 timestampMs = 0;
-        if (index < timestamps.size()) {
-            timestampMs = timestamps.at(index);
-        } else if (request.strategy == VideoFrameExtractionStrategy::PerFrame
-                   && result.sourceFrameCount > 1) {
-            const auto sourceSpanMs = terminalSourceTimestampMs - firstSourceTimestampMs;
-            timestampMs = firstSourceTimestampMs
-                + qRound64(index * sourceSpanMs / static_cast<double>(result.sourceFrameCount - 1));
-        } else {
-            timestampMs = firstSourceTimestampMs
-                + qRound64(index * effectiveInterval * 1000.0);
-        }
-        candidates.append({candidateFiles.at(index).absoluteFilePath(), timestampMs, index == 0});
+        const auto timestampMs = timestamps.at(index);
+        const auto required = index == 0
+            || request.strategy != VideoFrameExtractionStrategy::SceneAndInterval
+            || timestampMs - lastRequiredTimestamp >= result.frameInterval;
+        if (required) lastRequiredTimestamp = timestampMs;
+        candidates.append({candidateFiles.at(index).absoluteFilePath(), timestampMs, required});
     }
 
     auto terminalCandidate = std::min_element(
@@ -695,7 +702,9 @@ FrameExtractionResult FFmpegAdapter::extractFrames(const FrameExtractionRequest 
             QStringLiteral("-y"),
             QStringLiteral("-v"), QStringLiteral("info"),
             QStringLiteral("-copyts"),
-            QStringLiteral("-sseof"), QString::number(-tailWindowMs / 1000.0, 'f', 3),
+            QStringLiteral("-ss"), QString::number(
+                qMax<qint64>(0, terminalSourceTimestampMs - firstSourceTimestampMs - tailWindowMs)
+                    / 1000.0, 'f', 3),
             QStringLiteral("-i"), request.sourcePath,
             QStringLiteral("-map"), QStringLiteral("0:v:0"),
             QStringLiteral("-vf"), QStringLiteral("%1,format=yuvj420p,showinfo")
@@ -719,9 +728,12 @@ FrameExtractionResult FFmpegAdapter::extractFrames(const FrameExtractionRequest 
         for (int index = 0; index + 1 < terminalFiles.size(); ++index) {
             QFile::remove(terminalFiles.at(index).absoluteFilePath());
         }
-        const auto actualTerminalTimestampMs = terminalExtraction.timestamps.isEmpty()
-            ? terminalSourceTimestampMs
-            : terminalExtraction.timestamps.constLast();
+        if (terminalExtraction.timestamps.size() != terminalFiles.size()
+            || qAbs(terminalExtraction.timestamps.constLast() - terminalSourceTimestampMs) > 1) {
+            result.errorMessage = QStringLiteral("无法核实视频末帧的真实时间戳");
+            return result;
+        }
+        const auto actualTerminalTimestampMs = terminalExtraction.timestamps.constLast();
         candidates.append({terminalPath, actualTerminalTimestampMs, true});
     }
     if (candidates.isEmpty()) {
@@ -740,6 +752,7 @@ FrameExtractionResult FFmpegAdapter::extractFrames(const FrameExtractionRequest 
 
     constexpr qint64 DuplicateWindowMs = 1000;
     QVector<AcceptedFingerprint> recentFingerprints;
+    QJsonArray coverage;
     QVector<ExtractedFrame> selectedFrames;
     selectedFrames.reserve(candidates.size());
     for (int index = 0; index < candidates.size(); ++index) {
@@ -764,6 +777,13 @@ FrameExtractionResult FFmpegAdapter::extractFrames(const FrameExtractionRequest 
             && quality.brightness <= 0.92;
         const auto valid = quality.valid
             && (candidate.requiredAnchor || (passesQuality && !duplicate));
+        coverage.append(QJsonObject{
+            {QStringLiteral("source_pts_ms"), candidate.timestampMs},
+            {QStringLiteral("required_anchor"), candidate.requiredAnchor},
+            {QStringLiteral("retained_frame"), valid ? selectedFrames.size() + 1 : 0},
+            {QStringLiteral("disposition"), valid ? QStringLiteral("retained")
+                : (duplicate ? QStringLiteral("duplicate_scene") : QStringLiteral("low_quality_scene"))}
+        });
         if (!valid) {
             QFile::remove(candidate.imagePath);
             continue;
@@ -783,6 +803,19 @@ FrameExtractionResult FFmpegAdapter::extractFrames(const FrameExtractionRequest 
     }
     if (selectedFrames.isEmpty()) {
         result.errorMessage = QStringLiteral("候选帧均因清晰度、曝光或重复画面被筛除");
+        return result;
+    }
+    QSaveFile manifest(QDir(request.outputDirectory).filePath(QStringLiteral("coverage.json")));
+    const auto manifestBytes = QJsonDocument(QJsonObject{
+        {QStringLiteral("schema_version"), 1},
+        {QStringLiteral("source_frame_count"), result.sourceFrameCount},
+        {QStringLiteral("first_source_pts_ms"), firstSourceTimestampMs},
+        {QStringLiteral("last_source_pts_ms"), terminalSourceTimestampMs},
+        {QStringLiteral("candidates"), coverage}
+    }).toJson(QJsonDocument::Compact);
+    if (!manifest.open(QIODevice::WriteOnly) || manifest.write(manifestBytes) != manifestBytes.size()
+        || !manifest.commit()) {
+        result.errorMessage = QStringLiteral("无法保存视频采样覆盖记录：%1").arg(manifest.errorString());
         return result;
     }
     result.success = true;

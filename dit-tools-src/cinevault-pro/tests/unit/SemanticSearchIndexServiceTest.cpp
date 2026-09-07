@@ -350,6 +350,68 @@ private slots:
         manager.closeDatabase();
     }
 
+    void competingWriterCannotOverwriteBulkGeneration()
+    {
+        removeGlobalDatabaseFiles();
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        const auto path = QDir(temp.path()).filePath(QStringLiteral("competing.usearch"));
+        GlobalDatabaseManager manager;
+        QString error;
+        QVERIFY2(manager.openDatabase(&error), qPrintable(error));
+        SemanticSearchIndexService first(&manager, path);
+        SemanticSearchIndexService second(&manager, path);
+        QVERIFY2(second.ensureReady(&error), qPrintable(error));
+        QVERIFY2(first.beginBulkUpdate(&error), qPrintable(error));
+        QVERIFY(!first.beginBulkUpdate(&error));
+        QVERIFY(!second.beginBulkUpdate(&error));
+        QVERIFY(!second.rebuild(&error));
+        SemanticIndexUpdateResult result;
+        const auto a = document(QStringLiteral("asset:a"), SearchDocumentType::Asset,
+                                QStringLiteral("a"), QStringLiteral("雪山日出"), QStringLiteral("2026-09-07"));
+        const auto b = document(QStringLiteral("asset:b"), SearchDocumentType::Asset,
+                                QStringLiteral("b"), QStringLiteral("城市海岸"), QStringLiteral("2026-09-07"));
+        QVERIFY(!second.applyChanges({b}, {}, &result, &error));
+        QVERIFY2(first.applyChanges({a}, {}, &result, &error), qPrintable(error));
+        QVERIFY2(first.publishBulkUpdate(&error), qPrintable(error));
+        QVERIFY2(second.applyChanges({b}, {}, &result, &error), qPrintable(error));
+        SemanticSearchIndexService reader(&manager, path);
+        const auto hits = reader.search(QStringLiteral("山川城市"), 10, &error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(hits.size(), 2);
+        QCOMPARE(scalarValue(manager.database(), QStringLiteral("SELECT COUNT(*) FROM search_document")), qint64{2});
+        manager.closeDatabase();
+    }
+
+    void abandonedBulkRecoversCommittedDocuments()
+    {
+        removeGlobalDatabaseFiles();
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        const auto path = QDir(temp.path()).filePath(QStringLiteral("abandoned.usearch"));
+        GlobalDatabaseManager manager;
+        QString error;
+        QVERIFY2(manager.openDatabase(&error), qPrintable(error));
+        {
+            SemanticSearchIndexService interrupted(&manager, path);
+            QVERIFY2(interrupted.beginBulkUpdate(&error), qPrintable(error));
+            SemanticIndexUpdateResult result;
+            QVERIFY2(interrupted.applyChanges(
+                         {document(QStringLiteral("asset:recovered"), SearchDocumentType::Asset,
+                                   QStringLiteral("recovered"), QStringLiteral("雨后森林"), QStringLiteral("2026-09-07"))},
+                         {}, &result, &error), qPrintable(error));
+            // Simulate process shutdown before publication: SQLite is durable,
+            // the old index file has not received this batch.
+        }
+        SemanticSearchIndexService recovered(&manager, path);
+        QVERIFY2(recovered.ensureReady(&error), qPrintable(error));
+        const auto hits = recovered.search(QStringLiteral("森林"), 10, &error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(hits.size(), 1);
+        QCOMPARE(hits.first().documentKey, QStringLiteral("asset:recovered"));
+        manager.closeDatabase();
+    }
+
     void corruptedPersistentIndexRebuildsFromSqliteDocuments()
     {
         removeGlobalDatabaseFiles();

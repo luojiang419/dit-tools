@@ -575,6 +575,8 @@ else()
     src/application/ApplicationIdleMonitor.cpp
     src/application/SearchAssistantLifecycleController.h
     src/application/SearchAssistantLifecycleController.cpp
+    src/application/AnalysisRunStore.h
+    src/application/AnalysisRunStore.cpp
     src/application/VideoAnalysisService.h
     src/application/VideoAnalysisService.cpp
     src/application/ImportService.h
@@ -1086,6 +1088,14 @@ if(BUILD_TESTING)
             resources/websearch/app.js
     )
     add_test(NAME WebSearchServiceTest COMMAND WebSearchServiceTest)
+
+    qt_add_executable(ReliabilityRecoveryTest
+        tests/unit/ReliabilityRecoveryTest.cpp
+        src/application/AnalysisRunStore.cpp
+        src/shared/VisualAnalysisMetadata.cpp)
+    target_include_directories(ReliabilityRecoveryTest PRIVATE src)
+    target_link_libraries(ReliabilityRecoveryTest PRIVATE Qt6::Core Qt6::Test)
+    add_test(NAME ReliabilityRecoveryTest COMMAND ReliabilityRecoveryTest)
 
     qt_add_executable(VisualAnalysisMetadataTest
         tests/unit/VisualAnalysisMetadataTest.cpp
