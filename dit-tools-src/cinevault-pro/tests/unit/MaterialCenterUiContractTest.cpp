@@ -267,8 +267,9 @@ private slots:
             QStringLiteral("src/ui/qml/workspaces/MaterialCenterWorkspace.qml"));
         const auto detailListId = qml.indexOf(QStringLiteral("id: detailFrameList"));
         QVERIFY(detailListId >= 0);
-        QVERIFY(qml.contains(QStringLiteral("reuseItems: true")));
-        QVERIFY(qml.lastIndexOf(QStringLiteral("ListView {"), detailListId)
+        const auto pagedList = sourceFile(QStringLiteral("src/ui/qml/components/PagedFrameList.qml"));
+        QVERIFY(pagedList.contains(QStringLiteral("reuseItems: true")));
+        QVERIFY(qml.lastIndexOf(QStringLiteral("PagedFrameList {"), detailListId)
                 > qml.lastIndexOf(QStringLiteral("Repeater {"), detailListId));
     }
 

@@ -242,6 +242,74 @@ private slots:
         QCOMPARE(json.value(QStringLiteral("last_source_pts_ms")).toInteger(), qint64{7200000});
     }
 
+    void realFashionVideoCoversCompleteTimeline_data()
+    {
+        QTest::addColumn<int>("strategy");
+        QTest::newRow("per-frame") << static_cast<int>(VideoFrameExtractionStrategy::PerFrame);
+        QTest::newRow("interval") << static_cast<int>(VideoFrameExtractionStrategy::IntervalOnly);
+        QTest::newRow("scene-and-interval") << static_cast<int>(VideoFrameExtractionStrategy::SceneAndInterval);
+        QTest::newRow("high-fidelity") << static_cast<int>(VideoFrameExtractionStrategy::HighFidelity);
+    }
+
+    void realFashionVideoCoversCompleteTimeline()
+    {
+        const auto source = qEnvironmentVariable("CINEVAULT_REAL_VIDEO_FIXTURE");
+        if (source.isEmpty()) QSKIP("Provide the user-supplied 58.48-second fashion video via CINEVAULT_REAL_VIDEO_FIXTURE");
+        QVERIFY(QFileInfo::exists(source));
+        QFETCH(int, strategy);
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        FrameExtractionRequest request;
+        request.sourcePath = source;
+        request.outputDirectory = QDir(temp.path()).filePath(QStringLiteral("frames"));
+        request.strategy = static_cast<VideoFrameExtractionStrategy>(strategy);
+        request.intervalSeconds = 1.0;
+        request.maxWidth = 320;
+        request.maxHeight = 180;
+        FFmpegAdapter adapter;
+        const auto result = adapter.extractFrames(request);
+        QVERIFY2(result.success, qPrintable(result.errorMessage));
+        QCOMPARE(result.sourceFrameCount, 1462);
+        QCOMPARE(result.frames.first().timestampMs, qint64{0});
+        QCOMPARE(result.frames.last().timestampMs, qint64{58440});
+        if (request.strategy == VideoFrameExtractionStrategy::PerFrame) QCOMPARE(result.frames.size(), 1462);
+        else QVERIFY(result.frames.size() >= 59);
+        for (int i = 1; i < result.frames.size(); ++i) {
+            QVERIFY(result.frames.at(i).timestampMs > result.frames.at(i - 1).timestampMs);
+            QVERIFY(result.frames.at(i).timestampMs - result.frames.at(i - 1).timestampMs <= 1040);
+        }
+        for (const auto index : {qsizetype{0}, result.frames.size() / 2, result.frames.size() - 1}) {
+            const auto &frame = result.frames.at(index);
+            const auto referencePath = QDir(temp.path()).filePath(QStringLiteral("reference-%1.jpg").arg(index));
+            QString error;
+            QVERIFY2(runProcess(m_ffmpegPath,
+                {QStringLiteral("-y"), QStringLiteral("-v"), QStringLiteral("error"),
+                 QStringLiteral("-i"), source, QStringLiteral("-vf"),
+                 QStringLiteral("select=eq(n\\,%1),scale=320:180,format=yuvj420p").arg(frame.timestampMs / 40),
+                 QStringLiteral("-fps_mode"), QStringLiteral("vfr"),
+                 QStringLiteral("-frames:v"), QStringLiteral("1"),
+                 QStringLiteral("-q:v"), QStringLiteral("2"), referencePath}, &error), qPrintable(error));
+            const auto actual = QImage(frame.imagePath).convertToFormat(QImage::Format_RGB32);
+            const auto expected = QImage(referencePath).convertToFormat(QImage::Format_RGB32);
+            QVERIFY(!actual.isNull());
+            QCOMPARE(actual.size(), expected.size());
+            quint64 errorSum = 0;
+            for (int y = 0; y < actual.height(); ++y) {
+                const auto *a = reinterpret_cast<const QRgb *>(actual.constScanLine(y));
+                const auto *b = reinterpret_cast<const QRgb *>(expected.constScanLine(y));
+                for (int x = 0; x < actual.width(); ++x) {
+                    errorSum += qAbs(qRed(a[x]) - qRed(b[x])) + qAbs(qGreen(a[x]) - qGreen(b[x]))
+                        + qAbs(qBlue(a[x]) - qBlue(b[x]));
+                }
+            }
+            const auto meanError = errorSum / (actual.width() * actual.height() * 3.0);
+            QVERIFY2(meanError < 4.0, qPrintable(QStringLiteral("Frame at %1ms differs from actual source: MAE=%2")
+                                                 .arg(frame.timestampMs).arg(meanError)));
+        }
+        qInfo() << "real-video strategy=" << strategy << "sample_count=" << result.frames.size()
+                << "last_source_pts_ms=" << result.frames.last().timestampMs;
+    }
+
     void cancellationStopsExternalProcessPromptly()
     {
         QTemporaryDir temporaryDir;

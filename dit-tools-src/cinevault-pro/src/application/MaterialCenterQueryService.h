@@ -37,7 +37,8 @@ public:
     VideoAnalysisDetailPage fetchDetailPage(const QString &videoKey,
                                             int frameLimit,
                                             int afterFrameNumber = 0,
-                                            int preferredFrameNumber = -1) const;
+                                            int preferredFrameNumber = -1,
+                                                  bool fromEnd = false) const;
 
 private:
     GlobalDatabaseManager *m_globalDatabaseManager = nullptr;

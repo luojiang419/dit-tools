@@ -1693,46 +1693,57 @@ Rectangle {
                             wrapMode: Text.WrapAnywhere
                         }
 
-                        RowLayout {
+                        Text {
                             Layout.fillWidth: true
-                            visible: viewModel
-                                && viewModel.selectedIsVideo
-                                && !viewModel.selectedFramesLoading
-                                && viewModel.selectedFrameCount > 0
-                            spacing: 10
-
-                            Text {
-                                Layout.fillWidth: true
-                                text: !viewModel ? ""
-                                    : (viewModel.selectedRemainingFrameCount > 0
-                                        ? "当前显示 " + viewModel.selectedVisibleFrameCount + " / " + viewModel.selectedFrameCount + " 帧，剩余 " + viewModel.selectedRemainingFrameCount + " 帧"
-                                        : "当前显示 " + viewModel.selectedVisibleFrameCount + " 帧")
-                                color: Theme.muted
-                                font.pixelSize: 12
-                                elide: Text.ElideRight
-                            }
-
-                            ActionButton {
-                                Layout.preferredWidth: 106
-                                Layout.preferredHeight: 30
-                                visible: viewModel && viewModel.canLoadMoreSelectedFrames
-                                text: "再加载一批"
-                                onClicked: if (viewModel) viewModel.loadMoreSelectedFrames()
-                            }
-
+                            visible: root.viewModel && root.viewModel.selectedIsVideo && root.viewModel.selectedFrameCount > 0
+                            text: root.viewModel ? root.viewModel.selectedFrameCoverageText : ""
+                            color: Theme.muted
+                            font.pixelSize: 12
+                            wrapMode: Text.Wrap
                         }
 
-                        ListView {
+                        RowLayout {
+                            Layout.fillWidth: true
+                            visible: root.viewModel && root.viewModel.selectedIsVideo && root.viewModel.selectedFrameCount > 0
+                            spacing: 8
+
+                            ActionButton {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 30
+                                enabled: root.viewModel && !root.viewModel.selectedFramesLoading
+                                text: "回到首帧"
+                                onClicked: if (root.viewModel) root.viewModel.showFirstSelectedFrames()
+                            }
+                            ActionButton {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 30
+                                enabled: root.viewModel && !root.viewModel.selectedFramesLoading
+                                text: "查看末帧"
+                                onClicked: if (root.viewModel) root.viewModel.showLastSelectedFrames()
+                            }
+                        }
+
+                        PagedFrameList {
                             id: detailFrameList
+                            objectName: "detailFrameList"
 
                             Layout.fillWidth: true
-                            Layout.preferredHeight: Math.min(contentHeight, 620)
-                            Layout.minimumHeight: count > 0 ? Math.min(contentHeight, 132) : 0
-                            clip: true
-                            spacing: 8
-                            reuseItems: true
-                            boundsBehavior: Flickable.StopAtBounds
-                            model: viewModel && viewModel.selectedIsVideo ? viewModel.selectedFrames : []
+                            Layout.preferredHeight: root.viewModel && root.viewModel.selectedFrameCount > 0 ? 620 : 0
+                            visible: root.viewModel && root.viewModel.selectedIsVideo && root.viewModel.selectedFrameCount > 0
+                            hasMore: root.viewModel ? root.viewModel.canExpandSelectedFrames : false
+                            loading: root.viewModel ? root.viewModel.selectedFramesLoading : false
+                            remainingCount: root.viewModel ? root.viewModel.selectedRemainingFrameCount : 0
+                            totalFrameCount: root.viewModel ? root.viewModel.selectedFrameCount : 0
+                            statusColor: Theme.muted
+                            model: root.viewModel && root.viewModel.selectedIsVideo ? root.viewModel.selectedFrames : []
+                            onLoadMoreRequested: if (root.viewModel) root.viewModel.loadMoreSelectedFrames()
+
+                            Connections {
+                                target: root.viewModel
+                                function onSelectedFramePageLoaded(replaceCurrent, fromEnd) {
+                                    detailFrameList.completePage(replaceCurrent, fromEnd)
+                                }
+                            }
 
                             delegate: Rectangle {
                                 id: frameCard

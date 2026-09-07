@@ -295,6 +295,7 @@ struct MaterialCenterDetailTaskResult {
     int requestGeneration = 0;
     QString videoKey;
     bool replaceCurrent = true;
+    bool fromEnd = false;
     VideoAnalysisDetailPage page;
     QString errorMessage;
 };
@@ -822,7 +823,9 @@ QString MaterialCenterViewModel::selectedFrameSamplingText() const
     const auto &plan = m_detail.visualAnalysisPlan;
     const auto intervalSeconds = qMax(1, plan.frameInterval) / 1000.0;
     QString modeText = QStringLiteral("候选帧采样");
-    if (plan.samplingPolicy.contains(QStringLiteral("strategy=0"))) {
+    if (plan.samplingPolicy == QStringLiteral("fixed_interval")) {
+        modeText = QStringLiteral("每 %1 个源帧取样").arg(qMax(1, plan.frameInterval));
+    } else if (plan.samplingPolicy.contains(QStringLiteral("strategy=0"))) {
         modeText = QStringLiteral("逐帧候选");
     } else if (plan.samplingPolicy.contains(QStringLiteral("strategy=1"))) {
         modeText = QStringLiteral("场景变化 + %1 秒间隔").arg(intervalSeconds, 0, 'f', 2);
@@ -836,10 +839,27 @@ QString MaterialCenterViewModel::selectedFrameSamplingText() const
         && m_selectedTotalFrameCount == plan.plannedFrameCount;
     const auto coverageText = terminalCovered
         ? QStringLiteral("首尾时间锚点已纳入计划")
-        : QStringLiteral("旧采样计划需重新解析");
+        : (plan.samplingPolicy == QStringLiteral("fixed_interval")
+               ? QStringLiteral("历史规则，保留已有结果")
+               : QStringLiteral("旧采样计划需重新解析"));
     return QStringLiteral("当前结果：%1 · %2 · 共 %3 帧")
         .arg(modeText, coverageText)
         .arg(m_selectedTotalFrameCount);
+}
+
+QString MaterialCenterViewModel::selectedFrameCoverageText() const
+{
+    if (m_selectedTotalFrameCount <= 0) return {};
+    auto text = QStringLiteral("视频时长：%1\n抽帧范围：%2 — %3")
+        .arg(Formatters::formatFrameTimestamp(m_detail.asset.durationMs),
+             Formatters::formatFrameTimestamp(m_selectedFirstTimestampMs),
+             Formatters::formatFrameTimestamp(m_selectedLastTimestampMs));
+    if (!m_detail.frames.isEmpty()) {
+        text += QStringLiteral("\n当前浏览：%1 — %2")
+            .arg(Formatters::formatFrameTimestamp(m_detail.frames.first().timestampMs),
+                 Formatters::formatFrameTimestamp(m_detail.frames.last().timestampMs));
+    }
+    return text;
 }
 
 QString MaterialCenterViewModel::selectedFrameSearchStatus() const
@@ -859,7 +879,7 @@ int MaterialCenterViewModel::selectedVisibleFrameCount() const
 
 int MaterialCenterViewModel::selectedRemainingFrameCount() const
 {
-    return qMax(0, selectedFrameCount() - m_detail.frames.size());
+    return qMax(0, selectedFrameCount() - m_selectedFramesThroughCursor);
 }
 
 bool MaterialCenterViewModel::selectedFramesExpanded() const
@@ -1953,6 +1973,16 @@ void MaterialCenterViewModel::loadMoreSelectedFrames()
     loadDetailPage(m_detail.asset.videoKey, m_selectedFrameCursor, false);
 }
 
+void MaterialCenterViewModel::showFirstSelectedFrames()
+{
+    if (hasSelection()) loadDetailPage(m_detail.asset.videoKey, 0, true);
+}
+
+void MaterialCenterViewModel::showLastSelectedFrames()
+{
+    if (hasSelection()) loadDetailPage(m_detail.asset.videoKey, 0, true, true);
+}
+
 void MaterialCenterViewModel::showAllSelectedFrames()
 {
     loadMoreSelectedFrames();
@@ -2018,6 +2048,9 @@ void MaterialCenterViewModel::prepareSelection(const QString &videoKey)
     m_selectedThumbnailUrlCache = {};
     m_selectedTotalFrameCount = 0;
     m_selectedFrameCursor = 0;
+    m_selectedFramesThroughCursor = 0;
+    m_selectedFirstTimestampMs = 0;
+    m_selectedLastTimestampMs = 0;
     m_selectedFrameCacheBytes = 0;
     m_selectedFrameCacheByteLimited = false;
     m_selectedFramesHasMore = false;
@@ -2056,7 +2089,8 @@ void MaterialCenterViewModel::loadPendingDetail()
 
 void MaterialCenterViewModel::loadDetailPage(const QString &videoKey,
                                              int afterFrameNumber,
-                                             bool replaceCurrent)
+                                             bool replaceCurrent,
+                                             bool fromEnd)
 {
     if (!m_queryService || videoKey.trimmed().isEmpty()
         || (m_selectedFramesLoading && !replaceCurrent)) {
@@ -2094,12 +2128,14 @@ void MaterialCenterViewModel::loadDetailPage(const QString &videoKey,
                 ? QStringLiteral("无法读取当前素材详情")
                 : task.errorMessage;
             emit selectionChanged();
+            emit selectedFramePageLoaded(false, false);
             return;
         }
 
         const auto selectedAsset = assetByVideoKey(task.videoKey);
         bool hitByteLimit = false;
         if (task.replaceCurrent) {
+            m_selectedFrameCacheByteLimited = false;
             m_detail = std::move(task.page.detail);
             if (!selectedAsset.videoKey.trimmed().isEmpty()) {
                 m_detail.asset = selectedAsset;
@@ -2148,6 +2184,9 @@ void MaterialCenterViewModel::loadDetailPage(const QString &videoKey,
         }
         m_selectedTotalFrameCount = task.page.totalFrameCount;
         m_selectedFrameCursor = task.page.nextFrameNumber;
+        m_selectedFramesThroughCursor = task.page.framesThroughCursor;
+        m_selectedFirstTimestampMs = task.page.firstTimestampMs;
+        m_selectedLastTimestampMs = task.page.lastTimestampMs;
         m_selectedFramesHasMore = task.page.hasMoreFrames;
         if (hitByteLimit) {
             m_selectedFrameCacheByteLimited = true;
@@ -2159,6 +2198,7 @@ void MaterialCenterViewModel::loadDetailPage(const QString &videoKey,
         emit selectionChanged();
         emit analysisProgressChanged();
         emit dimensionAnalysisChanged();
+        emit selectedFramePageLoaded(task.replaceCurrent, task.fromEnd);
     });
     watcher->setFuture(QtConcurrent::run(
         &m_detailPool,
@@ -2168,11 +2208,13 @@ void MaterialCenterViewModel::loadDetailPage(const QString &videoKey,
          normalizedKey,
          afterFrameNumber,
          preferredFrameNumber,
-         replaceCurrent]() {
+         replaceCurrent,
+         fromEnd]() {
             MaterialCenterDetailTaskResult task;
             task.requestGeneration = requestGeneration;
             task.videoKey = normalizedKey;
             task.replaceCurrent = replaceCurrent;
+            task.fromEnd = fromEnd;
             auto *context = materialCenterReadContextForCurrentThread(
                 databasePath, backendGeneration, &task.errorMessage);
             if (!context || !context->queryService()) {
@@ -2182,7 +2224,8 @@ void MaterialCenterViewModel::loadDetailPage(const QString &videoKey,
                 normalizedKey,
                 kVisibleFrameBatchSize,
                 afterFrameNumber,
-                preferredFrameNumber);
+                preferredFrameNumber,
+                fromEnd);
             return task;
         }));
     });

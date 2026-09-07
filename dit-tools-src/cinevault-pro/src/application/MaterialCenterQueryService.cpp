@@ -1057,7 +1057,8 @@ VideoAnalysisDetail MaterialCenterQueryService::fetchDetail(const QString &video
 VideoAnalysisDetailPage MaterialCenterQueryService::fetchDetailPage(const QString &videoKey,
                                                                     int frameLimit,
                                                                     int afterFrameNumber,
-                                                                    int preferredFrameNumber) const
+                                                                    int preferredFrameNumber,
+                                                                    bool fromEnd) const
 {
     VideoAnalysisDetailPage page;
     auto &detail = page.detail;
@@ -1108,13 +1109,28 @@ VideoAnalysisDetailPage MaterialCenterQueryService::fetchDetailPage(const QStrin
 
     QSqlQuery countQuery(m_globalDatabaseManager->database());
     countQuery.prepare(QStringLiteral(
-        "SELECT COUNT(*) FROM video_frame_analysis WHERE video_key = ?"));
+        "SELECT COUNT(*), MIN(timestamp_ms), MAX(timestamp_ms) FROM video_frame_analysis WHERE video_key = ?"));
     countQuery.addBindValue(videoKey.trimmed());
     if (execOrEmpty(countQuery) && countQuery.next()) {
         page.totalFrameCount = countQuery.value(0).toInt();
+        page.firstTimestampMs = countQuery.value(1).toLongLong();
+        page.lastTimestampMs = countQuery.value(2).toLongLong();
     }
 
     const auto boundedFrameLimit = qBound(1, frameLimit, 2000);
+    if (fromEnd) {
+        // Frame numbers can be sparse (legacy every-N-source-frame plans).
+        // Find the key preceding the last page; record count is not a frame key.
+        QSqlQuery boundary(m_globalDatabaseManager->database());
+        boundary.prepare(QStringLiteral(
+            "SELECT frame_number FROM video_frame_analysis WHERE video_key = ? "
+            "ORDER BY frame_number DESC LIMIT 1 OFFSET ?"));
+        boundary.addBindValue(videoKey.trimmed());
+        boundary.addBindValue(boundedFrameLimit);
+        if (!execOrEmpty(boundary)) return page;
+        afterFrameNumber = boundary.next() ? boundary.value(0).toInt() : 0;
+    }
+
     QSqlQuery frameQuery(m_globalDatabaseManager->database());
     frameQuery.prepare(QStringLiteral(
         "SELECT id, frame_number, timestamp_ms, COALESCE(image_path, ''), COALESCE(caption, ''), "
@@ -1140,7 +1156,14 @@ VideoAnalysisDetailPage MaterialCenterQueryService::fetchDetailPage(const QStrin
         ? qMax(0, afterFrameNumber)
         : detail.frames.constLast().frameNumber;
 
-    if (afterFrameNumber <= 0 && preferredFrameNumber > 0
+    QSqlQuery consumed(m_globalDatabaseManager->database());
+    consumed.prepare(QStringLiteral(
+        "SELECT COUNT(*) FROM video_frame_analysis WHERE video_key = ? AND frame_number <= ?"));
+    consumed.addBindValue(videoKey.trimmed());
+    consumed.addBindValue(page.nextFrameNumber);
+    if (execOrEmpty(consumed) && consumed.next()) page.framesThroughCursor = consumed.value(0).toInt();
+
+    if (!fromEnd && afterFrameNumber <= 0 && preferredFrameNumber > 0
         && std::none_of(detail.frames.cbegin(), detail.frames.cend(), [preferredFrameNumber](const auto &frame) {
             return frame.frameNumber == preferredFrameNumber;
         })) {

@@ -80,6 +80,7 @@ class MaterialCenterViewModel : public QObject {
     Q_PROPERTY(QVariantList selectedScenes READ selectedScenes NOTIFY selectionChanged)
     Q_PROPERTY(QVariantList selectedDimensionAnalyses READ selectedDimensionAnalyses NOTIFY selectionChanged)
     Q_PROPERTY(QVariantList selectedFrames READ selectedFrames NOTIFY selectionChanged)
+    Q_PROPERTY(QString selectedFrameCoverageText READ selectedFrameCoverageText NOTIFY selectionChanged)
     Q_PROPERTY(QString selectedFrameSamplingText READ selectedFrameSamplingText NOTIFY selectionChanged)
     Q_PROPERTY(QString selectedFrameSearchStatus READ selectedFrameSearchStatus NOTIFY selectionChanged)
     Q_PROPERTY(int selectedFrameCount READ selectedFrameCount NOTIFY selectionChanged)
@@ -171,6 +172,7 @@ public:
     QVariantList selectedDimensionAnalyses() const;
     QVariantList selectedFrames() const;
     QString selectedFrameSamplingText() const;
+    QString selectedFrameCoverageText() const;
     QString selectedFrameSearchStatus() const;
     int selectedFrameCount() const;
     int selectedVisibleFrameCount() const;
@@ -228,6 +230,8 @@ public:
     Q_INVOKABLE bool copyFolderPath(const QString &folderKey);
     Q_INVOKABLE void toggleSelectedFramesExpanded();
     Q_INVOKABLE void loadMoreSelectedFrames();
+    Q_INVOKABLE void showFirstSelectedFrames();
+    Q_INVOKABLE void showLastSelectedFrames();
     Q_INVOKABLE void showAllSelectedFrames();
     Q_INVOKABLE void collapseSelectedFrames();
     Q_INVOKABLE void retrySelectedFrame(int frameNumber);
@@ -237,6 +241,7 @@ signals:
     void filtersChanged();
     void searchStateChanged();
     void selectionChanged();
+    void selectedFramePageLoaded(bool replaceCurrent, bool fromEnd);
     void quickSearchRevealChanged();
     void quickSearchNavigationRequested(const QString &searchText);
     void searchAssistantWarmupRequested();
@@ -267,7 +272,7 @@ private:
     FolderSearchHit folderByKey(const QString &folderKey) const;
     void prepareSelection(const QString &videoKey);
     void loadPendingDetail();
-    void loadDetailPage(const QString &videoKey, int afterFrameNumber, bool replaceCurrent);
+    void loadDetailPage(const QString &videoKey, int afterFrameNumber, bool replaceCurrent, bool fromEnd = false);
     void refreshSelectedCaches();
     void applySelectedFrameExpansion();
     void refreshSelectedThumbnailUrl(bool allowContactSheetBuild);
@@ -345,6 +350,9 @@ private:
     QTimer *m_searchRefreshTimer = nullptr;
     int m_selectedTotalFrameCount = 0;
     int m_selectedFrameCursor = 0;
+    int m_selectedFramesThroughCursor = 0;
+    qint64 m_selectedFirstTimestampMs = 0;
+    qint64 m_selectedLastTimestampMs = 0;
     qsizetype m_selectedFrameCacheBytes = 0;
     bool m_selectedFrameCacheByteLimited = false;
     int m_detailRequestGeneration = 0;

@@ -345,6 +345,9 @@ struct VideoAnalysisDetailPage {
     VideoAnalysisDetail detail;
     int totalFrameCount = 0;
     int nextFrameNumber = 0;
+    int framesThroughCursor = 0;
+    qint64 firstTimestampMs = 0;
+    qint64 lastTimestampMs = 0;
     bool hasMoreFrames = false;
 };
 

@@ -612,6 +612,49 @@ private slots:
         QCOMPARE(second.detail.frames.first().frameNumber, 61);
     }
 
+    void sparseFramesContinueBeyondEightSecondsAndReachLastPage()
+    {
+        GlobalDbFixture fixture;
+        QVERIFY2(fixture.valid, qPrintable(fixture.errorMessage));
+        SearchEngine searchEngine;
+        MaterialCenterQueryService service(&fixture.manager, &searchEngine);
+        QVERIFY(execSql(fixture.manager.database(), QStringLiteral("DELETE FROM video_frame_analysis WHERE video_key = 'video-1'")));
+        const QVector<int> sourceFrameNumbers{1, 11, 21, 31, 41, 51, 61, 65, 71, 81, 91, 101, 111, 121, 128, 131, 141, 151, 161, 171, 181, 191, 192, 201, 211, 221, 231, 241, 251, 255, 261, 271, 281, 291, 301, 311, 319, 321, 331, 341, 351, 361, 371, 381, 382, 391, 401, 411, 421, 431, 441, 446, 451, 461, 471, 481, 491, 501, 509, 511, 521, 531, 541, 551, 561, 571, 573, 581, 591, 601, 611, 621, 631, 636, 641, 651, 661, 671, 681, 691, 700, 701, 711, 721, 731, 741, 751, 761, 763, 771, 781, 791, 801, 811, 821, 827, 831, 841, 851, 861, 871, 881, 890, 891, 901, 911, 921, 931, 941, 951, 954, 961, 971, 981, 991, 1001, 1011, 1017, 1021, 1031, 1041, 1051, 1061, 1071, 1081, 1091, 1101, 1111, 1121, 1131, 1141, 1144, 1151, 1161, 1171, 1181, 1191, 1201, 1208, 1211, 1221, 1231, 1241, 1251, 1261, 1271, 1281, 1291, 1301, 1311, 1321, 1331, 1335, 1341, 1351, 1361, 1371, 1381, 1391, 1398, 1401, 1411, 1421, 1431, 1441, 1451, 1461, 1462};
+        QSqlQuery insert(fixture.manager.database());
+        insert.prepare(QStringLiteral(
+            "INSERT INTO video_frame_analysis (video_key, frame_number, timestamp_ms, image_path) "
+            "VALUES ('video-1', ?, ?, '')"));
+        for (const auto number : sourceFrameNumbers) {
+            insert.bindValue(0, number);
+            insert.bindValue(1, (number - 1) * 40);
+            QVERIFY2(insert.exec(), qPrintable(insert.lastError().text()));
+        }
+        auto page = service.fetchDetailPage(QStringLiteral("video-1"), 24);
+        QCOMPARE(page.totalFrameCount, 168);
+        QCOMPARE(page.framesThroughCursor, 24);
+        QCOMPARE(page.detail.frames.last().frameNumber, 201);
+        QCOMPARE(page.detail.frames.last().timestampMs, qint64{8000});
+        QCOMPARE(page.lastTimestampMs, qint64{58440});
+        QVERIFY(page.hasMoreFrames);
+        QVector<int> visited;
+        while (true) {
+            for (const auto &frame : page.detail.frames) visited.append(frame.frameNumber);
+            if (!page.hasMoreFrames) break;
+            const auto previousCursor = page.nextFrameNumber;
+            page = service.fetchDetailPage(QStringLiteral("video-1"), 24, previousCursor);
+            QVERIFY(page.nextFrameNumber > previousCursor);
+        }
+        QCOMPARE(visited, sourceFrameNumbers);
+        QCOMPARE(page.framesThroughCursor, 168);
+        QCOMPARE(page.detail.frames.last().timestampMs, qint64{58440});
+        const auto tail = service.fetchDetailPage(QStringLiteral("video-1"), 24, 0, -1, true);
+        QCOMPARE(tail.detail.frames.size(), 24);
+        QCOMPARE(tail.detail.frames.first().frameNumber, sourceFrameNumbers.at(144));
+        QCOMPARE(tail.detail.frames.last().frameNumber, 1462);
+        QCOMPARE(tail.framesThroughCursor, 168);
+        QVERIFY(!tail.hasMoreFrames);
+    }
+
     void readOnlyManager_opensIndependentQueryConnection()
     {
         GlobalDbFixture fixture;

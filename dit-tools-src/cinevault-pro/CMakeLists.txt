@@ -752,7 +752,8 @@ qt_add_qml_module(CineVault
         src/ui/qml/components/ThemedProgressBar.qml
         src/ui/qml/components/ThemedSlider.qml
         src/ui/qml/components/ThemedScrollBar.qml
-        src/ui/qml/components/MiddleDragScrollHandler.qml
+        src/ui/qml/components/PagedFrameList.qml
+    src/ui/qml/components/MiddleDragScrollHandler.qml
         src/ui/qml/components/ThemedMenu.qml
         src/ui/qml/components/ThemedMenuItem.qml
         src/ui/qml/components/ThemedMenuSeparator.qml
@@ -1088,6 +1089,13 @@ if(BUILD_TESTING)
             resources/websearch/app.js
     )
     add_test(NAME WebSearchServiceTest COMMAND WebSearchServiceTest)
+
+    find_package(Qt6 REQUIRED COMPONENTS QuickTest)
+    qt_add_executable(PagedFrameListTest tests/unit/PagedFrameListTest.cpp)
+    target_link_libraries(PagedFrameListTest PRIVATE Qt6::QuickTest)
+    add_test(NAME PagedFrameListTest COMMAND PagedFrameListTest
+        -input "${CMAKE_CURRENT_SOURCE_DIR}/tests/qml/tst_PagedFrameList.qml"
+        -o PagedFrameListTest-results.txt,txt)
 
     qt_add_executable(ReliabilityRecoveryTest
         tests/unit/ReliabilityRecoveryTest.cpp
@@ -1625,6 +1633,7 @@ if(BUILD_TESTING)
             AppSettingsSearchTest
             QuickSearchControllerTest
             WebSearchServiceTest
+            PagedFrameListTest
             VisualAnalysisMetadataTest
             FormattersTest
             FFmpegAdapterFrameExtractionTest
