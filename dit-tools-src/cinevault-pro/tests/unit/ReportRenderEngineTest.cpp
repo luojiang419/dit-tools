@@ -5,6 +5,7 @@
 #include <QFontDatabase>
 #include <QPdfDocument>
 #include <QPdfSelection>
+#include <QRegularExpression>
 #include <QTemporaryDir>
 #include <QtTest>
 
@@ -119,6 +120,185 @@ private slots:
         QVERIFY(pdf.getAllText(0).text().contains(QStringLiteral("当前项目没有视频元数据")));
     }
 
+    void coverAndSummaryShareFirstPage()
+    {
+        QTemporaryDir temp;
+        auto document = fixture();
+        document.sections = {true, true, false, false, false, false, false, false};
+        ReportRenderEngine engine;
+        QString error;
+        const auto path = temp.filePath(QStringLiteral("cover-summary.pdf"));
+        QVERIFY2(engine.renderPdf(document, path, &error), qPrintable(error));
+        QPdfDocument pdf;
+        QCOMPARE(pdf.load(path), QPdfDocument::Error::None);
+        QCOMPARE(pdf.pageCount(), 1);
+        const auto text = pdf.getAllText(0).text();
+        QVERIFY(text.contains(QStringLiteral("项目信息")));
+        QVERIFY(text.contains(QStringLiteral("项目摘要")));
+        QVERIFY(text.contains(QStringLiteral("警告")));
+        QStringList previews;
+        QVERIFY2(engine.renderPreviewImages(document, temp.filePath(QStringLiteral("preview")),
+                                           &previews, &error), qPrintable(error));
+        QCOMPARE(previews.size(), 1);
+    }
+
+    void shortAndEmptySectionsFlowOnOnePage()
+    {
+        QTemporaryDir temp;
+        ReportDocument document;
+        document.sections.cover = false;
+        document.sections.thumbnailIndex = false;
+        ReportRenderEngine engine;
+        QString error;
+        const auto path = temp.filePath(QStringLiteral("short-sections.pdf"));
+        QVERIFY2(engine.renderPdf(document, path, &error), qPrintable(error));
+        QPdfDocument pdf;
+        QCOMPARE(pdf.load(path), QPdfDocument::Error::None);
+        QCOMPARE(pdf.pageCount(), 1);
+        const auto text = pdf.getAllText(0).text();
+        for (const auto &label : {QStringLiteral("项目摘要"), QStringLiteral("素材源与扫描概览"),
+                                 QStringLiteral("格式分布"), QStringLiteral("视频元数据明细"),
+                                 QStringLiteral("音频元数据明细"), QStringLiteral("项目文件夹结构树状图")}) {
+            QCOMPARE(text.count(label), 1);
+        }
+        QVERIFY(text.contains(QStringLiteral("当前项目还没有可导出的文件树")));
+    }
+
+    void sectionBoundariesKeepTitlesWithContent_data()
+    {
+        QTest::addColumn<int>("sourceCount");
+        QTest::addColumn<int>("section");
+        // Sweep the preceding table through page-end positions, including
+        // enough room for a title/header alone but not its first data row.
+        for (int count = 15; count <= 29; ++count) {
+            for (int section = 0; section < 5; ++section) {
+                QTest::newRow(qPrintable(QStringLiteral("sources-%1-section-%2").arg(count).arg(section)))
+                    << count << section;
+            }
+        }
+    }
+
+    void audioAndTreeContinueWithoutLosingRows()
+    {
+        QTemporaryDir temp;
+        auto document = fixture();
+        auto audio = document.assets.first();
+        audio.assetType = AssetType::Audio;
+        document.assets.clear();
+        document.sections = {false, true, false, false, false, false, true, true};
+        for (int index = 0; index < 35; ++index) {
+            audio.name = QStringLiteral("Audio%1END.wav").arg(index);
+            document.assets.append(audio);
+        }
+        for (int index = 0; index < 100; ++index) {
+            document.treeLines.append({QStringLiteral("Tree%1END").arg(index), 1, false});
+        }
+        QString error;
+        ReportRenderEngine engine;
+        const auto path = QDir(qEnvironmentVariable("CINEVAULT_REPORT_TEST_OUTPUT", temp.path()))
+            .filePath(QStringLiteral("audio-tree.pdf"));
+        QVERIFY2(engine.renderPdf(document, path, &error), qPrintable(error));
+        QPdfDocument pdf;
+        QCOMPARE(pdf.load(path), QPdfDocument::Error::None);
+        QVERIFY(pdf.pageCount() > 2);
+        QString allText;
+        for (int page = 0; page < pdf.pageCount(); ++page) {
+            const auto text = pdf.getAllText(page).text();
+            if (text.contains(QStringLiteral("Audio"))) {
+                QVERIFY(text.contains(QStringLiteral("编码/流")));
+                QVERIFY(text.contains(QStringLiteral("相对路径")));
+            }
+            allText += text;
+        }
+        // PDFium may insert line breaks between glyphs in a dense file tree.
+        // Ignore extraction whitespace when checking unique ASCII row markers.
+        allText.remove(QRegularExpression(QStringLiteral("\\s+")));
+        for (int index = 0; index < 35; ++index) {
+            QCOMPARE(allText.count(QStringLiteral("Audio%1END").arg(index)), 1);
+        }
+        for (int index = 0; index < 100; ++index) {
+            const auto marker = QStringLiteral("Tree%1END").arg(index);
+            QVERIFY2(allText.count(marker) == 1, qPrintable(marker));
+        }
+        QStringList previews;
+        QVERIFY2(engine.renderPreviewImages(document, temp.filePath(QStringLiteral("preview")),
+                                           &previews, &error), qPrintable(error));
+        QCOMPARE(previews.size(), pdf.pageCount());
+    }
+
+    void noSelectedSectionsProducesSingleExplanationPage()
+    {
+        QTemporaryDir temp;
+        ReportDocument document;
+        document.sections = {false, false, false, false, false, false, false, false};
+        QString error;
+        ReportRenderEngine engine;
+        const auto path = temp.filePath(QStringLiteral("none.pdf"));
+        QVERIFY2(engine.renderPdf(document, path, &error), qPrintable(error));
+        QPdfDocument pdf;
+        QCOMPARE(pdf.load(path), QPdfDocument::Error::None);
+        QCOMPARE(pdf.pageCount(), 1);
+        QVERIFY(pdf.getAllText(0).text().contains(QStringLiteral("未选择任何报表项")));
+    }
+
+    void sectionBoundariesKeepTitlesWithContent()
+    {
+        QFETCH(int, sourceCount);
+        QFETCH(int, section);
+        QTemporaryDir temp;
+        auto document = fixture();
+        document.assets = {document.assets.at(1)}; // Tall first row: wrapped name/path.
+        document.sections = {false, false, true, false, section == 0, section == 1,
+                             section == 2, section >= 3};
+        for (int index = 0; index < sourceCount; ++index) {
+            ReportSourceSummary source;
+            source.name = QStringLiteral("Source%1END").arg(index);
+            source.path = QStringLiteral("D:/Source%1").arg(index);
+            document.sources.append(source);
+        }
+        if (section == 2) {
+            document.assets[0].assetType = AssetType::Audio;
+        }
+        if (section == 3) {
+            document.treeLines = {{QStringLiteral("TreeFirstRow"), 0, true}};
+        }
+        const QStringList titles = {QStringLiteral("视频缩略图索引"), QStringLiteral("视频元数据明细"),
+            QStringLiteral("音频元数据明细"), QStringLiteral("项目文件夹结构树状图"),
+            QStringLiteral("项目文件夹结构树状图")};
+        const QStringList bodies = {QStringLiteral("Clip02_"), QStringLiteral("Clip02_"),
+            QStringLiteral("Clip02_"), QStringLiteral("TreeFirstRow"),
+            QStringLiteral("当前项目还没有可导出的文件树")};
+        ReportRenderEngine engine;
+        QString error;
+        const auto path = temp.filePath(QStringLiteral("boundary.pdf"));
+        QVERIFY2(engine.renderPdf(document, path, &error), qPrintable(error));
+        QPdfDocument pdf;
+        QCOMPARE(pdf.load(path), QPdfDocument::Error::None);
+        QString allText;
+        for (int page = 0; page < pdf.pageCount(); ++page) {
+            const auto text = pdf.getAllText(page).text();
+            if (text.contains(titles.at(section))) {
+                QVERIFY2(text.contains(bodies.at(section)), qPrintable(text));
+            }
+            if (text.contains(QStringLiteral("容量"))) {
+                QVERIFY2(text.contains(QStringLiteral("Source")), qPrintable(text));
+            }
+            if (text.contains(QStringLiteral("Source"))) {
+                QVERIFY2(text.contains(QStringLiteral("容量")), qPrintable(text));
+                QVERIFY(text.contains(QStringLiteral("路径")));
+            }
+            allText += text;
+        }
+        QVERIFY(allText.contains(titles.at(section)));
+        for (int index = 0; index < sourceCount; ++index) {
+            QCOMPARE(allText.count(QStringLiteral("Source%1END").arg(index)), 1);
+        }
+        QStringList previews;
+        QVERIFY2(engine.renderPreviewImages(document, temp.filePath(QStringLiteral("preview")),
+                                           &previews, &error), qPrintable(error));
+        QCOMPARE(previews.size(), pdf.pageCount());
+    }
+
     void fullReportKeepsAllSectionsAndMatchingPreviews()
     {
         QTemporaryDir temp;
@@ -151,6 +331,7 @@ private slots:
         QVERIFY2(engine.renderPdf(document, path, &error), qPrintable(error));
         QPdfDocument pdf;
         QCOMPARE(pdf.load(path), QPdfDocument::Error::None);
+        QVERIFY2(pdf.pageCount() <= 6, qPrintable(QString::number(pdf.pageCount())));
         QString text;
         for (int page = 0; page < pdf.pageCount(); ++page) {
             text += pdf.getAllText(page).text();

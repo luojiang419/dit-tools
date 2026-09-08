@@ -22,6 +22,9 @@ namespace {
 constexpr qreal kHeaderHeight = 82.0;
 constexpr qreal kFooterHeight = 34.0;
 constexpr qreal kSectionGap = 18.0;
+constexpr qreal kSectionTitleHeight = 54.0;
+constexpr qreal kTableHeaderHeight = 30.0;
+constexpr qreal kVideoTableHeaderHeight = 34.0;
 
 QString valueOrUnset(const QString &value)
 {
@@ -188,10 +191,10 @@ public:
         }
 
         const auto drawSection = [this, &hasContent](const QString &title, const auto &draw) {
+            m_currentTitle = title;
             if (hasContent) {
-                nextPage(title);
+                m_y += kSectionGap;
             } else {
-                m_currentTitle = title;
                 drawHeader(title);
             }
             draw();
@@ -355,6 +358,7 @@ private:
 
     void drawHeader(const QString &title)
     {
+        m_pageTitle = title;
         const auto header = QRectF(m_pageRect.left(), m_pageRect.top(), m_pageRect.width(), kHeaderHeight);
         m_painter.fillRect(header, QColor("#172033"));
         m_painter.fillRect(QRectF(header.left(), header.bottom() - 5, header.width(), 5), QColor("#2F6FE0"));
@@ -450,9 +454,18 @@ private:
         }
     }
 
-    void drawSectionTitle(const QString &title, const QString &subtitle = {})
+    void drawSectionTitle(const QString &title, const QString &subtitle = {}, qreal firstContentHeight = 0)
     {
-        ensureSpace(52);
+        // A title must travel with the first row/card. On a fresh page the
+        // running header already identifies the section, so do not repeat it.
+        const auto needsTitle = [this, &title, &subtitle]() {
+            return !subtitle.isEmpty() || m_pageTitle != title
+                || m_y > m_pageRect.top() + kHeaderHeight + kSectionGap;
+        };
+        ensureSpace((needsTitle() ? kSectionTitleHeight : 0) + firstContentHeight);
+        if (!needsTitle()) {
+            return;
+        }
         m_painter.setPen(QColor("#111827"));
         m_painter.setFont(font(15, QFont::DemiBold));
         m_painter.drawText(QRectF(m_pageRect.left(), m_y, m_pageRect.width(), 26), Qt::AlignLeft | Qt::AlignVCenter, title);
@@ -464,7 +477,7 @@ private:
                                Qt::AlignLeft | Qt::AlignVCenter,
                                subtitle);
         }
-        m_y += 54;
+        m_y += kSectionTitleHeight;
     }
 
     void drawCard(const QRectF &rect, const QString &label, const QString &value, const QColor &accent = QColor("#2F6FE0"))
@@ -562,7 +575,7 @@ private:
 
     void drawSummary()
     {
-        drawSectionTitle(QStringLiteral("项目摘要"));
+        drawSectionTitle(QStringLiteral("项目摘要"), {}, 72);
         const qreal gap = 14;
         const qreal width = (m_pageRect.width() - gap * 4) / 5.0;
         drawCard(QRectF(m_pageRect.left(), m_y, width, 72), QStringLiteral("视频"), QString::number(m_document.videoCount));
@@ -579,11 +592,21 @@ private:
 
     void drawSourceTable()
     {
-        drawSectionTitle(QStringLiteral("素材源与扫描概览"));
-        drawTableHeader({QStringLiteral("素材源"), QStringLiteral("状态"), QStringLiteral("文件"), QStringLiteral("视频"), QStringLiteral("音频"), QStringLiteral("容量"), QStringLiteral("路径")},
-                        {0.18, 0.10, 0.09, 0.08, 0.08, 0.12, 0.35});
+        drawSectionTitle(QStringLiteral("素材源与扫描概览"), {},
+                         m_document.sources.isEmpty() ? 56 : kTableHeaderHeight + 34);
+        if (m_document.sources.isEmpty()) {
+            drawEmptyBlock(QStringLiteral("当前项目还没有素材源。"));
+            return;
+        }
+        const auto drawSourceHeader = [this]() {
+            drawTableHeader({QStringLiteral("素材源"), QStringLiteral("状态"), QStringLiteral("文件"), QStringLiteral("视频"), QStringLiteral("音频"), QStringLiteral("容量"), QStringLiteral("路径")},
+                            {0.18, 0.10, 0.09, 0.08, 0.08, 0.12, 0.35});
+        };
+        drawSourceHeader();
         for (const auto &source : m_document.sources) {
-            ensureSpace(38);
+            if (ensureSpace(34)) {
+                drawSourceHeader();
+            }
             const auto rect = QRectF(m_pageRect.left(), m_y, m_pageRect.width(), 34);
             m_painter.fillRect(rect, QColor("#FFFFFF"));
             m_painter.setPen(QPen(QColor("#E2E8F0"), 1));
@@ -601,16 +624,13 @@ private:
                         1);
             m_y += 34;
         }
-        if (m_document.sources.isEmpty()) {
-            drawEmptyBlock(QStringLiteral("当前项目还没有素材源。"));
-        }
         m_y += 22;
     }
 
     void drawExtensionDistribution()
     {
-        drawSectionTitle(QStringLiteral("格式分布"));
         const auto rows = extensionDistribution(m_document);
+        drawSectionTitle(QStringLiteral("格式分布"), {}, rows.isEmpty() ? 56 : 28);
         if (rows.isEmpty()) {
             drawEmptyBlock(QStringLiteral("暂无素材格式统计。"));
             return;
@@ -633,8 +653,9 @@ private:
 
     void drawThumbnailIndex()
     {
-        drawSectionTitle(QStringLiteral("视频缩略图索引"), QStringLiteral("每个视频使用当前缓存帧；缺失时绘制占位图"));
         const auto videos = assetsByType(m_document, AssetType::Video);
+        drawSectionTitle(QStringLiteral("视频缩略图索引"), QStringLiteral("每个视频使用当前缓存帧；缺失时绘制占位图"),
+                         videos.isEmpty() ? 56 : 190);
         if (videos.isEmpty()) {
             drawEmptyBlock(QStringLiteral("当前项目没有视频素材。"));
             return;
@@ -647,7 +668,7 @@ private:
         int column = 0;
         for (const auto &video : videos) {
             if (column == 0) {
-                ensureSpace(cardHeight + 8);
+                ensureSpace(cardHeight);
             }
             const QRectF card(m_pageRect.left() + column * (cardWidth + gap), m_y, cardWidth, cardHeight);
             drawThumbnailCard(card, video);
@@ -679,14 +700,13 @@ private:
 
     void drawVideoMetadata()
     {
-        // The running page header already names this section.
         const auto videos = assetsByType(m_document, AssetType::Video);
         if (videos.isEmpty()) {
+            drawSectionTitle(QStringLiteral("视频元数据明细"), {}, 56);
             drawEmptyBlock(QStringLiteral("当前项目没有视频元数据。"));
             return;
         }
 
-        drawVideoTableHeader();
         int index = 1;
         for (const auto &video : videos) {
             const auto nameFont = font(9.0, QFont::DemiBold);
@@ -751,7 +771,10 @@ private:
                 : videoTextHeight(QStringLiteral("异常  ") + video.metadataError,
                     m_pageRect.width() * 0.82 - 20, detailFont, 2) + 12;
             const qreal rowHeight = bodyHeight + errorHeight;
-            if (ensureSpace(rowHeight)) {
+            if (index == 1) {
+                drawSectionTitle(QStringLiteral("视频元数据明细"), {}, kVideoTableHeaderHeight + rowHeight);
+                drawVideoTableHeader();
+            } else if (ensureSpace(rowHeight)) {
                 drawVideoTableHeader();
             }
             const QRectF rect(m_pageRect.left(), m_y, m_pageRect.width(), rowHeight);
@@ -799,8 +822,11 @@ private:
 
     void drawAudioMetadata()
     {
-        drawSectionTitle(QStringLiteral("音频元数据明细"));
         const auto audios = assetsByType(m_document, AssetType::Audio);
+        const qreal rowHeight = std::max(qreal(42),
+            2 * (QFontMetricsF(font(8.1), m_painter.device()).height() + 2) + 10);
+        drawSectionTitle(QStringLiteral("音频元数据明细"), {},
+                         audios.isEmpty() ? 56 : kTableHeaderHeight + rowHeight);
         if (audios.isEmpty()) {
             drawEmptyBlock(QStringLiteral("当前项目没有音频素材。"));
             return;
@@ -808,8 +834,6 @@ private:
 
         drawTableHeader({QStringLiteral("序号"), QStringLiteral("文件名"), QStringLiteral("时长"), QStringLiteral("编码/流"), QStringLiteral("码率"), QStringLiteral("大小"), QStringLiteral("相对路径")},
                         {0.06, 0.18, 0.10, 0.20, 0.10, 0.10, 0.26});
-        const qreal rowHeight = std::max(qreal(42),
-            2 * (QFontMetricsF(font(8.1), m_painter.device()).height() + 2) + 10);
         int index = 1;
         for (const auto &audio : audios) {
             if (ensureSpace(rowHeight)) {
@@ -839,7 +863,8 @@ private:
 
     void drawFolderTree()
     {
-        drawSectionTitle(QStringLiteral("项目文件夹结构树状图"));
+        drawSectionTitle(QStringLiteral("项目文件夹结构树状图"), {},
+                         m_document.treeLines.isEmpty() ? 56 : 21);
         if (m_document.treeLines.isEmpty()) {
             drawEmptyBlock(QStringLiteral("当前项目还没有可导出的文件树。"));
             return;
@@ -868,7 +893,7 @@ private:
 
     void drawEmptyBlock(const QString &message)
     {
-        ensureSpace(68);
+        ensureSpace(56);
         const QRectF rect(m_pageRect.left(), m_y, m_pageRect.width(), 56);
         m_painter.fillRect(rect, QColor("#F8FAFC"));
         m_painter.setPen(QPen(QColor("#D7DEE9"), 1));
@@ -928,19 +953,18 @@ private:
 
     void drawTableHeader(const QStringList &labels, const QVector<qreal> &widthRatios)
     {
-        ensureSpace(34);
-        const QRectF rect(m_pageRect.left(), m_y, m_pageRect.width(), 30);
+        // Callers reserve the header together with the first data row.
+        const QRectF rect(m_pageRect.left(), m_y, m_pageRect.width(), kTableHeaderHeight);
         m_painter.fillRect(rect, QColor("#EAF1FF"));
         m_painter.setPen(QPen(QColor("#C7D2FE"), 1));
         m_painter.drawRect(rect);
         drawRowText(rect, labels, widthRatios, 1, font(8.2, QFont::DemiBold), QColor("#1E3A8A"));
-        m_y += 30;
+        m_y += kTableHeaderHeight;
     }
 
     void drawVideoTableHeader()
     {
-        ensureSpace(190);
-        const QRectF rect(m_pageRect.left(), m_y, m_pageRect.width(), 34);
+        const QRectF rect(m_pageRect.left(), m_y, m_pageRect.width(), kVideoTableHeaderHeight);
         m_painter.fillRect(rect, QColor("#EAF0FF"));
         const QStringList labels = {QStringLiteral("序号"), QStringLiteral("预览"),
             QStringLiteral("文件信息"), QStringLiteral("画面参数"), QStringLiteral("时长与音频")};
@@ -981,6 +1005,7 @@ private:
     QString m_fontFamily;
     QRectF m_pageRect;
     QString m_currentTitle;
+    QString m_pageTitle;
     qreal m_y = 0.0;
     int m_pageNumber = 1;
 };
