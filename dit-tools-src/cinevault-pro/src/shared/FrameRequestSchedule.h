@@ -5,7 +5,7 @@
 
 class FrameRequestSchedule {
 public:
-    static constexpr int MaximumConcurrency = 8;
+    static constexpr int MaximumConcurrency = 200;
 
     QVector<int> takeNext(const QVector<FrameAnalysisRecord> &frames, int limit, int profileVersion)
     {

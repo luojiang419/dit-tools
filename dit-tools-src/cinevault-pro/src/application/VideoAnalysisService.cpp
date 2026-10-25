@@ -51,6 +51,7 @@ struct AnalysisConfig {
     QString baseUrl;
     QString apiKey;
     QString model;
+    int concurrency = 8;
     VideoFrameExtractionStrategy extractionStrategy = VideoFrameExtractionStrategy::SceneAndInterval;
     double frameIntervalSeconds = 1.0;
     double sceneThreshold = 0.3;
@@ -1419,6 +1420,13 @@ AnalysisConfig loadConfig(const AppSettings *settings)
     config.baseUrl = settings->visionBaseUrl();
     config.apiKey = settings->visionApiKey();
     config.model = settings->visionModel();
+    const auto activeConfigs = settings->visionApiConfigs();
+    for (const auto &apiConfig : activeConfigs) {
+        if (apiConfig.id == settings->activeVisionApiConfigId()) {
+            config.concurrency = apiConfig.concurrency;
+            break;
+        }
+    }
     config.extractionStrategy = settings->videoFrameExtractionStrategy();
     config.frameIntervalSeconds = settings->videoFrameIntervalSeconds();
     config.sceneThreshold = settings->videoSceneThreshold();
@@ -3266,7 +3274,7 @@ void VideoAnalysisService::startNextAnalysis()
                                                       QStringLiteral("跳过 %1 帧").arg(task.skippedFrames)));
             }
 
-            const auto maxFrameRequests = qMin(FrameRequestSchedule::MaximumConcurrency, VisionApiClient::maxConcurrentFrameRequests(config.model));
+            const auto maxFrameRequests = qBound(1, qMin(FrameRequestSchedule::MaximumConcurrency, config.concurrency), FrameRequestSchedule::MaximumConcurrency);
             if (maxFrameRequests > 1) {
                 QThreadPool requestPool;
                 requestPool.setMaxThreadCount(maxFrameRequests);
@@ -3353,7 +3361,7 @@ void VideoAnalysisService::startNextAnalysis()
                             ? 10 + ((static_cast<qint64>(task.completedFrames) * 75) / task.totalFrames)
                             : 10;
                         updateRunning(progress,
-                                      QStringLiteral("正在解析视频帧（MiniMax-M3，最多 %1 并发），已完成 %2/%3，成功 %4 帧，跳过 %5 帧")
+                                      QStringLiteral("正在解析视频帧（最多 %1 并发），已完成 %2/%3，成功 %4 帧，跳过 %5 帧")
                                           .arg(maxFrameRequests)
                                           .arg(task.completedFrames)
                                           .arg(task.totalFrames)

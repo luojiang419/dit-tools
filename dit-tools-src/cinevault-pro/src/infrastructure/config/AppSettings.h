@@ -14,6 +14,7 @@ struct VisionApiConfig {
     QString baseUrl;
     QString apiKey;
     QString model;
+    int concurrency = 8;
 };
 
 class AppSettings {

@@ -211,6 +211,7 @@ QList<VisionApiConfig> normalizedVisionApiConfigs(const QList<VisionApiConfig> &
         if (config.model.isEmpty()) {
             config.model = QStringLiteral("gpt-4.1-mini");
         }
+        config.concurrency = qBound(1, config.concurrency > 0 ? config.concurrency : 8, 200);
         normalized.append(config);
         if (normalized.size() >= kMaximumConfigCount) {
             break;
@@ -237,7 +238,8 @@ QList<VisionApiConfig> storedVisionApiConfigs(QSettings *settings)
                         object.value(QStringLiteral("name")).toString(),
                         object.value(QStringLiteral("baseUrl")).toString(),
                         {},
-                        object.value(QStringLiteral("model")).toString()});
+                        object.value(QStringLiteral("model")).toString(),
+                        object.value(QStringLiteral("concurrency")).toInt(8)});
     }
     return normalizedVisionApiConfigs(configs);
 }
@@ -485,7 +487,8 @@ void AppSettings::setVisionApiConfigs(const QList<VisionApiConfig> &configs,
         serialized.append(QJsonObject{{QStringLiteral("id"), config.id},
                                       {QStringLiteral("name"), config.name},
                                       {QStringLiteral("baseUrl"), config.baseUrl},
-                                      {QStringLiteral("model"), config.model}});
+                                      {QStringLiteral("model"), config.model},
+                                      {QStringLiteral("concurrency"), config.concurrency}});
         if (config.apiKey.isEmpty()) {
             WindowsCredentialStore::remove(visionApiConfigCredentialTarget(config.id));
         } else {

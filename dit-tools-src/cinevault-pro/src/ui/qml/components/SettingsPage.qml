@@ -81,7 +81,8 @@ Item {
                 name: config.name,
                 baseUrl: config.baseUrl,
                 apiKey: config.apiKey,
-                model: config.model
+                model: config.model,
+                concurrency: config.concurrency > 0 ? config.concurrency : 8
             })
         }
         return copies
@@ -143,6 +144,7 @@ Item {
         visionConfigDialog.baseUrlValue = config ? config.baseUrl : ""
         visionConfigDialog.apiKeyValue = config ? config.apiKey : ""
         visionConfigDialog.modelValue = config ? config.model : "gpt-4.1-mini"
+        visionConfigDialog.concurrencyValue = config && config.concurrency > 0 ? config.concurrency : 8
         visionConfigDialog.editing = config !== null
         visionConfigDialog.open()
     }
@@ -1316,6 +1318,7 @@ Item {
         property string baseUrlValue: ""
         property string apiKeyValue: ""
         property string modelValue: "gpt-4.1-mini"
+        property int concurrencyValue: 8
 
         onOpened: {
             apiKeyVisible = false
@@ -1419,6 +1422,17 @@ Item {
                 onTextEdited: visionConfigDialog.modelValue = text
             }
 
+            Text { text: "并发解析数"; color: Theme.muted; font.pixelSize: 13 }
+            SpinBox {
+                id: visionConcurrencyField
+                Layout.fillWidth: true
+                from: 1
+                to: 200
+                value: visionConfigDialog.concurrencyValue
+                editable: true
+                onValueChanged: visionConfigDialog.concurrencyValue = value
+            }
+
             Text {
                 Layout.fillWidth: true
                 visible: visionConfigDialog.modelValue.trim().toLowerCase() === "minimax-m3"
@@ -1454,7 +1468,8 @@ Item {
                             baseUrl: visionConfigDialog.baseUrlValue.trim(),
                             apiKey: visionConfigDialog.apiKeyValue.trim(),
                             model: visionConfigDialog.modelValue.trim().length > 0
-                                ? visionConfigDialog.modelValue.trim() : "gpt-4.1-mini"
+                                ? visionConfigDialog.modelValue.trim() : "gpt-4.1-mini",
+                            concurrency: Math.max(1, Math.min(200, visionConfigDialog.concurrencyValue))
                         })
                         visionConfigDialog.close()
                     }

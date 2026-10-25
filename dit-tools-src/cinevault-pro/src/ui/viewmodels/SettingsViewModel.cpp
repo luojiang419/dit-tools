@@ -74,7 +74,8 @@ QVariantList toVariantList(const QList<VisionApiConfig> &configs)
                                   {QStringLiteral("name"), config.name},
                                   {QStringLiteral("baseUrl"), config.baseUrl},
                                   {QStringLiteral("apiKey"), config.apiKey},
-                                  {QStringLiteral("model"), config.model}});
+                                  {QStringLiteral("model"), config.model},
+                                  {QStringLiteral("concurrency"), config.concurrency}});
     }
     return values;
 }
@@ -89,7 +90,9 @@ QList<VisionApiConfig> toVisionApiConfigs(const QVariantList &values)
                         map.value(QStringLiteral("name")).toString(),
                         map.value(QStringLiteral("baseUrl")).toString(),
                         map.value(QStringLiteral("apiKey")).toString(),
-                        map.value(QStringLiteral("model")).toString()});
+                        map.value(QStringLiteral("model")).toString(),
+                        map.value(QStringLiteral("concurrency")).isValid()
+                            ? map.value(QStringLiteral("concurrency")).toInt() : 8});
     }
     return configs;
 }
