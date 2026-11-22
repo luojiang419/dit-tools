@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "searchConfiguration": {
+    "searchIndexSchemaVersion": 1,
+    "structuredVisionProfileVersion": 2,
+    "samplingPolicy": "fixed_interval",
+    "embeddingModelId": "BAAI/bge-small-zh-v1.5",
+    "embeddingDimensions": 512,
+    "embeddingMaxTokens": 512
+  },
+  "dependencies": {
+    "onnxRuntime": {
+      "version": "1.27.1",
+      "license": "MIT"
+    },
+    "usearch": {
+      "version": "2.26.0",
+      "commit": "cc23bbaf21ef52313c5a495adbc40cbd733cdcfb",
+      "license": "Apache-2.0"
+    },
+    "embeddingModel": {
+      "upstreamId": "BAAI/bge-small-zh-v1.5",
+      "upstreamRevision": "7999e1d3359715c523056ef9478215996d62a620",
+      "artifactId": "Xenova/bge-small-zh-v1.5",
+      "artifactRevision": "75c43b069aac4d136ba6bc1122f995fedcfd2781",
+      "license": "MIT"
+    }
+  },
+  "artifacts": [
+    {
+      "id": "onnxruntime-windows-x64-cpu",
+      "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.27.1/onnxruntime-win-x64-1.27.1.zip",
+      "installPath": "archives/onnxruntime-win-x64-1.27.1.zip",
+      "size": 77242362,
+      "sha256": "2E00414A63FDEF0914CD5A5EDE6C707844878E0C08E1B6693842F0451B2DF2A1"
+    },
+    {
+      "id": "usearch-source",
+      "url": "https://github.com/unum-cloud/USearch/archive/cc23bbaf21ef52313c5a495adbc40cbd733cdcfb.tar.gz",
+      "installPath": "archives/usearch-cc23bbaf21ef52313c5a495adbc40cbd733cdcfb.tar.gz",
+      "size": 498164,
+      "sha256": "A21C05230466D1C9F1C0149ADD726B9C24A5DB70672A065C14ED1B3BD57F086A"
+    },
+    {
+      "id": "bge-small-zh-v1.5-model-quantized",
+      "url": "https://huggingface.co/Xenova/bge-small-zh-v1.5/resolve/75c43b069aac4d136ba6bc1122f995fedcfd2781/onnx/model_quantized.onnx",
+      "installPath": "models/bge-small-zh-v1.5/onnx/model_quantized.onnx",
+      "size": 24010842,
+      "sha256": "15B717C382BCB518BA457B93EA6850EDE7F4F1CD8937454AA06972366CD19BCC"
+    },
+    {
+      "id": "bge-small-zh-v1.5-tokenizer",
+      "url": "https://huggingface.co/Xenova/bge-small-zh-v1.5/resolve/75c43b069aac4d136ba6bc1122f995fedcfd2781/tokenizer.json",
+      "installPath": "models/bge-small-zh-v1.5/tokenizer.json",
+      "size": 439125,
+      "sha256": "48CEA5D44424912A6FD1EA647BF4FE50B55AB8B1E5879C3275F80E339E8FAE26"
+    },
+    {
+      "id": "bge-small-zh-v1.5-tokenizer-config",
+      "url": "https://huggingface.co/Xenova/bge-small-zh-v1.5/resolve/75c43b069aac4d136ba6bc1122f995fedcfd2781/tokenizer_config.json",
+      "installPath": "models/bge-small-zh-v1.5/tokenizer_config.json",
+      "size": 367,
+      "sha256": "E6F3B96DB926A37D4039995FBF5AD17DE158DFB8F6343D607E4DBAAD18D75F5A"
+    },
+    {
+      "id": "bge-small-zh-v1.5-vocabulary",
+      "url": "https://huggingface.co/Xenova/bge-small-zh-v1.5/resolve/75c43b069aac4d136ba6bc1122f995fedcfd2781/vocab.txt",
+      "installPath": "models/bge-small-zh-v1.5/vocab.txt",
+      "size": 109540,
+      "sha256": "45BBAC6B341C319ADC98A532532882E91A9CEFC0329AA57BAC9AE761C27B291C"
+    },
+    {
+      "id": "bge-small-zh-v1.5-config",
+      "url": "https://huggingface.co/Xenova/bge-small-zh-v1.5/resolve/75c43b069aac4d136ba6bc1122f995fedcfd2781/config.json",
+      "installPath": "models/bge-small-zh-v1.5/config.json",
+      "size": 716,
+      "sha256": "D4193EAD3A810FD694FA8A31D7FC72FBAEBC0668B603E398734BF2F6538FF42F"
+    },
+    {
+      "id": "bge-small-zh-v1.5-special-tokens",
+      "url": "https://huggingface.co/Xenova/bge-small-zh-v1.5/resolve/75c43b069aac4d136ba6bc1122f995fedcfd2781/special_tokens_map.json",
+      "installPath": "models/bge-small-zh-v1.5/special_tokens_map.json",
+      "size": 125,
+      "sha256": "B6D346BE366A7D1D48332DBC9FDF3BF8960B5D879522B7799DDBA59E76237EE3"
+    }
+  ]
+}

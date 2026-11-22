@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow,noarchive">
+  <meta name="theme-color" content="#0e1014">
+  <title>赞助审核｜影资管家</title>
+  <link rel="icon" href="assets/logo.png">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="sponsors-admin.css">
+</head>
+<body>
+  <div class="ambient" aria-hidden="true"><span class="ambient__orb ambient__orb--blue"></span><span class="ambient__grid"></span></div>
+  <main class="admin-shell section-shell">
+    <header class="admin-header"><a class="brand" href="index.html"><img class="brand__logo" src="assets/logo.png" alt=""><span class="brand__copy"><strong>影资管家</strong><small>赞助审核</small></span></a><a href="sponsors.html">查看公开赞助榜 ↗</a></header>
+
+    <section class="admin-login" data-admin-login>
+      <span class="section-kicker">管理员入口</span><h1>赞助记录审核</h1><p>令牌只保存在当前标签页的会话存储中，关闭标签页后自动清除。</p>
+      <form data-admin-login-form><label>管理员令牌<input type="password" data-admin-token required autocomplete="off" placeholder="输入服务器配置的管理员令牌"></label><button class="button button--primary button--large" type="submit">验证并进入</button></form>
+      <p class="admin-status" data-admin-login-status role="status"></p>
+    </section>
+
+    <section class="admin-workspace" data-admin-workspace hidden>
+      <header><div><span class="section-kicker">赞助审核</span><h1>核实到账后再公开</h1><p data-admin-summary>正在加载…</p></div><div><button class="button button--secondary" type="button" data-admin-refresh>刷新</button><button class="button button--secondary" type="button" data-admin-logout>退出</button></div></header>
+      <nav class="admin-tabs" aria-label="记录状态"><button class="is-active" type="button" data-admin-status="pending">待确认</button><button type="button" data-admin-status="confirmed">已确认</button><button type="button" data-admin-status="rejected">已拒绝</button></nav>
+      <div class="admin-claims" data-admin-claims></div>
+    </section>
+  </main>
+  <script src="sponsors-admin.js" defer></script>
+</body>
+</html>

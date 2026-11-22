@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "dependencies": {
+    "exifTool": {
+      "name": "ExifTool",
+      "version": "13.59",
+      "license": "Artistic-1.0-or-GPL-1.0-or-later"
+    }
+  },
+  "artifacts": [
+    {
+      "id": "exiftool-windows-x64",
+      "url": "https://master.dl.sourceforge.net/project/exiftool/exiftool-13.59_64.zip?viasf=1",
+      "installPath": "archives/exiftool-13.59_64.zip",
+      "size": 11183675,
+      "sha256": "44B512B25AF500724BA579D0A53C8FC5851628B692DD5E5D94AE4A15C2CBA9EC"
+    }
+  ]
+}

@@ -1,0 +1,496 @@
+name: Windows 自动发布
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - "codex/**"
+    paths-ignore:
+      - "**/*.md"
+      - "backup/**"
+      - "docs/**"
+      - "services/**"
+      - "tools-web/**"
+      - "进度快照/**"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cinevault-windows-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  release-windows:
+    name: 构建、测试并发布 Windows 安装包
+    runs-on: windows-2022
+    timeout-minutes: 300
+    env:
+      GH_TOKEN: ${{ github.token }}
+      QT_VERSION: "6.6.3"
+      QT_ARCH: win64_msvc2019_64
+      QT_ROOT: C:\Qt\6.6.3\msvc2019_64
+      INNO_SETUP_VERSION: "6.7.1"
+      FFMPEG_VERSION: "8.1.2"
+      FFMPEG_SHA256: db580001caa24ac104c8cb856cd113a87b0a443f7bdf47d8c12b1d740584a2ec
+      ACTIONLINT_VERSION: "1.7.12"
+      ACTIONLINT_SHA256: 6e7241b51e6817ea6a047693d8e6fed13b31819c9a0dd6c5a726e1592d22f6e9
+
+    steps:
+      - name: 检出完整源码和标签
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: 验证版本算法
+        run: ./tool/test_release_version.ps1
+
+      - name: 验证 Windows 工具链路径解析
+        run: ./tool/test_windows_toolchain.ps1
+
+      - name: 验证无 Qwen 发布包门禁
+        run: ./tool/test_model_free_payload.ps1
+
+      - name: 验证 GitHub Actions 工作流
+        run: |
+          $archiveName = "actionlint_$env:ACTIONLINT_VERSION`_windows_amd64.zip"
+          $archivePath = Join-Path $env:RUNNER_TEMP $archiveName
+          $extractPath = Join-Path $env:RUNNER_TEMP "actionlint-$env:ACTIONLINT_VERSION"
+          $downloadUrl = "https://github.com/rhysd/actionlint/releases/download/v$env:ACTIONLINT_VERSION/$archiveName"
+          curl.exe --fail --location --retry 4 --retry-all-errors --output $archivePath $downloadUrl
+          if ($LASTEXITCODE -ne 0) {
+              throw "actionlint 下载失败。"
+          }
+          $actualSha256 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualSha256 -ne $env:ACTIONLINT_SHA256) {
+              throw "actionlint SHA-256 校验失败。"
+          }
+          Expand-Archive -LiteralPath $archivePath -DestinationPath $extractPath -Force
+          & (Join-Path $extractPath "actionlint.exe")
+          if ($LASTEXITCODE -ne 0) {
+              throw "GitHub Actions 工作流语法或语义校验失败。"
+          }
+
+      - name: 计算下一个正式版本
+        id: version
+        run: ./tool/resolve_release_version.ps1
+
+      - name: 确定构建与发布范围
+        id: scope
+        run: |
+          $isProduction = $env:GITHUB_REF -ceq "refs/heads/main"
+          $shouldBuild = $isProduction `
+              ? ("${{ steps.version.outputs.should_publish }}" -ceq "true") `
+              : $true
+          "is_production=$($isProduction.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "should_build=$($shouldBuild.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: 写入唯一版本源并触发发布提交
+        if: steps.scope.outputs.is_production == 'true' && steps.version.outputs.version_bump_required == 'true'
+        run: |
+          $appVersion = "${{ steps.version.outputs.app_version }}"
+          $versionTag = "${{ steps.version.outputs.version_tag }}"
+          Set-Content -LiteralPath VERSION -Value $appVersion -Encoding ASCII -NoNewline
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- VERSION
+          git commit -m "chore(release): $versionTag"
+          if ($LASTEXITCODE -ne 0) {
+              throw "版本源提交失败。"
+          }
+          git push origin "HEAD:${{ github.ref_name }}"
+          if ($LASTEXITCODE -ne 0) {
+              throw "版本源推送失败，可能存在并发 push，请重试。"
+          }
+
+      - name: 恢复 Qt 缓存
+        if: steps.scope.outputs.should_build == 'true'
+        id: qt-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: C:\Qt\6.6.3\msvc2019_64
+          key: qt-${{ runner.os }}-${{ env.QT_VERSION }}-${{ env.QT_ARCH }}-pdf-multimedia-websockets-v1
+
+      - name: 安装并验证 Qt
+        if: steps.scope.outputs.should_build == 'true'
+        run: |
+          $qtConfig = Join-Path $env:QT_ROOT "lib\cmake\Qt6\Qt6Config.cmake"
+          if (-not (Test-Path -LiteralPath $qtConfig -PathType Leaf)) {
+              $qtVersionRoot = Split-Path -Parent $env:QT_ROOT
+              if (Test-Path -LiteralPath $qtVersionRoot) {
+                  Remove-Item -LiteralPath $qtVersionRoot -Recurse -Force
+              }
+
+              python -m pip install --disable-pip-version-check "aqtinstall==3.3.0"
+              if ($LASTEXITCODE -ne 0) {
+                  throw "aqtinstall 安装失败。"
+              }
+
+              $qtArchiveRoot = Join-Path $env:RUNNER_TEMP "aqt-archives"
+              New-Item -ItemType Directory -Force -Path $qtArchiveRoot | Out-Null
+              $qtMirrors = @(
+                  "https://qt.mirror.constant.com",
+                  "https://ftp.fau.de/qtproject",
+                  "https://mirrors.ustc.edu.cn/qtproject"
+              )
+              $qtInstalled = $false
+              foreach ($qtMirror in $qtMirrors) {
+                  Write-Host "正在通过 Qt 镜像安装：$qtMirror"
+                  python -m aqt install-qt windows desktop $env:QT_VERSION $env:QT_ARCH `
+                      --outputdir C:\Qt `
+                      --base $qtMirror `
+                      --timeout 30 `
+                      --keep `
+                      --archive-dest $qtArchiveRoot `
+                      --modules qtimageformats qtmultimedia qtpdf qtshadertools qtwebsockets
+                  if ($LASTEXITCODE -eq 0) {
+                      $qtInstalled = $true
+                      break
+                  }
+
+                  Write-Warning "Qt 镜像安装失败，将保留已下载归档并切换镜像：$qtMirror"
+                  if (Test-Path -LiteralPath $qtVersionRoot) {
+                      Remove-Item -LiteralPath $qtVersionRoot -Recurse -Force
+                  }
+              }
+              if (-not $qtInstalled) {
+                  throw "所有 Qt 镜像安装尝试均失败。"
+              }
+          }
+
+          $requiredQtPackages = @(
+              "Qt6\Qt6Config.cmake",
+              "Qt6Pdf\Qt6PdfConfig.cmake",
+              "Qt6PdfQuick\Qt6PdfQuickConfig.cmake",
+              "Qt6Multimedia\Qt6MultimediaConfig.cmake",
+              "Qt6WebSockets\Qt6WebSocketsConfig.cmake"
+          )
+          foreach ($relativePath in $requiredQtPackages) {
+              $candidate = Join-Path (Join-Path $env:QT_ROOT "lib\cmake") $relativePath
+              if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+                  throw "Qt 组件缺失：$candidate"
+              }
+          }
+
+          (Join-Path $env:QT_ROOT "bin") | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: 恢复本地搜索与助手运行时缓存
+        if: steps.scope.outputs.should_build == 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/AppData/Local/CineVault/BuildCache
+          key: cinevault-build-deps-${{ runner.os }}-${{ hashFiles('dit-tools-src/cinevault-pro/cmake/*-dependencies.lock.json') }}
+          restore-keys: |
+            cinevault-build-deps-${{ runner.os }}-
+
+      - name: 安装 Inno Setup 与 FFmpeg
+        if: steps.scope.outputs.should_build == 'true'
+        run: |
+          function Install-ChocolateyPackage {
+              param(
+                  [Parameter(Mandatory = $true)][string]$Name,
+                  [Parameter(Mandatory = $true)][string]$Version
+              )
+
+              foreach ($attempt in 1..4) {
+                  choco install $Name `
+                      --version=$Version `
+                      --yes `
+                      --no-progress `
+                      --allow-downgrade
+                  if ($LASTEXITCODE -eq 0) {
+                      return
+                  }
+
+                  if ($attempt -lt 4) {
+                      $delaySeconds = 10 * $attempt
+                      Write-Warning "$Name $Version 安装失败（第 $attempt 次），$delaySeconds 秒后重试。"
+                      Start-Sleep -Seconds $delaySeconds
+                  }
+              }
+
+              throw "$Name $Version 连续 4 次安装失败。"
+          }
+
+          if ($null -eq (Get-Command ISCC.exe -ErrorAction SilentlyContinue)) {
+              Install-ChocolateyPackage -Name "innosetup" -Version $env:INNO_SETUP_VERSION
+          }
+
+          $ffmpegAssetName = "ffmpeg-$env:FFMPEG_VERSION-essentials_build.zip"
+          $ffmpegUrl = "https://github.com/GyanD/codexffmpeg/releases/download/$env:FFMPEG_VERSION/$ffmpegAssetName"
+          $ffmpegArchive = Join-Path $env:RUNNER_TEMP $ffmpegAssetName
+          $ffmpegExtractRoot = Join-Path $env:RUNNER_TEMP "cinevault-ffmpeg-$env:FFMPEG_VERSION"
+          curl.exe `
+              --fail `
+              --location `
+              --retry 4 `
+              --retry-all-errors `
+              --retry-delay 5 `
+              --connect-timeout 30 `
+              --output $ffmpegArchive `
+              $ffmpegUrl
+          if ($LASTEXITCODE -ne 0) {
+              throw "FFmpeg 固定版本下载失败：$ffmpegUrl"
+          }
+
+          $actualFfmpegSha256 = (Get-FileHash -LiteralPath $ffmpegArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualFfmpegSha256 -ne $env:FFMPEG_SHA256.ToLowerInvariant()) {
+              throw "FFmpeg SHA-256 校验失败。实际：$actualFfmpegSha256"
+          }
+
+          Expand-Archive -LiteralPath $ffmpegArchive -DestinationPath $ffmpegExtractRoot -Force
+          $ffmpegExecutable = Get-ChildItem -LiteralPath $ffmpegExtractRoot -Recurse -Filter ffmpeg.exe -File |
+              Where-Object { $_.Directory.Name -eq "bin" } |
+              Select-Object -First 1
+          if ($null -eq $ffmpegExecutable) {
+              throw "FFmpeg 解压后未找到 ffmpeg.exe。"
+          }
+
+          $ffmpegRoot = Split-Path -Parent $ffmpegExecutable.Directory.FullName
+          $ffprobePath = Join-Path $ffmpegRoot "bin\ffprobe.exe"
+          if (-not (Test-Path -LiteralPath $ffprobePath -PathType Leaf)) {
+              throw "FFmpeg 安装不完整：$ffprobePath"
+          }
+          if ($null -eq (Get-Command ISCC.exe -ErrorAction SilentlyContinue)) {
+              throw "Inno Setup 编译器 ISCC.exe 不可用。"
+          }
+
+          "CINEVAULT_FFMPEG_ROOT=$ffmpegRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          (Join-Path $ffmpegRoot "bin") | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: 构建正式安装包
+        if: steps.scope.outputs.should_build == 'true'
+        run: |
+          ./tool/build_windows.ps1 `
+              -RealWorkflow `
+              -Version "${{ steps.version.outputs.version_tag }}"
+
+      - name: 运行完整自动化测试
+        if: steps.scope.outputs.should_build == 'true'
+        run: |
+          ctest `
+              --test-dir dit-tools-src/cinevault-pro/build/windows-msvc-release-real `
+              --build-config Release `
+              --output-on-failure `
+              --verbose `
+              --label-exclude gpu-integration `
+              --parallel 1
+          $ctestExitCode = $LASTEXITCODE
+          if ($ctestExitCode -ne 0) {
+              Get-ChildItem `
+                  -LiteralPath dit-tools-src/cinevault-pro/build/windows-msvc-release-real `
+                  -Filter '*-results.txt' `
+                  -File |
+                  Sort-Object Name |
+                  ForEach-Object {
+                      Write-Host "::group::QtTest 报告 $($_.Name)"
+                      Get-Content -LiteralPath $_.FullName
+                      Write-Host '::endgroup::'
+                  }
+              throw "CTest 回归测试失败。"
+          }
+
+      - name: 检查 QML 错误与警告基线
+        if: steps.scope.outputs.should_build == 'true'
+        run: |
+          ./tool/check_qml_warnings.ps1 `
+              -QmllintPath (Join-Path $env:QT_ROOT "bin\qmllint.exe") `
+              -ModuleImportPath "dit-tools-src/cinevault-pro/build/windows-msvc-release-real" `
+              -MaxWarnings 731
+
+      - name: 校验安装包并生成摘要
+        if: steps.scope.outputs.should_build == 'true'
+        id: artifact
+        run: |
+          $tag = "${{ steps.version.outputs.version_tag }}"
+          ./tool/verify_release_artifact.ps1 `
+              -VersionTag $tag `
+              -InstallerPath "output/$tag/CineVault-Setup-$tag.exe"
+
+      - name: 安装并验证正式安装包可启动
+        if: steps.scope.outputs.should_build == 'true'
+        run: |
+          $tag = "${{ steps.version.outputs.version_tag }}"
+          ./tool/test_installer_startup.ps1 `
+              -InstallerPath "${{ steps.artifact.outputs.installer_path }}" `
+              -InstallRoot (Join-Path $env:RUNNER_TEMP "cinevault-installed-$tag") `
+              -AllowInstallerRegistration
+
+      - name: 上传验证分支产物
+        if: steps.scope.outputs.is_production != 'true' && steps.scope.outputs.should_build == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cinevault-validation-${{ github.sha }}
+          path: |
+            output/${{ steps.version.outputs.version_tag }}/CineVault-Setup-${{ steps.version.outputs.version_tag }}.exe
+            output/${{ steps.version.outputs.version_tag }}/CineVault-Setup-${{ steps.version.outputs.version_tag }}.exe.sha256
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 6
+
+      - name: 创建 Draft Release
+        if: steps.scope.outputs.is_production == 'true' && steps.version.outputs.should_publish == 'true'
+        id: draft
+        run: |
+          $tag = "${{ steps.version.outputs.version_tag }}"
+          $release = gh api `
+              --method POST `
+              "repos/$env:GITHUB_REPOSITORY/releases" `
+              -f "tag_name=$tag" `
+              -f "target_commitish=$env:GITHUB_SHA" `
+              -f "name=影资管家 $tag" `
+              -f "body=Windows x64 自动构建安装包；从本版本起不再随安装包重复分发 Qwen3 0.6B 模型，覆盖安装会保留旧版本已有模型。发布前已通过完整测试、安装启动检查、版本检查和 SHA-256 校验。客户端会在精确匹配 GitHub Release 资产并验证大小与 SHA-256 后启动安装；Windows 仍可能显示 SmartScreen 或 UAC 提示。" `
+              -F draft=true `
+              -F prerelease=false `
+              -F generate_release_notes=true | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) {
+              throw "Draft Release 创建失败。"
+          }
+          "created=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "release_id=$($release.id)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          if ($release.tag_name -cne $tag -or -not $release.draft -or $release.prerelease) {
+              throw "GitHub 返回的 Draft Release 状态不符合预期。"
+          }
+
+      - name: 上传 Release 资产
+        if: steps.scope.outputs.is_production == 'true' && steps.version.outputs.should_publish == 'true'
+        run: |
+          $tag = "${{ steps.version.outputs.version_tag }}"
+          gh release upload $tag `
+              "${{ steps.artifact.outputs.installer_path }}" `
+              "${{ steps.artifact.outputs.checksum_path }}" `
+              --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE -ne 0) {
+              throw "Release 资产上传失败。"
+          }
+
+      - name: 远端复核 Draft Release
+        if: steps.scope.outputs.is_production == 'true' && steps.version.outputs.should_publish == 'true'
+        run: |
+          $tag = "${{ steps.version.outputs.version_tag }}"
+          $expectedInstallerName = "CineVault-Setup-$tag.exe"
+          $expectedChecksumName = "$expectedInstallerName.sha256"
+          $expectedSize = [long]"${{ steps.artifact.outputs.installer_size }}"
+          $expectedDigest = "sha256:${{ steps.artifact.outputs.installer_sha256 }}"
+          $releaseId = [long]"${{ steps.draft.outputs.release_id }}"
+
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/$releaseId" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) {
+              throw "无法读取 Draft Release。"
+          }
+          if ($release.tag_name -cne $tag -or -not $release.draft -or $release.prerelease) {
+              throw "Release 在复核前不是预期的正式版草稿状态。"
+          }
+
+          $installerAssets = @($release.assets | Where-Object { $_.name -ceq $expectedInstallerName })
+          $checksumAssets = @($release.assets | Where-Object { $_.name -ceq $expectedChecksumName })
+          if ($installerAssets.Count -ne 1 -or $checksumAssets.Count -ne 1) {
+              throw "Release 资产名称或数量不符合更新协议。"
+          }
+          if ([long]$installerAssets[0].size -ne $expectedSize) {
+              throw "远端安装包大小与本地不一致。"
+          }
+          if ([string]::IsNullOrWhiteSpace($installerAssets[0].digest) -or
+              $installerAssets[0].digest.ToLowerInvariant() -ne $expectedDigest.ToLowerInvariant()) {
+              throw "远端安装包 SHA-256 与本地不一致。"
+          }
+
+      - name: 发布并设为 Latest Release
+        if: steps.scope.outputs.is_production == 'true' && steps.version.outputs.should_publish == 'true'
+        id: publish
+        run: |
+          $tag = "${{ steps.version.outputs.version_tag }}"
+          $releaseId = [long]"${{ steps.draft.outputs.release_id }}"
+          $release = gh api `
+              --method PATCH `
+              "repos/$env:GITHUB_REPOSITORY/releases/$releaseId" `
+              -F draft=false `
+              -F prerelease=false `
+              -f make_latest=true | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) {
+              throw "正式发布 Release 失败。"
+          }
+          if ($release.tag_name -cne $tag -or $release.draft -or $release.prerelease) {
+              throw "GitHub 返回的正式发布状态不符合预期。"
+          }
+          "published=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: 确认客户端 latest 接口已切换
+        if: steps.scope.outputs.is_production == 'true' && steps.version.outputs.should_publish == 'true'
+        run: |
+          $expectedTag = "${{ steps.version.outputs.version_tag }}"
+          $latestTag = (gh api "repos/$env:GITHUB_REPOSITORY/releases/latest" --jq '.tag_name').Trim()
+          if ($LASTEXITCODE -ne 0 -or $latestTag -ne $expectedTag) {
+              throw "GitHub latest Release 尚未切换到 $expectedTag。"
+          }
+
+          $remoteTag = @(git ls-remote origin "refs/tags/$expectedTag" "refs/tags/$expectedTag^{}")
+          if ($LASTEXITCODE -ne 0 -or $remoteTag.Count -eq 0) {
+              throw "正式发布后远端标签不存在。"
+          }
+          $peeledTag = @($remoteTag | Where-Object { $_ -match "\^\{\}$" })
+          $resolvedTag = if ($peeledTag.Count -gt 0) { $peeledTag[0] } else { $remoteTag[0] }
+          $remoteTagSha = ($resolvedTag -split "\s+")[0]
+          if ($remoteTagSha -ne $env:GITHUB_SHA) {
+              throw "发布标签没有指向当前 push 提交。"
+          }
+          Write-Host "Windows 自动发布完成：$latestTag"
+
+      - name: 失败时清理当前草稿和标签
+        if: failure() && steps.draft.outputs.created == 'true' && steps.publish.outputs.published != 'true'
+        run: |
+          $ErrorActionPreference = "Continue"
+          $tag = "${{ steps.version.outputs.version_tag }}"
+          $releaseId = "${{ steps.draft.outputs.release_id }}"
+          $release = $null
+
+          if ($releaseId -match "^\d+$") {
+              $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/$releaseId" 2>$null | ConvertFrom-Json
+          }
+          if ($null -eq $release) {
+              foreach ($attempt in 1..4) {
+                  $releases = @(gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" 2>$null | ConvertFrom-Json)
+                  $matches = @($releases | Where-Object { $_.tag_name -ceq $tag -and $_.draft })
+                  if ($matches.Count -eq 1) {
+                      $release = $matches[0]
+                      break
+                  }
+                  if ($attempt -lt 4) {
+                      Start-Sleep -Seconds 3
+                  }
+              }
+          }
+
+          $deletedDraft = $false
+          if ($null -ne $release -and $release.draft) {
+              gh api --method DELETE "repos/$env:GITHUB_REPOSITORY/releases/$($release.id)" | Out-Null
+              if ($LASTEXITCODE -eq 0) {
+                  $deletedDraft = $true
+                  Write-Host "已清理失败流水线创建的 Draft Release：$tag"
+              } else {
+                  Write-Warning "Draft Release 自动清理失败，请人工检查：$tag"
+              }
+          } elseif ($null -ne $release) {
+              Write-Warning "Release 已不再是草稿，为避免误删正式发布，跳过清理：$tag"
+          }
+
+          if ($deletedDraft) {
+              $remoteTag = git ls-remote origin "refs/tags/$tag"
+              if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($remoteTag)) {
+                  $remoteTagSha = ($remoteTag -split "\s+")[0]
+                  if ($remoteTagSha -eq $env:GITHUB_SHA) {
+                      git push origin ":refs/tags/$tag"
+                      if ($LASTEXITCODE -ne 0) {
+                          Write-Warning "残留标签自动清理失败，请人工检查：$tag"
+                      }
+                  } else {
+                      Write-Warning "同名标签没有指向当前提交，为避免误删已跳过：$tag"
+                  }
+              }
+          }
+          exit 0

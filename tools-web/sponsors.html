@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="影资管家赞助支持与赞助榜。赞助完全自愿，记录经人工核实到账后公开展示。">
+  <meta name="theme-color" content="#0e1014">
+  <title>支持开发与赞助榜｜影资管家</title>
+  <link rel="icon" href="assets/logo.png">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="sponsors.css">
+</head>
+<body>
+  <div class="ambient" aria-hidden="true"><span class="ambient__orb ambient__orb--blue"></span><span class="ambient__orb ambient__orb--violet"></span><span class="ambient__grid"></span></div>
+  <header class="site-header is-scrolled">
+    <div class="site-header__inner">
+      <a class="brand" href="index.html"><img class="brand__logo" src="assets/logo.png" alt=""><span class="brand__copy"><strong>影资管家</strong><small>CineVault</small></span></a>
+      <nav class="site-nav sponsor-nav" aria-label="页面导航"><a href="index.html">首页</a><a href="index.html#demo">在线体验</a><a href="sponsors.html" aria-current="page">赞助榜</a></nav>
+      <div class="header-actions"><button class="theme-toggle" type="button" data-theme-toggle aria-label="切换为浅色主题"><span class="theme-toggle__track"><span class="theme-toggle__thumb"></span></span><span class="theme-toggle__label">暗色</span></button><a class="button button--primary button--compact" href="#support">支持开发</a></div>
+    </div>
+  </header>
+
+  <main class="sponsor-page section-shell">
+    <section class="sponsor-hero reveal is-visible">
+      <span class="section-kicker">Special thanks</span>
+      <h1>每一份支持，都在延长<br><span>独立软件的生命力</span></h1>
+      <p>影资管家可以免费下载使用。赞助完全自愿，主要用于服务器开销、格式兼容测试与持续开发。赞助榜只按时间排列，不以金额排名。</p>
+      <div class="sponsor-rules"><span>自愿赞助</span><span>不按金额排名</span><span>到账后人工确认</span></div>
+    </section>
+
+    <section class="support-workspace" id="support">
+      <div class="support-steps">
+        <article class="support-step"><span>01</span><div><h2>选择扫码方式</h2><p>使用微信或支付宝完成赞助。</p></div></article>
+        <article class="support-step"><span>02</span><div><h2>提交展示信息</h2><p>填写希望公开的昵称、自报金额与支付方式。</p></div></article>
+        <article class="support-step"><span>03</span><div><h2>等待核实到账</h2><p>管理员确认后，记录才会公开出现在赞助榜。</p></div></article>
+      </div>
+
+      <div class="support-grid">
+        <section class="support-panel support-panel--codes">
+          <header><span class="section-kicker">扫码赞助</span><h2>谢谢你愿意支持</h2><p>请先完成扫码，再在右侧提交展示信息。官网不会接触你的支付账号或交易凭据。</p></header>
+          <div class="support-code-grid">
+            <figure><img src="assets/support/wechat-support.jpg" alt="微信赞助二维码"><figcaption><strong>微信</strong><span>扫码赞助</span></figcaption></figure>
+            <figure><img src="assets/support/alipay-support.jpg" alt="支付宝赞助二维码"><figcaption><strong>支付宝</strong><span>扫码赞助</span></figcaption></figure>
+          </div>
+        </section>
+
+        <section class="support-panel support-panel--form">
+          <header><span class="section-kicker">提交记录</span><h2>希望如何展示你？</h2><p>只公开昵称、金额和支持时间。支付方式仅供管理员核对，不在榜单中展示。</p></header>
+          <form class="support-form" data-support-form>
+            <label>显示昵称<input name="displayName" maxlength="24" required autocomplete="nickname" placeholder="例如：热心朋友"></label>
+            <label>赞助金额（元）<input name="amount" type="number" min="0.01" max="99999.99" step="0.01" required inputmode="decimal" placeholder="例如：20.00"></label>
+            <fieldset><legend>支付方式</legend><label><input type="radio" name="paymentChannel" value="wechat" checked>微信</label><label><input type="radio" name="paymentChannel" value="alipay">支付宝</label></fieldset>
+            <label class="website-field" aria-hidden="true">网站<input name="website" tabindex="-1" autocomplete="off"></label>
+            <button class="button button--primary button--large button--full" type="submit">提交并等待核实</button>
+            <p class="form-status" data-form-status role="status" aria-live="polite"></p>
+          </form>
+        </section>
+      </div>
+    </section>
+
+    <section class="pending-card" data-pending-card hidden>
+      <span class="pending-card__dot"></span><div><strong>我的支持正在等待确认</strong><p data-pending-text></p></div><button type="button" data-refresh-pending>刷新状态</button>
+    </section>
+
+    <section class="sponsor-board">
+      <header><div><span class="section-kicker">赞助榜</span><h2>感谢每一位热心朋友</h2><p>名单按支持时间从新到旧排列。</p></div><strong><span data-sponsor-count>—</span><small>位支持者</small></strong></header>
+      <div class="sponsor-list" data-sponsor-list aria-live="polite" aria-busy="true"><div class="sponsor-empty">正在加载赞助榜…</div></div>
+    </section>
+  </main>
+
+  <footer class="site-footer section-shell"><div class="brand brand--footer"><img class="brand__logo" src="assets/logo.png" alt=""><span class="brand__copy"><strong>影资管家</strong><small>CineVault</small></span></div><p>赞助完全自愿，软件始终可以免费下载。</p><nav><a href="index.html">返回官网</a><a href="#support">支持开发</a></nav><small>© <span data-year></span> 影资管家</small></footer>
+  <script src="support-shared.js" defer></script>
+  <script src="sponsors.js" defer></script>
+</body>
+</html>

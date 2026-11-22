@@ -1,0 +1,46 @@
+format = "manual-v2"
+
+[windows]
+visual_studio = "Microsoft Visual Studio 2022 Build Tools or later"
+windows_sdk = "10.0.22621.0 or later"
+cmake = "4.2.3"
+ninja = "1.12.x"
+qt = "6.5+ MSVC 64-bit kit"
+ffmpeg_dev_package = "Required for stage 4 media modules; CLI-only package is insufficient"
+
+[environment]
+qt_root = "Set QT_ROOT to the Qt 6 MSVC kit root containing lib/cmake/Qt6/Qt6Config.cmake"
+ffmpeg_dev_root = "Set FFMPEG_DEV_ROOT to a development package root containing include, lib, and bin"
+local_search_dependency_cache = "Optional build cache root; artifacts are downloaded only by the explicit CMake preparation script and are never downloaded at application runtime"
+
+[local_search]
+search_index_schema_version = "1"
+structured_vision_profile_version = "2"
+sampling_policy = "fixed_interval"
+embedding_model = "BAAI/bge-small-zh-v1.5"
+embedding_dimensions = "512"
+embedding_max_tokens = "512"
+
+[local_search.onnxruntime]
+version = "1.27.1"
+license = "MIT"
+artifact = "onnxruntime-win-x64-1.27.1.zip"
+sha256 = "2E00414A63FDEF0914CD5A5EDE6C707844878E0C08E1B6693842F0451B2DF2A1"
+
+[local_search.usearch]
+version = "2.26.0"
+commit = "cc23bbaf21ef52313c5a495adbc40cbd733cdcfb"
+license = "Apache-2.0"
+source_archive_sha256 = "A21C05230466D1C9F1C0149ADD726B9C24A5DB70672A065C14ED1B3BD57F086A"
+
+[local_search.bge_small_zh_v1_5]
+upstream_revision = "7999e1d3359715c523056ef9478215996d62a620"
+onnx_conversion = "Xenova/bge-small-zh-v1.5"
+onnx_revision = "75c43b069aac4d136ba6bc1122f995fedcfd2781"
+license = "MIT"
+quantized_model_sha256 = "15B717C382BCB518BA457B93EA6850EDE7F4F1CD8937454AA06972366CD19BCC"
+
+[notes]
+dependency_management = "Qt and FFmpeg remain manually supplied; local-search assets have a hash-verified opt-in build preparation script"
+ffmpeg_runtime_reference = "Existing G:\\data\\app\\DIT\\ffmpeg is runtime CLI only"
+runtime_network_policy = "CineVault must never download embedding models or native search dependencies at application runtime"

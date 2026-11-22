@@ -1,0 +1,21 @@
+[Unit]
+Description=CineVault website sponsor service
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/cinevault-web/server
+EnvironmentFile=/opt/cinevault-web/server/.env
+ExecStart=/opt/cinevault-web/server/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 3413 --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=3
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/cinevault-web/data
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

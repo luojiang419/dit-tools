@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0e1014">
+  <title>影资管家 · 安全演示模式</title>
+  <link rel="icon" href="../assets/logo.png">
+  <link rel="stylesheet" href="demo.css">
+</head>
+<body>
+  <div class="demo-viewport" data-viewport>
+    <main class="app" data-app data-app-theme="dark" aria-label="影资管家在线演示">
+      <header class="top-command-bar">
+        <strong class="app-name">影资管家</strong>
+        <span class="project-chip" data-project-chip>未选择项目</span>
+        <nav class="workspace-tabs" aria-label="软件工作区">
+          <button class="workspace-tab" style="--tab-width:70px" type="button" data-workspace="projects">项目库</button>
+          <button class="workspace-tab" style="--tab-width:70px" type="button" data-workspace="library">素材库</button>
+          <button class="workspace-tab" style="--tab-width:108px" type="button" data-workspace="center">素材管理中心</button>
+          <button class="workspace-tab" style="--tab-width:56px" type="button" data-workspace="report">报表</button>
+          <button class="workspace-tab" style="--tab-width:56px" type="button" data-workspace="jobs">任务<span class="tab-badge" data-job-badge hidden>1</span></button>
+          <button class="workspace-tab" style="--tab-width:92px" type="button" data-workspace="feedback">使用反馈</button>
+        </nav>
+        <label class="global-search"><span class="sr-only">全局搜索</span><input type="search" data-global-search placeholder="搜索项目..."></label>
+        <button class="action-button settings-button" type="button" data-action="open-settings">设置</button>
+      </header>
+
+      <div class="app-main" data-main></div>
+      <div class="job-timeline" data-job-timeline></div>
+
+      <div class="demo-watermark"><span></span>演示模式 · 不访问本机文件</div>
+      <div class="toast" role="status" aria-live="polite" data-toast hidden></div>
+
+      <div class="dialog-layer" data-settings-dialog hidden>
+        <div class="dialog-backdrop" data-action="close-settings"></div>
+        <section class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+          <header><div><h2 id="settings-title">设置</h2><p>软件更新、视觉解析、缩略图和解析图片配置</p></div><div><button class="action-button action-button--primary" type="button" data-action="save-settings">保存并应用</button><button class="action-button" type="button" data-action="close-settings">关闭</button></div></header>
+          <div class="settings-scroll">
+            <section class="settings-section"><h3>软件更新</h3><div class="setting-row"><div><strong>自动更新</strong><span>启动后检查并提示新版本</span></div><button class="switch is-on" type="button" aria-label="切换自动更新" data-action="toggle-switch"><i></i></button></div><div class="setting-grid"><label>下载更新渠道<select><option>自动选择</option><option>GitHub</option><option>服务器</option></select></label><label>代理地址<input value="http://127.0.0.1:7890"></label></div></section>
+            <section class="settings-section"><h3>外观</h3><div class="setting-row"><div><strong>主题模式</strong><span>演示会立即切换软件配色</span></div><div class="theme-options"><button class="is-active" type="button" data-theme-choice="dark">深色</button><button type="button" data-theme-choice="light">浅色</button><button type="button" data-theme-choice="system">跟随系统</button></div></div></section>
+            <section class="settings-section"><h3>视觉解析</h3><div class="setting-grid setting-grid--three"><label>Base URL<input value="https://api.openai.com/v1"></label><label>API Key<input type="password" value="demo-api-key"></label><label>模型名<input value="gpt-4.1-mini"></label><label>抽帧模式<select><option>固定帧间隔</option></select></label><label>抽帧间隔<input value="10 秒"></label><label>超时<input value="120 秒"></label></div><button class="action-button" type="button" data-action="demo-only">测试连通状态</button></section>
+            <section class="settings-section"><h3>缩略图与解析图片</h3><div class="setting-grid"><label>默认缩略图帧<input value="第 1 帧"></label><label>右侧详情多宫格数量<select><option>9 宫格</option><option>16 宫格</option></select></label></div><div class="setting-note">演示环境不保存设置，也不会连接任何视觉接口。</div></section>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+  <script src="demo.js" defer></script>
+</body>
+</html>
