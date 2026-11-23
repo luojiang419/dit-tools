@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "baseline_version": "0.1.181",
+  "fixture": {
+    "shape": "flat",
+    "file_count": 100000,
+    "file_content": "empty",
+    "location": "external_temporary_directory"
+  },
+  "result": {
+    "asset_count": 100000,
+    "scan_elapsed_ms": 19822,
+    "directory_enumeration_elapsed_ms": 15854,
+    "peak_directory_entries": 100000,
+    "peak_private_bytes": 142004224,
+    "peak_working_set_bytes": 148623360,
+    "sqlite_busy_count": 0
+  },
+  "module_1_result": {
+    "asset_count": 100000,
+    "scan_elapsed_ms": 17625,
+    "directory_enumeration_elapsed_ms": 11019,
+    "directory_stage_write_elapsed_ms": 2777,
+    "stage_batch_count": 391,
+    "peak_directory_entries": 256,
+    "peak_private_bytes": 6737920,
+    "peak_working_set_bytes": 18440192,
+    "sqlite_busy_count": 0
+  },
+  "conclusion": "优化前单层目录扫描队列与目录直接子项数量线性增长；模块1固定256条批次后，同一10万文件目录的队列峰值降为256，结果条数保持一致。"
+}

@@ -1,0 +1,123 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 24,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "windows-msvc-base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "QT_ROOT": "$env{QT_ROOT}",
+        "FFMPEG_DEV_ROOT": "$env{FFMPEG_DEV_ROOT}",
+        "CINEVAULT_LOCAL_SEARCH_CACHE_ROOT": "$env{LOCALAPPDATA}/CineVault/BuildCache/local-search-v1",
+        "CINEVAULT_SEARCH_ASSISTANT_CACHE_ROOT": "$env{LOCALAPPDATA}/CineVault/BuildCache/search-assistant-v1",
+        "CINEVAULT_EXIFTOOL_CACHE_ROOT": "$env{LOCALAPPDATA}/CineVault/BuildCache/exiftool-v1",
+        "CINEVAULT_LIBRAW_CACHE_ROOT": "$env{LOCALAPPDATA}/CineVault/BuildCache/libraw-v1",
+        "CINEVAULT_BUILD_MINIMAL_GUI": "ON",
+        "CINEVAULT_ENABLE_FFMPEG": "OFF",
+        "CINEVAULT_ENABLE_LOCAL_SEARCH": "OFF",
+        "CINEVAULT_ENABLE_LOCAL_SEARCH_ASSISTANT": "OFF",
+        "CINEVAULT_BUNDLE_SEARCH_ASSISTANT_MODEL": "OFF",
+        "CINEVAULT_ENABLE_EXIFTOOL": "ON",
+        "CINEVAULT_ENABLE_RAW_PREVIEW": "ON",
+        "CINEVAULT_ENABLE_RAW_EXTENDED_SDKS": "ON"
+      }
+    },
+    {
+      "name": "windows-msvc-debug",
+      "inherits": "windows-msvc-base",
+      "binaryDir": "${sourceDir}/build/windows-msvc-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "windows-msvc-release",
+      "inherits": "windows-msvc-base",
+      "binaryDir": "${sourceDir}/build/windows-msvc-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "windows-msvc-release-real",
+      "inherits": "windows-msvc-base",
+      "binaryDir": "${sourceDir}/build/windows-msvc-release-real",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CINEVAULT_BUILD_MINIMAL_GUI": "OFF",
+        "CINEVAULT_ENABLE_FFMPEG": "OFF",
+        "CINEVAULT_ENABLE_LOCAL_SEARCH": "ON",
+        "CINEVAULT_ENABLE_LOCAL_SEARCH_ASSISTANT": "ON"
+      }
+    },
+    {
+      "name": "windows-msvc-debug-real",
+      "inherits": "windows-msvc-base",
+      "binaryDir": "${sourceDir}/build/windows-msvc-debug-real",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CINEVAULT_BUILD_MINIMAL_GUI": "OFF",
+        "CINEVAULT_ENABLE_FFMPEG": "OFF",
+        "CINEVAULT_ENABLE_LOCAL_SEARCH": "ON",
+        "CINEVAULT_ENABLE_LOCAL_SEARCH_ASSISTANT": "ON"
+      }
+    },
+    {
+      "name": "windows-msvc-release-ffmpeg",
+      "inherits": "windows-msvc-base",
+      "binaryDir": "${sourceDir}/build/windows-msvc-release-ffmpeg",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CINEVAULT_BUILD_MINIMAL_GUI": "OFF",
+        "CINEVAULT_ENABLE_FFMPEG": "ON",
+        "CINEVAULT_ENABLE_LOCAL_SEARCH": "ON",
+        "CINEVAULT_ENABLE_LOCAL_SEARCH_ASSISTANT": "ON"
+      }
+    },
+    {
+      "name": "windows-msvc-debug-ffmpeg",
+      "inherits": "windows-msvc-base",
+      "binaryDir": "${sourceDir}/build/windows-msvc-debug-ffmpeg",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CINEVAULT_BUILD_MINIMAL_GUI": "OFF",
+        "CINEVAULT_ENABLE_FFMPEG": "ON",
+        "CINEVAULT_ENABLE_LOCAL_SEARCH": "ON",
+        "CINEVAULT_ENABLE_LOCAL_SEARCH_ASSISTANT": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-msvc-debug",
+      "configurePreset": "windows-msvc-debug"
+    },
+    {
+      "name": "windows-msvc-release",
+      "configurePreset": "windows-msvc-release"
+    },
+    {
+      "name": "windows-msvc-release-real",
+      "configurePreset": "windows-msvc-release-real"
+    },
+    {
+      "name": "windows-msvc-debug-real",
+      "configurePreset": "windows-msvc-debug-real"
+    },
+    {
+      "name": "windows-msvc-release-ffmpeg",
+      "configurePreset": "windows-msvc-release-ffmpeg"
+    },
+    {
+      "name": "windows-msvc-debug-ffmpeg",
+      "configurePreset": "windows-msvc-debug-ffmpeg"
+    }
+  ]
+}

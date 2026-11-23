@@ -1,0 +1,99 @@
+{
+    "created_at": "2026-09-05T09:37:34Z",
+    "ffmpeg_version": "ffmpeg version 8.0.1-full_build-www.gyan.dev Copyright (c) 2000-2025 the FFmpeg developers\r",
+    "frame_probes": [
+        {
+            "actual_first_size": "256x128",
+            "case": "stationary_scene_interval",
+            "elapsed_ms": 141,
+            "error": "",
+            "minimum_sharpness": 0.01,
+            "reported_tail_gap_ms": 7200,
+            "reported_timestamps_ms": [
+                0
+            ],
+            "requested_max_size": "64x64",
+            "retained_frames": 1,
+            "source_frames": 73,
+            "source_last_pts_ms": 7200,
+            "success": true
+        },
+        {
+            "actual_first_size": "256x128",
+            "case": "stationary_per_frame",
+            "elapsed_ms": 225,
+            "error": "",
+            "minimum_sharpness": 0.01,
+            "reported_tail_gap_ms": 7200,
+            "reported_timestamps_ms": [
+                0
+            ],
+            "requested_max_size": "64x64",
+            "retained_frames": 1,
+            "source_frames": 73,
+            "source_last_pts_ms": 7200,
+            "success": true
+        },
+        {
+            "actual_first_size": "256x128",
+            "case": "returning_A_B_A",
+            "elapsed_ms": 184,
+            "error": "",
+            "minimum_sharpness": 0,
+            "reported_tail_gap_ms": 1900,
+            "reported_timestamps_ms": [
+                0,
+                1000
+            ],
+            "requested_max_size": "64x64",
+            "retained_frames": 2,
+            "source_frames": 30,
+            "source_last_pts_ms": 2900,
+            "success": true
+        },
+        {
+            "actual_first_size": "256x128",
+            "case": "stationary_interval",
+            "elapsed_ms": 149,
+            "error": "",
+            "minimum_sharpness": 0.01,
+            "reported_tail_gap_ms": 7200,
+            "reported_timestamps_ms": [
+                0
+            ],
+            "requested_max_size": "64x64",
+            "retained_frames": 1,
+            "source_frames": 73,
+            "source_last_pts_ms": 7200,
+            "success": true
+        },
+        {
+            "case": "short_interval_larger_than_duration",
+            "elapsed_ms": 120,
+            "error": "按 filmstoryboard 规则抽帧失败：[mjpeg @ 000002d26d0d3b80] Non full-range YUV is non-standard, set strict_std_compliance to at most unofficial to use it.\r\n[mjpeg @ 000002d26cc5c500] ff_frame_thread_encoder_init failed\r\n[vost#0:0/mjpeg @ 000002d26cc5bc40] [enc:mjpeg @ 000002d26cb48a40] Error while opening encoder - maybe incorrect parameters such as bit_rate, rate, width or height.\r\n[vf#0:0 @ 000002d26cc5c8c0] Error sending frames to consumers: Invalid argument\r\n[vf#0:0 @ 000002d26cc5c8c0] Task finished with error code: -22 (Invalid argument)\r\n[vf#0:0 @ 000002d26cc5c8c0] Terminating thread with return code -22 (Invalid argument)\r\n[vost#0:0/mjpeg @ 000002d26cc5bc40] [enc:mjpeg @ 000002d26cb48a40] Could not open encoder before EOF\r\n[vost#0:0/mjpeg @ 000002d26cc5bc40] Task finished with error code: -22 (Invalid argument)\r\n[vost#0:0/mjpeg @ 000002d26cc5bc40] Terminating thread with return code -22 (Invalid argument)\r\n[out#0/image2 @ 000002d26cb93200] Nothing was written into output file, because at least one of its streams received no packets.",
+            "minimum_sharpness": 0.01,
+            "reported_timestamps_ms": [
+            ],
+            "retained_frames": 0,
+            "source_frames": 1,
+            "source_last_pts_ms": 0,
+            "success": false
+        }
+    ],
+    "qt_version": "6.6.3",
+    "raw_scene_filter_candidate_pts_ms": [
+        0,
+        2000,
+        4000,
+        6000
+    ],
+    "raw_short_interval_filter_has_frame": false,
+    "scope": "isolated current-source adapter and SQLite event-loop probes; not live app reproduction",
+    "synchronous_sql_busy_probe": {
+        "blocked_ms": 5037,
+        "busy_timeout_ms": 5000,
+        "error": "database is locked Unable to fetch row",
+        "heartbeats_during_write": 0,
+        "write_success": false
+    }
+}

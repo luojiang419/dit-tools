@@ -1,0 +1,264 @@
+{
+  "scope": "isolated partial-scan folder-count UPDATE; synthetic schema with relevant current indexes",
+  "python": "3.12.7",
+  "sqlite": "3.45.3",
+  "source_sha256": "bcc5369deac193fc9517aeb28289fc9517120e5679defdded9db7c6a1662bb37",
+  "sql": "UPDATE folder_node SET direct_file_count = (SELECT COUNT(*) FROM asset_file af WHERE af.source_root_id = ? AND CASE WHEN length(af.relative_path) > length(af.name) THEN substr(af.relative_path, 1, length(af.relative_path) - length(af.name) - 1) ELSE '' END = ?), file_count = (SELECT COUNT(*) FROM asset_file af WHERE af.source_root_id = ? AND CASE WHEN length(af.relative_path) > length(af.name) THEN substr(af.relative_path, 1, length(af.relative_path) - length(af.name) - 1) ELSE '' END = ?), recursive_file_count = (SELECT COUNT(*) FROM asset_file af WHERE af.source_root_id = ? AND (? = '' OR af.relative_path = ? OR substr(af.relative_path, 1, length(?) + 1) = ? || '/')), updated_at = ? WHERE source_root_id = ? AND relative_path = ?",
+  "cases": [
+    {
+      "assets": 10000,
+      "affected_folders": 10,
+      "current_update_ms": 33.75,
+      "illustrative_flat_group_query_ms": 3.11,
+      "counts_verified": true,
+      "query_plan": [
+        [
+          5,
+          0,
+          0,
+          "SEARCH folder_node USING INDEX idx_folder_node_source_root_id (source_root_id=?)"
+        ],
+        [
+          23,
+          0,
+          0,
+          "SCALAR SUBQUERY 1"
+        ],
+        [
+          29,
+          23,
+          0,
+          "SEARCH af USING INDEX idx_asset_file_source_root_id (source_root_id=?)"
+        ],
+        [
+          61,
+          0,
+          0,
+          "SCALAR SUBQUERY 2"
+        ],
+        [
+          67,
+          61,
+          0,
+          "SEARCH af USING INDEX idx_asset_file_source_root_id (source_root_id=?)"
+        ],
+        [
+          99,
+          0,
+          0,
+          "SCALAR SUBQUERY 3"
+        ],
+        [
+          105,
+          99,
+          0,
+          "SEARCH af USING INDEX idx_asset_file_source_root_id (source_root_id=?)"
+        ]
+      ]
+    },
+    {
+      "assets": 100000,
+      "affected_folders": 1,
+      "current_update_ms": 46.36,
+      "illustrative_flat_group_query_ms": 37.74,
+      "counts_verified": true,
+      "query_plan": [
+        [
+          5,
+          0,
+          0,
+          "SEARCH folder_node USING INDEX idx_folder_node_source_root_id (source_root_id=?)"
+        ],
+        [
+          23,
+          0,
+          0,
+          "SCALAR SUBQUERY 1"
+        ],
+        [
+          29,
+          23,
+          0,
+          "SEARCH af USING INDEX idx_asset_file_source_root_id (source_root_id=?)"
+        ],
+        [
+          61,
+          0,
+          0,
+          "SCALAR SUBQUERY 2"
+        ],
+        [
+          67,
+          61,
+          0,
+          "SEARCH af USING INDEX idx_asset_file_source_root_id (source_root_id=?)"
+        ],
+        [
+          99,
+          0,
+          0,
+          "SCALAR SUBQUERY 3"
+        ],
+        [
+          105,
+          99,
+          0,
+          "SEARCH af USING INDEX idx_asset_file_source_root_id (source_root_id=?)"
+        ]
+      ]
+    },
+    {
+      "assets": 100000,
+      "affected_folders": 10,
+      "current_update_ms": 484.48,
+      "illustrative_flat_group_query_ms": 37.97,
+      "counts_verified": true,
+      "query_plan": [
+        [
+          5,
+          0,
+          0,
+          "SEARCH folder_node USING INDEX idx_folder_node_source_root_id (source_root_id=?)"
+        ],
+        [
+          23,
+          0,
+          0,
+          "SCALAR SUBQUERY 1"
+        ],
+        [
+          29,
+          23,
+          0,
+          "SEARCH af USING INDEX idx_asset_file_source_root_id (source_root_id=?)"
+        ],
+        [
+          61,
+          0,
+          0,
+          "SCALAR SUBQUERY 2"
+        ],
+        [
+          67,
+          61,
+          0,
+          "SEARCH af USING INDEX idx_asset_file_source_root_id (source_root_id=?)"
+        ],
+        [
+          99,
+          0,
+          0,
+          "SCALAR SUBQUERY 3"
+        ],
+        [
+          105,
+          99,
+          0,
+          "SEARCH af USING INDEX idx_asset_file_source_root_id (source_root_id=?)"
+        ]
+      ]
+    },
+    {
+      "assets": 100000,
+      "affected_folders": 50,
+      "current_update_ms": 2377.97,
+      "illustrative_flat_group_query_ms": 41.92,
+      "counts_verified": true,
+      "query_plan": [
+        [
+          5,
+          0,
+          0,
+          "SEARCH folder_node USING INDEX idx_folder_node_source_root_id (source_root_id=?)"
+        ],
+        [
+          23,
+          0,
+          0,
+          "SCALAR SUBQUERY 1"
+        ],
+        [
+          29,
+          23,
+          0,
+          "SEARCH af USING INDEX idx_asset_file_source_root_id (source_root_id=?)"
+        ],
+        [
+          61,
+          0,
+          0,
+          "SCALAR SUBQUERY 2"
+        ],
+        [
+          67,
+          61,
+          0,
+          "SEARCH af USING INDEX idx_asset_file_source_root_id (source_root_id=?)"
+        ],
+        [
+          99,
+          0,
+          0,
+          "SCALAR SUBQUERY 3"
+        ],
+        [
+          105,
+          99,
+          0,
+          "SEARCH af USING INDEX idx_asset_file_source_root_id (source_root_id=?)"
+        ]
+      ]
+    },
+    {
+      "assets": 300000,
+      "affected_folders": 10,
+      "current_update_ms": 1392.63,
+      "illustrative_flat_group_query_ms": 194.92,
+      "counts_verified": true,
+      "query_plan": [
+        [
+          5,
+          0,
+          0,
+          "SEARCH folder_node USING INDEX idx_folder_node_source_root_id (source_root_id=?)"
+        ],
+        [
+          23,
+          0,
+          0,
+          "SCALAR SUBQUERY 1"
+        ],
+        [
+          29,
+          23,
+          0,
+          "SEARCH af USING INDEX idx_asset_file_source_root_id (source_root_id=?)"
+        ],
+        [
+          61,
+          0,
+          0,
+          "SCALAR SUBQUERY 2"
+        ],
+        [
+          67,
+          61,
+          0,
+          "SEARCH af USING INDEX idx_asset_file_source_root_id (source_root_id=?)"
+        ],
+        [
+          99,
+          0,
+          0,
+          "SCALAR SUBQUERY 3"
+        ],
+        [
+          105,
+          99,
+          0,
+          "SEARCH af USING INDEX idx_asset_file_source_root_id (source_root_id=?)"
+        ]
+      ]
+    }
+  ]
+}

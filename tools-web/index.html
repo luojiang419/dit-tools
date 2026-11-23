@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="影资管家是一款面向 DIT、摄影团队与素材管理人员的 Windows 原生影像资产管理工具，支持项目库、素材索引、AI 视觉解析、全局检索、任务管理与专业报表。">
+  <meta name="theme-color" content="#0e1014">
+  <meta property="og:title" content="影资管家｜让海量素材真正可检索">
+  <meta property="og:description" content="从素材入库、预览、AI 解析到全局检索和报表交付，一套本地优先的影像资产工作流。">
+  <title>影资管家｜专业影像资产管理工具</title>
+  <link rel="icon" href="assets/logo.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主要内容</a>
+
+  <div class="ambient" aria-hidden="true">
+    <span class="ambient__orb ambient__orb--blue"></span>
+    <span class="ambient__orb ambient__orb--violet"></span>
+    <span class="ambient__grid"></span>
+  </div>
+
+  <header class="site-header" id="top">
+    <div class="site-header__inner">
+      <a class="brand" href="#top" aria-label="影资管家官网首页">
+        <img class="brand__logo" src="assets/logo.png" alt="">
+        <span class="brand__copy">
+          <strong>影资管家</strong>
+          <small>CineVault</small>
+        </span>
+      </a>
+
+      <button class="nav-toggle" type="button" aria-label="展开导航" aria-expanded="false" aria-controls="site-nav">
+        <span></span><span></span><span></span>
+      </button>
+
+      <nav class="site-nav" id="site-nav" aria-label="主导航">
+        <a href="#demo">在线体验</a>
+        <a href="#features">核心能力</a>
+        <a href="#workflow">工作流程</a>
+        <a href="sponsors.html">赞助榜</a>
+      </nav>
+
+      <div class="header-actions">
+        <button class="theme-toggle" type="button" data-theme-toggle aria-label="切换为浅色主题">
+          <span class="theme-toggle__track"><span class="theme-toggle__thumb"></span></span>
+          <span class="theme-toggle__label">暗色</span>
+        </button>
+        <button class="button button--primary button--compact" type="button" data-open-download>立即下载</button>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero section-shell">
+      <div class="hero__content reveal">
+        <div class="eyebrow"><span></span> Windows 原生 · 本地优先</div>
+        <h1>让海量素材<br><span>真正变得可检索</span></h1>
+        <p class="hero__lead">影资管家把项目库、素材预览、AI 视觉解析、逐帧理解、全局检索、任务进度与专业报表放进一个工作台，让素材从“存过”变成“找得到、看得懂、交得出”。</p>
+        <div class="hero__actions">
+          <a class="button button--primary button--large" href="#demo">在线体验软件</a>
+          <button class="button button--secondary button--large" type="button" data-open-download>下载 Windows 版</button>
+        </div>
+        <div class="hero__proof" aria-label="产品特性">
+          <span><i class="proof-dot proof-dot--green"></i>数据保留在本地</span>
+          <span><i class="proof-dot proof-dot--blue"></i>固定帧间隔解析</span>
+          <span><i class="proof-dot proof-dot--orange"></i>持续更新</span>
+        </div>
+      </div>
+
+      <div class="hero__visual reveal">
+        <div class="product-window" aria-label="影资管家项目库界面示意">
+          <div class="product-window__topbar">
+            <div class="product-window__identity">影资管家</div>
+            <div class="product-window__project">演示项目</div>
+            <div class="product-window__tabs">
+              <span class="is-active">项目库</span><span>素材库</span><span>素材管理中心</span><span>报表</span><span>任务</span>
+            </div>
+            <div class="product-window__search">搜索项目…</div>
+            <div class="product-window__settings">设置</div>
+          </div>
+          <div class="product-window__body">
+            <div class="preview-heading">
+              <div><strong>项目库</strong><small>3 个项目可用</small></div>
+              <div><span>新建项目</span><span>打开项目</span></div>
+            </div>
+            <div class="preview-grid">
+              <article class="preview-project preview-project--selected">
+                <div><strong>城市纪录片</strong><em>可用</em></div>
+                <p>D:\CineVault\城市纪录片</p>
+                <b>1,284</b><small>项素材</small>
+                <footer>点击进入素材库</footer>
+              </article>
+              <article class="preview-project">
+                <div><strong>品牌宣传片</strong><em>可用</em></div>
+                <p>E:\Projects\品牌宣传片</p>
+                <b>768</b><small>项素材</small>
+                <footer>最近同步：今天 10:42</footer>
+              </article>
+              <article class="preview-project">
+                <div><strong>航拍素材库</strong><em>可用</em></div>
+                <p>F:\Media\Drone</p>
+                <b>2,406</b><small>项素材</small>
+                <footer>最近同步：昨天 18:09</footer>
+              </article>
+            </div>
+          </div>
+          <div class="product-window__glow"></div>
+        </div>
+        <div class="visual-note visual-note--top"><strong>2,406</strong><span>素材已建立索引</span></div>
+        <div class="visual-note visual-note--bottom"><i></i><span>本地数据库就绪</span></div>
+      </div>
+    </section>
+
+    <section class="trust-strip section-shell reveal" aria-label="产品定位">
+      <span>项目级素材库</span><span>多格式预览</span><span>AI 视觉理解</span><span>全局语义检索</span><span>专业 PDF 报表</span>
+    </section>
+
+    <section class="section section-shell" id="demo">
+      <div class="section-heading reveal">
+        <div><span class="section-kicker">在线体验</span><h2>先在网页里走一遍真实工作流</h2></div>
+        <p>Demo 依据当前桌面端 QML 的 1600×980 布局规格重建。所有素材与任务均为模拟数据，不访问、不上传你的本机文件。</p>
+      </div>
+
+      <div class="demo-shell reveal">
+        <div class="demo-shell__toolbar">
+          <div class="window-dots" aria-hidden="true"><i></i><i></i><i></i></div>
+          <div class="demo-shell__address"><span></span>影资管家 · 安全演示模式</div>
+          <div class="demo-shell__actions">
+            <button type="button" data-close-demo hidden>关闭演示</button>
+            <a href="demo/" target="_blank" rel="noopener">全屏体验 ↗</a>
+          </div>
+        </div>
+        <div class="demo-shell__stage" data-demo-stage>
+          <div class="demo-poster" data-demo-poster>
+            <div class="demo-poster__copy">
+              <span>高保真交互 Demo</span>
+              <h3>从项目库进入素材管理中心</h3>
+              <p>尝试打开项目、筛选素材、查看预览、启动模拟解析任务，并切换明暗主题。</p>
+              <button class="button button--primary" type="button" data-launch-demo>启动在线演示</button>
+              <small>点击后才加载，不拖慢官网首页</small>
+            </div>
+            <div class="demo-poster__map" aria-hidden="true">
+              <span class="is-active">01 项目库</span><span>02 素材库</span><span>03 解析</span><span>04 任务</span>
+            </div>
+          </div>
+          <iframe title="影资管家在线交互演示" data-demo-frame data-src="demo/" loading="lazy"></iframe>
+        </div>
+        <div class="demo-shell__footer"><span data-demo-status>尚未加载，不占用额外流量</span><span>推荐桌面浏览器体验</span></div>
+      </div>
+    </section>
+
+    <section class="section section-shell" id="features">
+      <div class="section-heading reveal">
+        <div><span class="section-kicker">核心能力</span><h2>围绕素材本身，而不是围绕文件夹打转</h2></div>
+        <p>从现场收卡后的项目整理，到后期阶段的内容定位与报表交付，关键上下文始终留在同一套系统中。</p>
+      </div>
+
+      <div class="feature-grid">
+        <article class="feature-card feature-card--wide reveal">
+          <div class="feature-card__index">01</div><div class="feature-card__icon">库</div>
+          <h3>项目库与素材源</h3>
+          <p>每个项目独立管理素材路径、数据库和索引状态。原文件保持原位，项目结构、目录层级和离线状态都能被持续追踪。</p>
+          <ul><li>项目入口管理</li><li>素材源扫描</li><li>离线路径兼容</li></ul>
+        </article>
+        <article class="feature-card reveal">
+          <div class="feature-card__index">02</div><div class="feature-card__icon">览</div>
+          <h3>多格式统一预览</h3>
+          <p>视频、音频、图片和文档统一浏览，卡片与技术表格两种视图自由切换。</p>
+        </article>
+        <article class="feature-card reveal">
+          <div class="feature-card__index">03</div><div class="feature-card__icon">析</div>
+          <h3>逐帧视觉解析</h3>
+          <p>按固定帧间隔提取画面，生成摘要、实体事实、OCR 和自定义多维度分析。</p>
+        </article>
+        <article class="feature-card reveal">
+          <div class="feature-card__index">04</div><div class="feature-card__icon">搜</div>
+          <h3>全局混合检索</h3>
+          <p>融合路径、日期、文件类型、结构化属性、全文与本地语义向量，快速找回目标素材。</p>
+        </article>
+        <article class="feature-card reveal">
+          <div class="feature-card__index">05</div><div class="feature-card__icon">任</div>
+          <h3>任务与进度</h3>
+          <p>集中查看当前批次、成功、失败和排队数量，逐条任务拥有明确的进度与错误信息。</p>
+        </article>
+        <article class="feature-card feature-card--wide reveal">
+          <div class="feature-card__index">06</div><div class="feature-card__icon">报</div>
+          <h3>可预览的专业报表</h3>
+          <p>在导出前直接检查封面摘要、项目表头、素材统计、缩略图、技术元数据和文件夹树，让交付结果可控。</p>
+          <ul><li>PDF 分页预览</li><li>按素材源导出</li><li>技术元数据汇总</li></ul>
+        </article>
+      </div>
+    </section>
+
+    <section class="section section-shell workflow" id="workflow">
+      <div class="section-heading reveal">
+        <div><span class="section-kicker">工作流程</span><h2>四步建立可持续的素材资产</h2></div>
+        <p>先建立真实目录与项目的映射，再逐步补充预览、视觉理解和交付信息。</p>
+      </div>
+      <ol class="workflow-list">
+        <li class="reveal"><span>01</span><div><strong>建立项目</strong><p>创建或打开项目，接入一个或多个素材源。</p></div></li>
+        <li class="reveal"><span>02</span><div><strong>扫描与预览</strong><p>生成目录层级、技术元数据和缩略图索引。</p></div></li>
+        <li class="reveal"><span>03</span><div><strong>视觉理解</strong><p>按固定间隔解析帧画面，沉淀可检索的结构化事实。</p></div></li>
+        <li class="reveal"><span>04</span><div><strong>检索与交付</strong><p>用自然语言找素材，预览并导出项目报表。</p></div></li>
+      </ol>
+    </section>
+
+    <section class="privacy-card section-shell reveal">
+      <div class="privacy-card__mark">本地</div>
+      <div><span class="section-kicker">数据边界</span><h2>素材索引留在你的电脑里</h2><p>项目数据库、缩略图、解析图片和检索索引默认保存在本地。是否调用外部视觉接口、使用哪个模型，由你在设置中决定。</p></div>
+      <div class="privacy-card__facts"><span><strong>0</strong> Demo 文件上传</span><span><strong>本地</strong> 项目数据库</span><span><strong>可控</strong> 视觉接口</span></div>
+    </section>
+
+    <section class="support-card section-shell reveal">
+      <div><span class="section-kicker">支持开发</span><h2>让一个人的长期维护，变成一群人的共同支持</h2><p>影资管家会持续完善格式兼容、搜索体验与真实 DIT 工作流。如果它帮你节省了时间，可以请开发者喝杯咖啡。</p></div>
+      <div class="support-card__actions">
+        <button class="button button--warm button--large" type="button" data-open-support>赞助支持</button>
+        <a class="text-link" href="sponsors.html">查看赞助榜 →</a>
+      </div>
+    </section>
+
+    <section class="download-banner section-shell reveal">
+      <div><span class="section-kicker">开始使用</span><h2>把“我记得有这个镜头”变成一次搜索</h2><p>当前正式版 <span data-release-version>v0.1.150</span> · Windows 10/11 64 位</p></div>
+      <button class="button button--light button--large" type="button" data-open-download>下载影资管家</button>
+    </section>
+  </main>
+
+  <footer class="site-footer section-shell">
+    <div class="brand brand--footer"><img class="brand__logo" src="assets/logo.png" alt=""><span class="brand__copy"><strong>影资管家</strong><small>CineVault</small></span></div>
+    <p>为真实素材工作流打造的本地影像资产管理工具。</p>
+    <nav aria-label="页脚导航"><a href="#demo">在线体验</a><a href="sponsors.html">赞助榜</a><button type="button" data-open-download>下载</button></nav>
+    <small>© <span data-year></span> 影资管家</small>
+  </footer>
+
+  <!-- 下载与赞助使用统一组合弹窗。 -->
+  <div class="modal" data-download-modal hidden>
+    <div class="modal__backdrop" data-close-download></div>
+    <section class="modal__card modal__card--download-support" role="dialog" aria-modal="true" aria-labelledby="download-title">
+      <button class="modal__close" type="button" data-close-download aria-label="关闭下载与赞助窗口">×</button>
+
+      <header class="download-support__heading">
+        <img class="download-support__logo" src="assets/logo.png" alt="">
+        <div>
+          <span class="section-kicker">免费下载 · 自愿支持</span>
+          <h2 id="download-title">下载影资管家</h2>
+          <p>Windows 10/11 · 64 位 · <span data-release-version>v0.1.150</span></p>
+        </div>
+      </header>
+
+      <section class="download-file-card" aria-label="安装包信息">
+        <div>
+          <strong>影资管家 <span data-release-version>v0.1.150</span></strong>
+          <span>Windows 安装程序 · <span data-release-size>约 160 MB</span> · 发布于 <span data-release-date>2026-07-13</span></span>
+        </div>
+        <a class="button button--primary" href="https://github.com/luojiang419/dit-tools/releases/download/v0.1.150/CineVault-Setup-v0.1.150.exe" data-download-link>下载最新版</a>
+      </section>
+      <div class="modal__meta"><span data-download-source>正在检查服务器下载源…</span><a href="https://github.com/luojiang419/dit-tools/releases/tag/v0.1.150" target="_blank" rel="noopener" data-release-notes>查看发布说明 ↗</a></div>
+
+      <p class="support-message"><strong>软件始终可以免费下载。</strong>如果影资管家帮你节省了整理和检索素材的时间，欢迎随心支持服务器开销与后续功能开发；不赞助不会影响下载，也不会限制任何功能。</p>
+
+      <div class="support-modal-layout">
+        <section class="support-payment-panel" aria-labelledby="support-payment-title">
+          <div class="support-panel-title">
+            <div><span class="section-kicker">随心赞助</span><h3 id="support-payment-title">选择支付方式</h3></div>
+            <div class="support-panel-cta">
+              <p>扫码支持后，点击“<strong>立即支持</strong>”留下称呼与金额；管理员核实到账后会加入<strong>赞助榜</strong>特别鸣谢。</p>
+              <div class="support-cta-control"><span aria-hidden="true">→</span><button class="button button--warm" type="button" data-reveal-support aria-expanded="false">立即支持</button></div>
+            </div>
+          </div>
+
+          <div class="support-qr-grid">
+            <figure class="support-qr-card">
+              <span>推荐使用微信支付</span>
+              <img src="assets/support/wechat-support.jpg" data-zoomable tabindex="0" role="button" aria-label="点击全屏查看微信赞助二维码" alt="微信赞助二维码" loading="lazy">
+              <figcaption>微信扫一扫，点击二维码可放大</figcaption>
+            </figure>
+            <figure class="support-qr-card support-qr-card--alipay">
+              <span>也可使用支付宝</span>
+              <img src="assets/support/alipay-support.jpg" data-zoomable tabindex="0" role="button" aria-label="点击全屏查看支付宝赞助二维码" alt="支付宝赞助二维码" loading="lazy">
+              <figcaption>支付宝扫一扫，点击二维码可放大</figcaption>
+            </figure>
+          </div>
+
+          <form class="modal-support-form" data-modal-support-form hidden novalidate>
+            <div class="form-field-grid">
+              <label class="form-field"><span>你的称呼</span><input name="displayName" type="text" maxlength="24" autocomplete="nickname" placeholder="例如：热心朋友" required></label>
+              <label class="form-field"><span>支持金额（元）</span><input name="amount" type="number" min="0.01" max="99999.99" step="0.01" inputmode="decimal" placeholder="例如：10" required></label>
+            </div>
+            <fieldset class="payment-channel-field"><legend>实际使用的支付方式</legend><label><input type="radio" name="paymentChannel" value="wechat" checked> 微信</label><label><input type="radio" name="paymentChannel" value="alipay"> 支付宝</label></fieldset>
+            <label class="website-field" aria-hidden="true">网站<input type="text" name="website" tabindex="-1" autocomplete="off"></label>
+            <p class="support-privacy">提交即同意在核实到账后公开显示称呼、金额和支持时间，请勿填写敏感个人信息。</p>
+            <button class="button button--primary support-submit" type="submit">我已支持，提交记录</button>
+            <p class="form-status" data-modal-form-status role="status" aria-live="polite"></p>
+          </form>
+        </section>
+
+        <aside class="support-contact-panel">
+          <span class="section-kicker">联系与交流</span>
+          <h3>一起反馈意见、分享开发乐趣</h3>
+          <div class="contact-list">
+            <button type="button" data-copy-value="15085152352"><span>微信</span><strong>15085152352</strong></button>
+            <button type="button" data-copy-value="419773176"><span>QQ</span><strong>419773176</strong></button>
+            <a href="mailto:419773176@qq.com"><span>邮箱</span><strong>419773176@qq.com</strong></a>
+          </div>
+          <figure class="qq-group-card">
+            <img src="assets/support/qq-group-912211398.jpg" data-zoomable tabindex="0" role="button" aria-label="点击全屏查看 QQ 群二维码，群号 912211398" alt="影资管家交流群二维码，群号 912211398" loading="lazy">
+            <figcaption><strong>影资管家交流群</strong><span>QQ群：912211398</span><button class="button button--secondary" type="button" data-copy-value="912211398">复制群号</button></figcaption>
+          </figure>
+          <a class="support-board-link" href="sponsors.html">查看赞助榜与提交状态 →</a>
+        </aside>
+      </div>
+    </section>
+  </div>
+
+  <div class="modal modal--image" data-image-modal hidden>
+    <div class="modal__backdrop" data-close-image></div>
+    <section class="image-modal__card" role="dialog" aria-modal="true" aria-labelledby="image-modal-title">
+      <button class="modal__close" type="button" data-close-image aria-label="关闭二维码预览">×</button>
+      <img data-image-preview src="" alt="">
+      <h2 id="image-modal-title" data-image-title>二维码预览</h2>
+    </section>
+  </div>
+
+  <noscript><div class="noscript">需要启用 JavaScript 才能启动在线 Demo、切换主题和打开下载弹窗。</div></noscript>
+  <script src="support-shared.js" defer></script>
+  <script src="script.js" defer></script>
+</body>
+</html>

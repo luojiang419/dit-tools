@@ -1,0 +1,37 @@
+.sponsor-page { padding-block: 100px; }
+.sponsor-nav { margin-left: auto; }
+.sponsor-nav [aria-current="page"] { background: var(--panel-2); color: var(--text); }
+.sponsor-hero { max-width: 980px; padding: 72px 0 92px; }
+.sponsor-hero h1 { margin: 12px 0 24px; font-size: clamp(54px, 7vw, 88px); line-height: 1.05; letter-spacing: -.055em; }
+.sponsor-hero h1 span { color: transparent; background: linear-gradient(100deg, var(--blue), #a78bfa 58%, #ffb45c); background-clip: text; -webkit-background-clip: text; }
+.sponsor-hero > p { max-width: 760px; margin: 0; color: var(--muted); font-size: 17px; line-height: 1.9; }
+.sponsor-rules { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 28px; }
+.sponsor-rules span { padding: 7px 11px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); color: var(--muted); font-size: 11px; font-weight: 750; }
+.support-workspace { scroll-margin-top: 92px; }
+.support-steps { margin-bottom: 16px; display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid var(--line); border-radius: 20px; background: var(--panel); }
+.support-step { min-height: 116px; padding: 22px; display: flex; gap: 16px; align-items: flex-start; }
+.support-step + .support-step { border-left: 1px solid var(--line); }
+.support-step > span { width: 34px; height: 34px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 11px; background: color-mix(in srgb, var(--blue) 12%, transparent); color: var(--blue); font-size: 11px; font-weight: 850; }
+.support-step h2 { margin: 0; font-size: 16px; }.support-step p { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
+.support-grid { display: grid; grid-template-columns: 1fr .85fr; gap: 16px; }
+.support-panel { padding: 34px; border: 1px solid var(--line); border-radius: 24px; background: var(--panel); }
+.support-panel header h2 { margin: 7px 0 8px; font-size: 30px; }.support-panel header p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.7; }
+.support-code-grid { margin-top: 28px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+.support-code-grid figure { margin: 0; padding: 14px; border-radius: 18px; background: #fff; }
+.support-code-grid img { width: 100%; aspect-ratio: 1; object-fit: contain; }
+.support-code-grid figcaption { padding: 10px 4px 0; display: flex; justify-content: space-between; color: #172033; font-size: 12px; }.support-code-grid figcaption span { color: #64748b; }
+.support-form { margin-top: 25px; display: grid; gap: 14px; }
+.support-form > label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; font-weight: 650; }
+.support-form input[type="text"], .support-form input[type="number"], .support-form input:not([type]) { width: 100%; height: 46px; padding: 0 13px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); color: var(--text); }
+.support-form fieldset { margin: 0; padding: 12px; display: flex; gap: 24px; border: 1px solid var(--line); border-radius: 12px; color: var(--muted); }
+.support-form legend { padding: 0 5px; font-size: 11px; font-weight: 700; }.support-form fieldset label { display: flex; align-items: center; gap: 7px; font-size: 12px; }.support-form input[type="radio"] { accent-color: var(--blue); }
+.website-field { position: absolute !important; left: -10000px !important; width: 1px !important; height: 1px !important; overflow: hidden !important; }
+.form-status { min-height: 21px; margin: -2px 0 0; color: var(--muted); font-size: 11px; }.form-status.is-success { color: var(--green); }.form-status.is-error { color: var(--red); }
+.pending-card { margin-top: 18px; padding: 17px 20px; display: flex; align-items: center; gap: 14px; border: 1px solid color-mix(in srgb, var(--orange) 38%, var(--line)); border-radius: 16px; background: color-mix(in srgb, var(--orange) 7%, var(--panel)); }
+.pending-card__dot { width: 10px; height: 10px; flex: 0 0 auto; border-radius: 50%; background: var(--orange); box-shadow: 0 0 0 6px color-mix(in srgb, var(--orange) 12%, transparent); }.pending-card div { flex: 1; }.pending-card strong { font-size: 13px; }.pending-card p { margin: 2px 0 0; color: var(--muted); font-size: 11px; }.pending-card button { border: 0; background: none; color: var(--blue); cursor: pointer; font-weight: 750; }
+.sponsor-board { margin-top: 100px; padding: 38px; border: 1px solid var(--line); border-radius: 24px; background: var(--panel); }
+.sponsor-board > header { display: flex; align-items: flex-end; gap: 30px; padding-bottom: 24px; border-bottom: 1px solid var(--line); }.sponsor-board > header > div { flex: 1; }.sponsor-board h2 { margin: 7px 0 4px; font-size: 34px; }.sponsor-board header p { margin: 0; color: var(--muted); font-size: 13px; }.sponsor-board header > strong { color: var(--blue); font-size: 42px; line-height: 1; }.sponsor-board header > strong small { display: block; margin-top: 7px; color: var(--muted); font-size: 10px; text-align: right; }
+.sponsor-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; padding-top: 20px; }
+.sponsor-item { padding: 16px; display: flex; align-items: center; gap: 13px; border: 1px solid var(--line); border-radius: 15px; background: var(--bg); }.sponsor-avatar { width: 42px; height: 42px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 14px; background: var(--selected, rgba(79,140,255,.14)); color: var(--blue); font-weight: 900; }.sponsor-info { flex: 1; min-width: 0; display: grid; }.sponsor-info strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }.sponsor-info time { color: var(--muted); font-size: 10px; }.sponsor-amount { color: var(--blue); font-size: 15px; font-weight: 850; }.sponsor-empty { grid-column: 1 / -1; padding: 55px; color: var(--muted); text-align: center; }
+@media (max-width: 900px) { .support-grid { grid-template-columns: 1fr; }.support-steps { grid-template-columns: 1fr; }.support-step + .support-step { border-top: 1px solid var(--line); border-left: 0; }.sponsor-list { grid-template-columns: 1fr; } }
+@media (max-width: 760px) { .sponsor-page { padding-block: 52px; }.sponsor-nav { display: none; }.sponsor-hero { padding: 45px 0 64px; }.sponsor-hero h1 { font-size: 49px; }.support-panel { padding: 24px; }.support-code-grid { gap: 9px; }.support-code-grid figure { padding: 8px; }.sponsor-board { margin-top: 70px; padding: 24px; }.sponsor-board > header { align-items: flex-start; }.sponsor-board header > strong { font-size: 34px; }.sponsor-item { padding: 13px; }.site-footer { margin-top: 50px; } }

@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>影资管家 · 使用反馈控制台</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand-card">
+        <p class="eyebrow">DIT Feedback</p>
+        <h1>使用反馈控制台</h1>
+        <p class="muted">实时查看用户反馈，跟进处理进度，并直接回复图片、文件与文本。</p>
+      </div>
+
+      <div class="sidebar-toolbar">
+        <input id="conversation-search" class="search-input" placeholder="搜索昵称、联系方式、项目名">
+        <button id="refresh-conversations" class="ghost-button">刷新</button>
+      </div>
+
+      <div id="conversation-list" class="conversation-list"></div>
+    </aside>
+
+    <main class="main-panel">
+      <section class="panel-header">
+        <div>
+          <p class="eyebrow">Conversation</p>
+          <h2 id="conversation-title">选择左侧会话开始处理</h2>
+          <p id="conversation-subtitle" class="muted">可查看用户的历史消息、附件与当前处理状态。</p>
+        </div>
+
+        <div class="header-actions">
+          <div class="status-group">
+            <label for="conversation-status">处理状态</label>
+            <select id="conversation-status" disabled>
+              <option value="pending">待处理</option>
+              <option value="in_progress">跟进中</option>
+              <option value="resolved">已解决</option>
+            </select>
+          </div>
+          <button id="delete-conversation" class="danger-button" disabled>删除会话</button>
+        </div>
+      </section>
+
+      <section class="content-grid">
+        <div class="chat-card">
+          <div id="message-list" class="message-list">
+            <div class="empty-state">选择会话后，这里会显示完整聊天记录。</div>
+          </div>
+
+          <div class="composer">
+            <div id="reply-file-list" class="file-list"></div>
+            <textarea id="reply-text" placeholder="输入回复内容，支持结合附件一并发送。" rows="4"></textarea>
+            <div class="composer-actions">
+              <label class="file-button">
+                <input id="reply-files" type="file" multiple hidden>
+                添加附件
+              </label>
+              <button id="send-reply" class="primary-button" disabled>发送回复</button>
+            </div>
+          </div>
+        </div>
+
+        <aside class="detail-card">
+          <div class="detail-section">
+            <p class="eyebrow">User Info</p>
+            <h3>用户资料</h3>
+            <dl id="conversation-meta" class="detail-list">
+              <div><dt>昵称</dt><dd>未选择</dd></div>
+              <div><dt>联系方式</dt><dd>未选择</dd></div>
+              <div><dt>软件版本</dt><dd>未选择</dd></div>
+              <div><dt>系统信息</dt><dd>未选择</dd></div>
+              <div><dt>项目上下文</dt><dd>未选择</dd></div>
+            </dl>
+          </div>
+
+          <div class="detail-section">
+            <p class="eyebrow">Metrics</p>
+            <h3>会话指标</h3>
+            <div class="metrics-grid">
+              <div class="metric">
+                <span id="metric-unread-admin">0</span>
+                <small>待开发者阅读</small>
+              </div>
+              <div class="metric">
+                <span id="metric-unread-client">0</span>
+                <small>待用户查收</small>
+              </div>
+              <div class="metric">
+                <span id="metric-message-count">0</span>
+                <small>消息总数</small>
+              </div>
+              <div class="metric">
+                <span id="metric-updated-at">-</span>
+                <small>最近更新时间</small>
+              </div>
+            </div>
+          </div>
+
+          <div class="detail-section">
+            <p class="eyebrow">System</p>
+            <h3>连接状态</h3>
+            <p id="connection-status" class="muted">未登录</p>
+          </div>
+        </aside>
+      </section>
+    </main>
+  </div>
+
+  <div id="login-overlay" class="overlay">
+    <form id="login-form" class="login-card">
+      <p class="eyebrow">Admin Login</p>
+      <h2>开发者登录</h2>
+      <p class="muted">输入部署时配置的管理员账号与密码，进入反馈控制台。</p>
+
+      <label>
+        <span>账号</span>
+        <input id="login-username" required placeholder="admin">
+      </label>
+
+      <label>
+        <span>密码</span>
+        <input id="login-password" type="password" required placeholder="请输入管理员密码">
+      </label>
+
+      <p id="login-error" class="error-text"></p>
+      <button class="primary-button" type="submit">登录</button>
+    </form>
+  </div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

@@ -1,0 +1,507 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>影资管家 UI 原型 - 现代 DIT 工作台</title>
+<style>
+:root {
+  --bg:#0E1014;
+  --panel:#151922;
+  --panel2:#1B202B;
+  --card:#222837;
+  --line:#2E3647;
+  --text:#F4F7FB;
+  --muted:#9AA4B2;
+  --weak:#626D7D;
+  --blue:#4F8CFF;
+  --green:#22C55E;
+  --orange:#F59E0B;
+  --red:#EF4444;
+  --purple:#A855F7;
+}
+* { box-sizing: border-box; }
+body {
+  margin:0;
+  background:var(--bg);
+  color:var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+}
+.app {
+  width: 100vw;
+  height: 100vh;
+  display: grid;
+  grid-template-rows: 64px 1fr 48px;
+  overflow:hidden;
+}
+.top {
+  background:#10131A;
+  border-bottom:1px solid var(--line);
+  display:flex;
+  align-items:center;
+  padding:0 18px;
+  gap:18px;
+}
+.logo {
+  font-weight:800;
+  font-size:20px;
+  letter-spacing:.5px;
+}
+.project {
+  color:var(--muted);
+  background:var(--panel2);
+  padding:8px 12px;
+  border-radius:12px;
+}
+.tabs {
+  display:flex;
+  gap:4px;
+}
+.tab {
+  padding:9px 14px;
+  border-radius:999px;
+  color:var(--muted);
+  font-size:14px;
+}
+.tab.active {
+  color:white;
+  background:rgba(79,140,255,.22);
+  border:1px solid rgba(79,140,255,.35);
+}
+.search {
+  margin-left:auto;
+  width:340px;
+  background:var(--panel2);
+  border:1px solid var(--line);
+  border-radius:14px;
+  padding:10px 14px;
+  color:var(--muted);
+}
+.export {
+  background:var(--blue);
+  border:0;
+  color:white;
+  border-radius:12px;
+  padding:10px 16px;
+  font-weight:700;
+}
+.iconbtn {
+  background:var(--panel2);
+  border:1px solid var(--line);
+  color:var(--text);
+  border-radius:12px;
+  padding:9px 12px;
+}
+.main {
+  display:grid;
+  grid-template-columns:280px 1fr 360px;
+  min-height:0;
+}
+.left, .right {
+  background:var(--panel);
+  border-right:1px solid var(--line);
+  overflow:auto;
+}
+.right {
+  border-right:0;
+  border-left:1px solid var(--line);
+}
+.workspace {
+  background:linear-gradient(180deg,#11151D,#0E1014);
+  overflow:auto;
+  padding:20px;
+}
+.section-title {
+  font-size:15px;
+  color:var(--muted);
+  padding:18px 18px 10px;
+  display:flex;
+  justify-content:space-between;
+}
+.add {
+  color:var(--blue);
+}
+.source-card {
+  margin:10px 14px;
+  background:var(--panel2);
+  border:1px solid var(--line);
+  border-radius:16px;
+  padding:14px;
+}
+.source-card.active {
+  border-color:rgba(79,140,255,.7);
+  box-shadow:0 0 0 1px rgba(79,140,255,.25) inset;
+}
+.source-name {
+  font-weight:750;
+  margin-bottom:6px;
+}
+.source-meta {
+  color:var(--muted);
+  font-size:12px;
+  line-height:1.6;
+}
+.progress {
+  margin-top:10px;
+  height:6px;
+  background:#0f1218;
+  border-radius:99px;
+  overflow:hidden;
+}
+.progress > div {
+  height:100%;
+  background:linear-gradient(90deg,var(--blue),#7AA7FF);
+}
+.header {
+  display:flex;
+  justify-content:space-between;
+  align-items:flex-start;
+  margin-bottom:14px;
+}
+.breadcrumb {
+  color:var(--muted);
+  font-size:14px;
+}
+.title {
+  font-size:28px;
+  font-weight:800;
+  margin-top:6px;
+}
+.summary {
+  color:var(--muted);
+  margin-top:6px;
+  font-size:14px;
+}
+.chips { display:flex; flex-wrap:wrap; gap:8px; margin:14px 0; }
+.chip {
+  background:var(--panel2);
+  border:1px solid var(--line);
+  color:var(--muted);
+  padding:7px 10px;
+  border-radius:999px;
+  font-size:13px;
+}
+.chip.active {
+  background:rgba(79,140,255,.2);
+  color:white;
+  border-color:rgba(79,140,255,.45);
+}
+.viewbar {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  background:rgba(27,32,43,.7);
+  border:1px solid var(--line);
+  border-radius:18px;
+  padding:12px;
+  margin-bottom:18px;
+}
+.view-tabs { display:flex; gap:8px; }
+.view-tab {
+  padding:8px 12px;
+  border-radius:12px;
+  color:var(--muted);
+}
+.view-tab.active { background:var(--card); color:white; }
+.grid {
+  display:grid;
+  grid-template-columns: repeat(4, minmax(180px, 1fr));
+  gap:16px;
+}
+.asset {
+  background:var(--panel2);
+  border:1px solid var(--line);
+  border-radius:18px;
+  overflow:hidden;
+}
+.thumb {
+  height:145px;
+  background:
+    radial-gradient(circle at 30% 20%, rgba(79,140,255,.45), transparent 28%),
+    linear-gradient(135deg,#293245,#11151d 70%);
+  position:relative;
+}
+.thumb:after {
+  content:"";
+  position:absolute;
+  inset:12px;
+  border:1px solid rgba(255,255,255,.06);
+  border-radius:12px;
+}
+.asset-body { padding:12px; }
+.asset-name { font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.asset-meta { color:var(--muted); font-size:12px; line-height:1.7; margin-top:6px; }
+.badges { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
+.badge {
+  font-size:11px;
+  padding:4px 7px;
+  border-radius:999px;
+  background:#11161f;
+  color:var(--muted);
+  border:1px solid var(--line);
+}
+.badge.ok { color:#b5f5c8; border-color:rgba(34,197,94,.35); }
+.badge.warn { color:#ffd894; border-color:rgba(245,158,11,.35); }
+.inspector {
+  padding:18px;
+}
+.preview-box {
+  height:170px;
+  border-radius:18px;
+  background:
+    radial-gradient(circle at 60% 35%, rgba(79,140,255,.35), transparent 25%),
+    linear-gradient(135deg,#283144,#11151d 72%);
+  border:1px solid var(--line);
+  margin-bottom:14px;
+}
+.info-card {
+  background:var(--panel2);
+  border:1px solid var(--line);
+  border-radius:16px;
+  padding:14px;
+  margin-bottom:12px;
+}
+.info-card h3 {
+  margin:0 0 10px;
+  font-size:14px;
+}
+.kv {
+  display:grid;
+  grid-template-columns:90px 1fr;
+  gap:8px;
+  color:var(--muted);
+  font-size:13px;
+  line-height:1.4;
+}
+.kv b { color:var(--text); font-weight:500; }
+.actions {
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:8px;
+}
+.action {
+  background:var(--card);
+  border:1px solid var(--line);
+  color:var(--text);
+  border-radius:12px;
+  padding:10px;
+}
+.bottom {
+  background:#10131A;
+  border-top:1px solid var(--line);
+  display:flex;
+  align-items:center;
+  gap:10px;
+  padding:0 14px;
+}
+.task {
+  background:var(--panel2);
+  border:1px solid var(--line);
+  color:var(--muted);
+  border-radius:12px;
+  padding:8px 12px;
+  font-size:13px;
+}
+.task.active { color:white; border-color:rgba(79,140,255,.45); }
+.task.warn { color:#ffd894; border-color:rgba(245,158,11,.45); }
+@media (max-width: 1500px) {
+  .main { grid-template-columns:240px 1fr 64px; }
+  .right .inspector { display:none; }
+  .grid { grid-template-columns: repeat(3, minmax(180px, 1fr)); }
+  .search { width:260px; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <div class="logo">影资管家</div>
+    <div class="project">项目A ▾</div>
+    <nav class="tabs">
+      <div class="tab">仪表盘</div>
+      <div class="tab">导入</div>
+      <div class="tab active">素材库</div>
+      <div class="tab">检查/质检</div>
+      <div class="tab">报表</div>
+      <div class="tab">任务</div>
+    </nav>
+    <div class="search">搜索素材、路径、编码...</div>
+    <button class="export">导出</button>
+    <button class="iconbtn">设置</button>
+  </header>
+
+  <main class="main">
+    <aside class="left">
+      <div class="section-title"><span>素材源</span><span class="add">+ 添加</span></div>
+      <div class="source-card">
+        <div class="source-name">全部素材</div>
+        <div class="source-meta">286 个媒体 · 1.82 TB<br>3 个警告</div>
+      </div>
+      <div class="source-card active">
+        <div class="source-name">A001_CARD</div>
+        <div class="source-meta">182 个文件 · 860 GB<br>180 视频 · 2 警告</div>
+        <div class="progress"><div style="width:100%"></div></div>
+      </div>
+      <div class="source-card">
+        <div class="source-name">B001_CARD</div>
+        <div class="source-meta">68 个文件 · 620 GB<br>68 视频 · 正常</div>
+        <div class="progress"><div style="width:100%"></div></div>
+      </div>
+      <div class="source-card">
+        <div class="source-name">AUDIO</div>
+        <div class="source-meta">64 个文件 · 42 GB<br>64 音频 · 正常</div>
+      </div>
+      <div class="source-card">
+        <div class="source-name">DOCUMENTS</div>
+        <div class="source-meta">21 个文件 · 380 MB<br>仅文件树</div>
+      </div>
+    </aside>
+
+    <section class="workspace">
+      <div class="header">
+        <div>
+          <div class="breadcrumb">项目A / Footage / Cam_A</div>
+          <div class="title">素材库</div>
+          <div class="summary">182 个素材 · 860 GB · 总时长 04:25:32 · 2 个警告</div>
+        </div>
+      </div>
+
+      <div class="chips">
+        <div class="chip active">全部</div>
+        <div class="chip">视频</div>
+        <div class="chip">音频</div>
+        <div class="chip">4K</div>
+        <div class="chip">ProRes</div>
+        <div class="chip">有警告</div>
+        <div class="chip">待复核</div>
+      </div>
+
+      <div class="viewbar">
+        <div class="view-tabs">
+          <div class="view-tab active">大图卡片</div>
+          <div class="view-tab">缩略图联系表</div>
+          <div class="view-tab">技术表格</div>
+          <div class="view-tab">卷/卡分组</div>
+        </div>
+        <div class="chip">排序：文件名 ↑</div>
+      </div>
+
+      <div class="grid">
+        <div class="asset">
+          <div class="thumb"></div>
+          <div class="asset-body">
+            <div class="asset-name">A001_C001.mov</div>
+            <div class="asset-meta">00:03:25 · 3840×2160<br>23.976fps · ProRes 422 HQ</div>
+            <div class="badges"><span class="badge ok">正常</span><span class="badge">4K</span><span class="badge">Cam_A</span></div>
+          </div>
+        </div>
+        <div class="asset">
+          <div class="thumb"></div>
+          <div class="asset-body">
+            <div class="asset-name">A001_C002.mov</div>
+            <div class="asset-meta">00:02:11 · 3840×2160<br>23.976fps · ProRes 422 HQ</div>
+            <div class="badges"><span class="badge ok">正常</span><span class="badge">4K</span><span class="badge">Cam_A</span></div>
+          </div>
+        </div>
+        <div class="asset">
+          <div class="thumb"></div>
+          <div class="asset-body">
+            <div class="asset-name">A001_C003.mov</div>
+            <div class="asset-meta">00:04:08 · 3840×2160<br>23.976fps · ProRes 422 HQ</div>
+            <div class="badges"><span class="badge warn">警告</span><span class="badge">4K</span><span class="badge">Cam_A</span></div>
+          </div>
+        </div>
+        <div class="asset">
+          <div class="thumb"></div>
+          <div class="asset-body">
+            <div class="asset-name">A001_C004.mov</div>
+            <div class="asset-meta">00:01:42 · 3840×2160<br>23.976fps · ProRes 422 HQ</div>
+            <div class="badges"><span class="badge ok">正常</span><span class="badge">4K</span><span class="badge">Cam_A</span></div>
+          </div>
+        </div>
+        <div class="asset">
+          <div class="thumb"></div>
+          <div class="asset-body">
+            <div class="asset-name">A001_C005.mov</div>
+            <div class="asset-meta">00:02:44 · 3840×2160<br>23.976fps · ProRes 422 HQ</div>
+            <div class="badges"><span class="badge ok">正常</span><span class="badge">4K</span><span class="badge">Cam_A</span></div>
+          </div>
+        </div>
+        <div class="asset">
+          <div class="thumb"></div>
+          <div class="asset-body">
+            <div class="asset-name">A001_C006.mov</div>
+            <div class="asset-meta">00:05:12 · 3840×2160<br>23.976fps · ProRes 422 HQ</div>
+            <div class="badges"><span class="badge ok">正常</span><span class="badge">4K</span><span class="badge">Cam_A</span></div>
+          </div>
+        </div>
+        <div class="asset">
+          <div class="thumb"></div>
+          <div class="asset-body">
+            <div class="asset-name">A001_C007.mov</div>
+            <div class="asset-meta">00:00:58 · 3840×2160<br>23.976fps · ProRes 422 HQ</div>
+            <div class="badges"><span class="badge ok">正常</span><span class="badge">4K</span><span class="badge">Cam_A</span></div>
+          </div>
+        </div>
+        <div class="asset">
+          <div class="thumb"></div>
+          <div class="asset-body">
+            <div class="asset-name">A001_C008.mov</div>
+            <div class="asset-meta">00:03:31 · 3840×2160<br>23.976fps · ProRes 422 HQ</div>
+            <div class="badges"><span class="badge warn">待复核</span><span class="badge">4K</span><span class="badge">Cam_A</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <aside class="right">
+      <div class="inspector">
+        <div class="section-title" style="padding:0 0 12px;">检查器</div>
+        <div class="preview-box"></div>
+        <div class="info-card">
+          <h3>已选素材</h3>
+          <div class="kv">
+            <span>文件名</span><b>A001_C001.mov</b>
+            <span>时长</span><b>00:03:25</b>
+            <span>分辨率</span><b>3840×2160</b>
+            <span>帧率</span><b>23.976 fps</b>
+            <span>状态</span><b>正常</b>
+          </div>
+        </div>
+        <div class="info-card">
+          <h3>视频流</h3>
+          <div class="kv">
+            <span>编码</span><b>ProRes 422 HQ</b>
+            <span>色彩</span><b>Rec.709</b>
+            <span>位深</span><b>10 bit</b>
+          </div>
+        </div>
+        <div class="info-card">
+          <h3>音频流</h3>
+          <div class="kv">
+            <span>编码</span><b>PCM</b>
+            <span>采样率</span><b>48 kHz</b>
+            <span>声道</span><b>2 ch</b>
+          </div>
+        </div>
+        <div class="actions">
+          <button class="action">打开位置</button>
+          <button class="action">复制路径</button>
+          <button class="action">重取元数据</button>
+          <button class="action">重生成缩略图</button>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="bottom">
+    <div class="task active">扫描 A002 68%</div>
+    <div class="task active">元数据 42%</div>
+    <div class="task active">缩略图 81%</div>
+    <div class="task">哈希空闲</div>
+    <div class="task">导出空闲</div>
+    <div class="task warn">3 个警告</div>
+  </footer>
+</div>
+</body>
+</html>

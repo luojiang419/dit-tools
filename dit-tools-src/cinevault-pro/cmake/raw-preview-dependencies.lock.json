@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "profileVersion": "raw-preview-v1",
+  "policy": {
+    "defaultProvider": "libRaw",
+    "extendedSdkPolicy": "license-gated",
+    "requireRedistributable": true
+  },
+  "dependencies": {
+    "libRaw": {
+      "name": "LibRaw",
+      "version": "0.22.2",
+      "licenseExpression": "CDDL-1.0 OR LGPL-2.1-only",
+      "selectedLicense": "CDDL-1.0",
+      "selectedLicenseFile": "LICENSE.CDDL",
+      "redistributable": true,
+      "defaultBundle": true
+    }
+  },
+  "extendedSdks": [
+    {
+      "id": "gopro-gpr-sdk",
+      "name": "GoPro GPR SDK",
+      "version": "446c736",
+      "sourceRevision": "446c736a38fb14f51343605c0780d347dc602f89",
+      "licenseExpression": "MIT OR Apache-2.0",
+      "selectedLicense": "MIT",
+      "selectedLicenseFile": "LICENSE-MIT",
+      "redistributable": true,
+      "defaultBundle": true,
+      "licenseGateApproved": true
+    }
+  ],
+  "artifacts": [
+    {
+      "id": "libraw-windows-x64-msvc2022",
+      "url": "https://www.libraw.org/data/LibRaw-0.22.2-Win64.zip",
+      "installPath": "archives/LibRaw-0.22.2-Win64.zip",
+      "size": 3495702,
+      "sha256": "AC64FA12BB00A7581332D4C6AB918C0533FB3F119D6B668D47A6875410DCA948"
+    },
+    {
+      "id": "gopro-gpr-sdk-446c736-source",
+      "url": "https://github.com/gopro/gpr/archive/446c736a38fb14f51343605c0780d347dc602f89.zip",
+      "installPath": "archives/gpr-sdk-446c736a38fb14f51343605c0780d347dc602f89.zip",
+      "size": 25283787,
+      "sha256": "61ED13AB955C37CAD0AFD9B218281B241B00C541A945722F2E6979BDED905658"
+    }
+  ]
+}

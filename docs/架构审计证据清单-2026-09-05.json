@@ -1,0 +1,287 @@
+{
+  "created_at": "2026-09-05T09:51:03.363219+00:00",
+  "base_commit": "8114b71da9200c97803d49553152a3f31fa178f6",
+  "branch": "audit/architecture-performance-20260905",
+  "working_version": "0.1.203",
+  "important": "Audited product sources include pre-existing uncommitted changes; audit commits contain only reports and diagnostic tools.",
+  "product_sources": [
+    {
+      "path": "dit-tools-src/cinevault-pro/src/app/AppContext.cpp",
+      "bytes": 28351,
+      "sha256": "6922b669e40089e50953114a1409ba16c33a839ce6b850aa8a2c670a678db139",
+      "normalized_utf8_lf_sha256": "5d72ee46259688c396bbb759a126e29343b728f3334a4df9837a11163eeb31df"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/src/application/IndexingWorkCoordinator.cpp",
+      "bytes": 6089,
+      "sha256": "81afdadbbb20568d8dc263ec73c996d7d3432379b1f6497844abba23c2c60c59",
+      "normalized_utf8_lf_sha256": "81afdadbbb20568d8dc263ec73c996d7d3432379b1f6497844abba23c2c60c59"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/src/application/VideoAnalysisService.cpp",
+      "bytes": 152718,
+      "sha256": "2779ad9f1ff396b37679d6167d3bd5f98ce61ab7312e97863fae60ee7b39e637",
+      "normalized_utf8_lf_sha256": "0cf8d1ba7a4e7742f12d8087abf8a98fe3efcb4a4cc1aa067014c66132a8d84b"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/src/application/MaterialCatalogSyncService.cpp",
+      "bytes": 87564,
+      "sha256": "0c76fd4bf0340a43c2d8457be37cf9c081c040f97778264f79dbfeb16e5b3bbb",
+      "normalized_utf8_lf_sha256": "0f77497ef200916dac67d0039e9e2d16ed8b558e49caa52de6c1c7f8f0a6b3bb"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/src/application/MaterialCenterQueryService.cpp",
+      "bytes": 55170,
+      "sha256": "5973b8534de4b8e3590d2c8273c7f9723e828f58345baa8079b34f10b3d27d81",
+      "normalized_utf8_lf_sha256": "dc4eeb9741a8925f990211f7df4ef1c08ebc12146024783cef135c5286bbb700"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/src/application/MediaTaskService.cpp",
+      "bytes": 71156,
+      "sha256": "69242bceba5f4815ad0b90a2f1529a1cfdb13b675e70316fe0dd6b762e7283d9",
+      "normalized_utf8_lf_sha256": "bacf1f233ad1549984d45e7017f32924868cd6d34896f84e290cc44f4318702b"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/src/application/MetadataExtractionService.cpp",
+      "bytes": 27984,
+      "sha256": "8bfb96c401466bb4e1ac61230453ebec6810ab61f492abd9a7424cfdc0fc8aba",
+      "normalized_utf8_lf_sha256": "97c0eda057c148635e79a84cd794cebfa964dbf45c994e3fae02bc89d0e04ff4"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/src/application/SearchDocumentSyncService.cpp",
+      "bytes": 43150,
+      "sha256": "c3f35ec57a21ec2ddc3daced5e7d6e94d11e07c739e1c82f8c91d9922573e3f1",
+      "normalized_utf8_lf_sha256": "765b433cf6aefa8e5ab7e08021b1e8bab852e4b9378dd7af339767c9d4308a34"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/src/application/SourceChangeMonitor.cpp",
+      "bytes": 16262,
+      "sha256": "e2117db82039250c861d8e02bbb19b55c92c9942f76ef84c91b3c379041ddfc5",
+      "normalized_utf8_lf_sha256": "6fd5b780777e29c35b53ddd8e153b92602902006155510b646d615de5d9ef6b2"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/src/application/SourceChangeMonitor.h",
+      "bytes": 1939,
+      "sha256": "a69161f5eca60d256304ac4075e3d5985b3cb26ea92256369e17d5aeddb2b976",
+      "normalized_utf8_lf_sha256": "7db0bb71fb821ed7d31f596662c5de8112ee1efe798475707dcaba4208209ab7"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/src/application/ImportService.cpp",
+      "bytes": 17961,
+      "sha256": "77c9eb1598498c4c25ef53ce018e44f901029f21ad8bbc9cd54e14050236077a",
+      "normalized_utf8_lf_sha256": "0eb54a69f900502a98967096b7ed8b82c90676ba8f55120c9fab457da308cd41"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/src/application/BackgroundMaintenanceCoordinator.cpp",
+      "bytes": 15001,
+      "sha256": "aedf6996aae692d773288f3145183b351392a48046300ea768aca42827e64a49",
+      "normalized_utf8_lf_sha256": "e633420013736b23b76b06e4d737c0aee5ef3e9b9c468a65f3e9f9c9e13a45eb"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/src/application/websearch/WebSearchService.cpp",
+      "bytes": 23313,
+      "sha256": "c513fc5831e0be45f8903806d28bb9f86b029d23d516305f0bbbd8249da9b9da",
+      "normalized_utf8_lf_sha256": "c513fc5831e0be45f8903806d28bb9f86b029d23d516305f0bbbd8249da9b9da"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/src/core/scan/ScanEngine.cpp",
+      "bytes": 95340,
+      "sha256": "bcc5369deac193fc9517aeb28289fc9517120e5679defdded9db7c6a1662bb37",
+      "normalized_utf8_lf_sha256": "6948b0e01e1d9216003f23efae79a966c03127d9bb842350130bd9e41626566c"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/src/core/scan/ScanPathPolicy.cpp",
+      "bytes": 6472,
+      "sha256": "c02aaf4ad683f659b32bc18bb562e3221f60561d1f7b3a56df641245b6876a12",
+      "normalized_utf8_lf_sha256": "c02aaf4ad683f659b32bc18bb562e3221f60561d1f7b3a56df641245b6876a12"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/src/core/jobs/JobEngine.cpp",
+      "bytes": 24956,
+      "sha256": "72604d4953726328ca64af0925b55a168d5f76e2f5597108f1db8a3bf67ec2eb",
+      "normalized_utf8_lf_sha256": "e1369336ccc2564665a8a95ac6b5eef00c3349658b3b0622877b48a56f6646a0"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/src/core/search/SearchEngine.cpp",
+      "bytes": 66727,
+      "sha256": "093c20fc9b9ff5539b2c6b23dd032f5bfff9ee0a95ccfa4ac3a56735d5982c40",
+      "normalized_utf8_lf_sha256": "7448489fca0498fa184c844632abfdf9d2fc2e31a87fe8678f365175cb11a525"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/src/core/search/SemanticSearchIndexService.cpp",
+      "bytes": 35631,
+      "sha256": "e2d4a64691bbce7e56174524387498e41ad53383f865d654ed820c391166373b",
+      "normalized_utf8_lf_sha256": "e2d4a64691bbce7e56174524387498e41ad53383f865d654ed820c391166373b"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/src/core/search/SemanticVectorIndex.cpp",
+      "bytes": 10547,
+      "sha256": "be07ddf5b39c945c818a8793b342b813a242f72f1b310ee355276e50037ff4a4",
+      "normalized_utf8_lf_sha256": "be07ddf5b39c945c818a8793b342b813a242f72f1b310ee355276e50037ff4a4"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/src/domain/Entities.h",
+      "bytes": 9644,
+      "sha256": "de41ae1736e6df7ca91965731a57dcb0f1b9a6b3b44c73b44112097d5e286d01",
+      "normalized_utf8_lf_sha256": "66c3757ce17c1cb6720982ab6eb3979e15621041546c5659640d8ce18602e37a"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/src/domain/Enums.h",
+      "bytes": 1941,
+      "sha256": "96938d15b43a07a02dc506ae38f2dbedeeb5e0a4edbcfff4c2d78b0aa4778e5a",
+      "normalized_utf8_lf_sha256": "96938d15b43a07a02dc506ae38f2dbedeeb5e0a4edbcfff4c2d78b0aa4778e5a"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/src/infrastructure/db/DatabaseManager.cpp",
+      "bytes": 70268,
+      "sha256": "a2e6db40c50de581df2af55c6f51ab21f1a44f8d1237bac41db1329c7df9157b",
+      "normalized_utf8_lf_sha256": "d499dd80921935b92f80d9a6a63edf3a6e16ffec70c6eac96723dee6f3b27ebc"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/src/infrastructure/db/DatabaseMigration.cpp",
+      "bytes": 14374,
+      "sha256": "cd70c7798703e3d5a513c520c9df05960ca553657350f6960f1fdf148d7de8f8",
+      "normalized_utf8_lf_sha256": "dec1aa73279efabf9dda405aad50708f34a01086a4a2d7d2a48d7d3d3a5b2d47"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/src/infrastructure/db/GlobalDatabaseManager.cpp",
+      "bytes": 64733,
+      "sha256": "d4902de9316c684dccd3c89290f7004bc4f0a4a49dc3a78d8bd835808ac27f5a",
+      "normalized_utf8_lf_sha256": "f9c35b232545c4e434bc27d9516fe17e0605815392146bfdfabf493208f181f7"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/src/infrastructure/ffmpeg/FFmpegAdapter.cpp",
+      "bytes": 21002,
+      "sha256": "9b1af4860c3e3e511ff72891c0e52b4b94a1005176c1b81b7f9076b423a23330",
+      "normalized_utf8_lf_sha256": "9b1af4860c3e3e511ff72891c0e52b4b94a1005176c1b81b7f9076b423a23330"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/src/infrastructure/ffmpeg/FFmpegAdapter.h",
+      "bytes": 536,
+      "sha256": "d910ac802d99908dce4a3d4e21ae8aa276b3fcc5f14a2ba21feccc3cae0d3d57",
+      "normalized_utf8_lf_sha256": "d910ac802d99908dce4a3d4e21ae8aa276b3fcc5f14a2ba21feccc3cae0d3d57"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/src/shared/VisualAnalysisMetadata.cpp",
+      "bytes": 7633,
+      "sha256": "b996ea42610a65703ee5c42cb0190584e82881f200d4edee306663d1f96591c1",
+      "normalized_utf8_lf_sha256": "b996ea42610a65703ee5c42cb0190584e82881f200d4edee306663d1f96591c1"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/src/ui/viewmodels/MaterialCenterViewModel.cpp",
+      "bytes": 79835,
+      "sha256": "a9c074ef7a739703f662f90c445e123e35a4dbaeec4508aab719008d420a6cb6",
+      "normalized_utf8_lf_sha256": "b054d4354765e9e893a256fc3e46738581147e8f2c029cdceac0391199120102"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/src/ui/viewmodels/LibraryWorkspaceViewModel.cpp",
+      "bytes": 17133,
+      "sha256": "215b33a411df40a118ff17efc72e9d61ff05c53f7331a787ea2bca6271c867c6",
+      "normalized_utf8_lf_sha256": "8e7f62bfd7505cc0050131e2d543113ce2fcd58cf2a9a2e8cd83fe786f448f44"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/src/ui/qml/workspaces/MaterialCenterWorkspace.qml",
+      "bytes": 101578,
+      "sha256": "3b59445ae1210719f2e243447ac4d7814b9c5ced581959e7ef9d610a5cf9e4d2"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/tests/unit/FFmpegAdapterFrameExtractionTest.cpp",
+      "bytes": 4993,
+      "sha256": "aae106fe0d3909ad012cf83d11dc5aee15199399e8a517373faa4e3dea389dd4",
+      "normalized_utf8_lf_sha256": "aae106fe0d3909ad012cf83d11dc5aee15199399e8a517373faa4e3dea389dd4"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/tests/unit/MaterialCenterUiContractTest.cpp",
+      "bytes": 79796,
+      "sha256": "b1fa617898ad87b1a30370a5b8009dfe0478ef00a7e82652cc060f3ef37057ff",
+      "normalized_utf8_lf_sha256": "7b81a8fbf772de16cb9d1671e93e030bd0761a04c6a707d6081646351319ad35"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/tests/stress/LargeCatalogStressTest.cpp",
+      "bytes": 4796,
+      "sha256": "d23dc52be5073383fef1d44c391a52995c6d9caf819f684e7d50240ba48f0058",
+      "normalized_utf8_lf_sha256": "d23dc52be5073383fef1d44c391a52995c6d9caf819f684e7d50240ba48f0058"
+    }
+  ],
+  "evidence": [
+    {
+      "path": "docs/架构审计SQL实验-2026-09-05.json",
+      "bytes": 6635,
+      "sha256": "e8808f82941b9678278c4036ef900c7a689c340d6ae95ea601f19866c03aa91e",
+      "normalized_utf8_lf_sha256": "f51c54bec787b1cd14fa5d66c73efac3b1af311cc8026f915f2934719e0c4cb0"
+    },
+    {
+      "path": "docs/架构审计实验-2026-09-05.json",
+      "bytes": 4154,
+      "sha256": "8beabddbf49847ea4e956f5a70be927d7a163d191189d7aadc0cd7177350f0ec",
+      "normalized_utf8_lf_sha256": "8beabddbf49847ea4e956f5a70be927d7a163d191189d7aadc0cd7177350f0ec"
+    },
+    {
+      "path": "docs/架构审计现有抽帧测试-2026-09-05.txt",
+      "bytes": 562,
+      "sha256": "dbbc9ea177bc0871bcead8595b5c0096bff8982717969f1fdd808e6b192946c5",
+      "normalized_utf8_lf_sha256": "9edac2f2e27076129658bc94ecccfba389dccdc70727c3a041fc86c74990c7c3"
+    },
+    {
+      "path": "docs/架构审计目录监听实验-2026-09-05.json",
+      "bytes": 464,
+      "sha256": "a7680d6a1bc7d7e2c985725a1dd9a44aa180e10316be90df3524358d4cf916af",
+      "normalized_utf8_lf_sha256": "a7680d6a1bc7d7e2c985725a1dd9a44aa180e10316be90df3524358d4cf916af"
+    }
+  ],
+  "diagnostic_sources": [
+    {
+      "path": "tool/architecture_audit_20260905/CMakeLists.txt",
+      "bytes": 1898,
+      "sha256": "32e133bbcbc935e78fd329814fb80d6f86f0079b8aa8591263c36d2fe8d0c19b",
+      "normalized_utf8_lf_sha256": "32e133bbcbc935e78fd329814fb80d6f86f0079b8aa8591263c36d2fe8d0c19b"
+    },
+    {
+      "path": "tool/architecture_audit_20260905/collect_evidence.py",
+      "bytes": 3737,
+      "sha256": "2dcae6c0d4188627bfefec1048cf62339ad0a135583e77c802c84e93a21c5217",
+      "normalized_utf8_lf_sha256": "2dcae6c0d4188627bfefec1048cf62339ad0a135583e77c802c84e93a21c5217"
+    },
+    {
+      "path": "tool/architecture_audit_20260905/frame_and_lock_probe.cpp",
+      "bytes": 7856,
+      "sha256": "52df1c409b37feb7298b954f1da80701009e92e75ae6ec1c0c7e527e87c121bb",
+      "normalized_utf8_lf_sha256": "52df1c409b37feb7298b954f1da80701009e92e75ae6ec1c0c7e527e87c121bb"
+    },
+    {
+      "path": "tool/architecture_audit_20260905/README.md",
+      "bytes": 4992,
+      "sha256": "563c4b533300c08fa2a4936e67bf8348d1d5d2358d7f74f6ec0158623e63f4d4",
+      "normalized_utf8_lf_sha256": "563c4b533300c08fa2a4936e67bf8348d1d5d2358d7f74f6ec0158623e63f4d4"
+    },
+    {
+      "path": "tool/architecture_audit_20260905/source_monitor_probe.cpp",
+      "bytes": 1455,
+      "sha256": "30205065bc342521b240235557fc374083dfe38424cafe4a4614668e7b2cdfce",
+      "normalized_utf8_lf_sha256": "30205065bc342521b240235557fc374083dfe38424cafe4a4614668e7b2cdfce"
+    },
+    {
+      "path": "tool/architecture_audit_20260905/sql_scale_probe.py",
+      "bytes": 4492,
+      "sha256": "5dbc83e3992dd3a0956fbb45d7dbd97d0f56706d0bc49d80f1fbdfa41df620e5",
+      "normalized_utf8_lf_sha256": "5dbc83e3992dd3a0956fbb45d7dbd97d0f56706d0bc49d80f1fbdfa41df620e5"
+    }
+  ],
+  "diagnostic_binaries": [
+    {
+      "path": "dit-tools-src/cinevault-pro/build/architecture-audit-20260905/ArchitectureAudit.exe",
+      "bytes": 80896,
+      "sha256": "9dad5fbce595d69b59b372647bed28cfca5c68677ba7419af3428202750150ad"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/build/architecture-audit-20260905/CurrentFrameExtractionTest.exe",
+      "bytes": 73728,
+      "sha256": "f98fa4ec21b9ca3d367dee90262242b8284cb45037049dc64eac5ccce915baed"
+    },
+    {
+      "path": "dit-tools-src/cinevault-pro/build/architecture-audit-20260905/CurrentSourceMonitorProbe.exe",
+      "bytes": 52736,
+      "sha256": "65b929ef3e3ff4b19d8b0c9d895421e6de2db57532968d35414c7e9e9847540d"
+    }
+  ]
+}

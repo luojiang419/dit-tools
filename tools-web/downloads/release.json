@@ -1,0 +1,12 @@
+{
+  "version": "v0.1.150",
+  "publishedAt": "2026-07-14T14:27:03Z",
+  "platform": "Windows 10/11",
+  "architecture": "x86_64",
+  "fileName": "CineVault-Setup-v0.1.150.exe",
+  "sizeBytes": 187168044,
+  "sha256": "0f1c7a5174a3911fa62284a1cda86d16bd7ecad89941befe252310b30f3f88fe",
+  "serverUrl": "downloads/CineVault-Setup-v0.1.150.exe",
+  "fallbackUrl": "https://github.com/luojiang419/dit-tools/releases/download/v0.1.150/CineVault-Setup-v0.1.150.exe",
+  "releaseNotesUrl": "https://github.com/luojiang419/dit-tools/releases/tag/v0.1.150"
+}
